@@ -37,7 +37,33 @@ def test_timers_skip_missed_ticks_instead_of_bursting():
 
 
 def test_quit_stops_run_from_anywhere():
-    menubar._quit.clear()
-    macos.menubar.quit()
-    assert menubar._quit.is_set()
-    menubar._quit.clear()
+    import threading
+
+    running = threading.Event()
+    menubar._running.append(running)  # as run() does when it starts
+    try:
+        macos.menubar.quit()
+        assert running.is_set()
+    finally:
+        menubar._running.remove(running)
+
+
+def test_a_quit_while_nothing_runs_does_not_stop_the_next_run(monkeypatch):
+    macos.menubar.quit()  # nothing runs: nothing to stop
+
+    pumped = []
+    monkeypatch.setattr(menubar, "_require_main_thread", lambda what: None)
+    monkeypatch.setattr(menubar, "_application", lambda: 1)
+    monkeypatch.setattr(menubar, "_pump", lambda app, wait: pumped.append(wait))
+    menubar.run(timeout=0.05)
+    assert pumped  # it ran until its timeout
+    assert menubar._running == []
+
+    def quit_from_an_action(app, wait):
+        pumped.append(wait)
+        macos.menubar.quit()
+
+    pumped.clear()
+    monkeypatch.setattr(menubar, "_pump", quit_from_an_action)
+    menubar.run(timeout=5)
+    assert len(pumped) == 1 and menubar._running == []

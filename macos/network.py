@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import _cf, _objc
+from . import _cf, _libc, _objc
+from ._libc import IfAddrs as _IfAddrs
 from ._system import framework, require_macos, run as _run
 from .errors import CommandError, MacOSError, NotSupportedError
 
@@ -179,7 +180,7 @@ def _speed(result: Dict[str, Any]) -> SpeedTest:
     )
 
 
-def speed_test(*, sequential: bool = False) -> SpeedTest:
+def speed_test(*, sequential: bool = False, timeout: float = 180.0) -> SpeedTest:
     """
     Measure the internet connection's download and upload speed, and its latency, against Apple's servers.
 
@@ -192,11 +193,14 @@ def speed_test(*, sequential: bool = False) -> SpeedTest:
 
     It takes 15 to 60 seconds and moves a few hundred megabytes: mind a
     metered connection. ``sequential=True`` measures download and upload
-    one after the other instead of together, which reads each more exactly.
-    Goes through ``networkQuality``, which comes with macOS.
+    one after the other instead of together, which reads each more exactly
+    (and takes about twice as long). Goes through ``networkQuality``, which
+    comes with macOS; past ``timeout`` seconds (a server that stopped
+    answering) it's stopped and :class:`~macos.errors.CommandTimeoutError`
+    raised.
     """
     require_macos()
-    output = _run(["networkQuality", "-c", *(["-s"] if sequential else [])])
+    output = _run(["networkQuality", "-c", *(["-s"] if sequential else [])], timeout=timeout)
     try:
         return _speed(json.loads(output))
     except ValueError:
@@ -313,25 +317,6 @@ _AF_INET, _AF_INET6, _AF_LINK = 2, 30, 18
 _IFF_UP, _IFF_LOOPBACK = 0x1, 0x8
 
 
-class _SockAddr(ctypes.Structure):
-    _fields_ = [("len", ctypes.c_uint8), ("family", ctypes.c_uint8), ("data", ctypes.c_char * 14)]
-
-
-class _IfAddrs(ctypes.Structure):
-    pass
-
-
-_IfAddrs._fields_ = [
-    ("next", ctypes.POINTER(_IfAddrs)),
-    ("name", ctypes.c_char_p),
-    ("flags", ctypes.c_uint),
-    ("address", ctypes.POINTER(_SockAddr)),
-    ("netmask", ctypes.c_void_p),
-    ("destination", ctypes.c_void_p),
-    ("data", ctypes.c_void_p),
-]
-
-
 @dataclass(frozen=True)
 class NetworkInterface:
     """A network interface: Wi-Fi, Ethernet, a VPN tunnel..."""
@@ -385,11 +370,7 @@ def interfaces() -> List[NetworkInterface]:
     through, see :func:`interface` and :func:`ip`.
     """
     require_macos()
-    libc = ctypes.CDLL(None)
-    libc.getifaddrs.argtypes = (ctypes.POINTER(ctypes.POINTER(_IfAddrs)),)
-    libc.getifaddrs.restype = ctypes.c_int
-    libc.freeifaddrs.argtypes = (ctypes.POINTER(_IfAddrs),)
-    libc.freeifaddrs.restype = None
+    libc = _libc.lib()
     head = ctypes.POINTER(_IfAddrs)()
     if libc.getifaddrs(ctypes.byref(head)) != 0:
         raise MacOSError("could not list the network interfaces")
@@ -559,6 +540,9 @@ def _vpns(output: str) -> List[VPN]:
     return found
 
 
+_SCUTIL_TIMEOUT = 30.0  # seconds: scutil answers at once, unless the network configuration daemon is stuck
+
+
 def vpns() -> List[VPN]:
     """
     The VPNs set up in System Settings, with whether each is connected.
@@ -572,7 +556,7 @@ def vpns() -> List[VPN]:
     line sees.
     """
     require_macos()
-    return _vpns(_run(["scutil", "--nc", "list"]))
+    return _vpns(_run(["scutil", "--nc", "list"], timeout=_SCUTIL_TIMEOUT))
 
 
 def _vpn(name: str) -> VPN:
@@ -608,12 +592,13 @@ def connect_vpn(name: str, *, wait: bool = True, timeout: float = 30.0) -> None:
     Waits until it's connected (up to ``timeout`` seconds), and raises
     :class:`~macos.MacOSError` if it fails, unless ``wait=False``. It uses the
     password saved with it: a VPN that asks each time may show its prompt.
-    Nothing to do when it's already connected.
+    Nothing to do when it's already connected. A ``scutil`` that doesn't
+    answer within 30 seconds raises :class:`~macos.errors.CommandTimeoutError`.
     """
     vpn = _vpn(name)
     if vpn.status == "connected":
         return
-    _run(["scutil", "--nc", "start", vpn.id])
+    _run(["scutil", "--nc", "start", vpn.id], timeout=_SCUTIL_TIMEOUT)  # it only asks: the wait is below
     if wait:
         _wait_vpn(vpn, "connected", timeout)
 
@@ -623,7 +608,7 @@ def disconnect_vpn(name: str, *, wait: bool = True, timeout: float = 30.0) -> No
     vpn = _vpn(name)
     if vpn.status == "disconnected":
         return
-    _run(["scutil", "--nc", "stop", vpn.id])
+    _run(["scutil", "--nc", "stop", vpn.id], timeout=_SCUTIL_TIMEOUT)
     if wait:
         _wait_vpn(vpn, "disconnected", timeout)
 
@@ -658,16 +643,7 @@ class Bandwidth:
 
 def _interface_counters() -> Dict[str, Tuple[int, int, int]]:
     """Each interface's flags, and the bytes it received and sent since the Mac started."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.sysctl.argtypes = (
-        ctypes.POINTER(ctypes.c_int),
-        ctypes.c_uint,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-    )
-    libc.sysctl.restype = ctypes.c_int
+    libc = _libc.lib()
     found = {}
     for index, name in socket.if_nameindex():
         mib = (ctypes.c_int * 6)(*_IFMIB_IFDATA, index, _IFDATA_GENERAL)

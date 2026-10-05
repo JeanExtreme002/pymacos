@@ -49,6 +49,22 @@ class CommandError(MacOSError):
         return message
 
 
+class CommandTimeoutError(MacOSError, TimeoutError):
+    """A system command the package relies on was still running when its time ran out, and was stopped."""
+
+    def __init__(self, args: Sequence[str], timeout: float) -> None:
+        super().__init__(list(args), timeout)  # picklable, see CommandError
+        self.cmd = list(args)
+        self.timeout = timeout
+
+    def __str__(self) -> str:
+        return "{!r} didn't finish within {:g} seconds".format(self.cmd[0], self.timeout)
+
+
+class PromptTimeoutError(MacOSError, TimeoutError):
+    """The user left a permission prompt (camera, microphone) unanswered until the time ran out."""
+
+
 class ShortcutNotFoundError(CommandError, LookupError):
     """No shortcut in the Shortcuts app has the given name or identifier."""
 

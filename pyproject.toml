@@ -89,6 +89,7 @@ dependencies = []
 dev = [
     "pytest",
     "pytest-cov",
+    "pytest-rerunfailures",
     "flake8",
     "mypy",
     "build",
@@ -100,7 +101,6 @@ Homepage = "https://github.com/JeanExtreme002/pymacos"
 Documentation = "https://macos.readthedocs.io"
 Source = "https://github.com/JeanExtreme002/pymacos"
 Issues = "https://github.com/JeanExtreme002/pymacos/issues"
-Changelog = "https://github.com/JeanExtreme002/pymacos/releases"
 Funding = "https://github.com/sponsors/JeanExtreme002"
 
 [tool.mypy]

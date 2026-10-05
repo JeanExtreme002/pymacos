@@ -16,6 +16,7 @@ import plistlib
 from typing import Any, Dict, Iterator, List, Optional
 
 from ._system import framework
+from .errors import MacOSError
 
 CFTypeRef = ctypes.c_void_p
 CFIndex = ctypes.c_long
@@ -74,6 +75,11 @@ def lib() -> ctypes.CDLL:
     cf.CFPreferencesCopyAppValue.argtypes = (CFTypeRef, CFTypeRef)
     cf.CFPreferencesCopyAppValue.restype = CFTypeRef
 
+    cf.CFURLCopyFileSystemPath.argtypes = (CFTypeRef, ctypes.c_long)
+    cf.CFURLCopyFileSystemPath.restype = CFTypeRef
+    cf.CFURLCreateWithString.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFURLCreateWithString.restype = CFTypeRef
+
     cf.CFArrayGetCount.argtypes = (CFTypeRef,)
     cf.CFArrayGetCount.restype = CFIndex
     cf.CFArrayGetValueAtIndex.argtypes = (CFTypeRef, CFIndex)
@@ -103,6 +109,22 @@ def lib() -> ctypes.CDLL:
     cf.CFPropertyListCreateData.restype = CFTypeRef
     cf.CFPropertyListCreateWithData.argtypes = (CFTypeRef, CFTypeRef, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p)
     cf.CFPropertyListCreateWithData.restype = CFTypeRef
+
+    # The run loop, which every listener turns: declared here once, since the
+    # framework's handle is shared and a second, different declaration would
+    # change the calls of the modules that made the first.
+    cf.CFRunLoopGetCurrent.argtypes = ()
+    cf.CFRunLoopGetCurrent.restype = CFTypeRef
+    cf.CFRunLoopAddSource.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFRunLoopAddSource.restype = None
+    cf.CFRunLoopRemoveSource.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFRunLoopRemoveSource.restype = None
+    cf.CFRunLoopRunInMode.argtypes = (CFTypeRef, ctypes.c_double, ctypes.c_bool)
+    cf.CFRunLoopRunInMode.restype = ctypes.c_int32
+    cf.CFMachPortCreateRunLoopSource.argtypes = (CFTypeRef, CFTypeRef, CFIndex)
+    cf.CFMachPortCreateRunLoopSource.restype = CFTypeRef
+    cf.CFMachPortInvalidate.argtypes = (CFTypeRef,)
+    cf.CFMachPortInvalidate.restype = None
     return cf
 
 
@@ -120,8 +142,9 @@ def release(ref: Optional[int]) -> None:
 
 
 def retain(ref: int) -> int:
-    """``CFRetain`` a borrowed reference, making it owned; returns it."""
-    lib().CFRetain(ref)
+    """``CFRetain`` a borrowed reference, making it owned; returns it. NULL is returned as is: ``CFRetain(NULL)`` aborts."""
+    if ref:
+        lib().CFRetain(ref)
     return ref
 
 
@@ -272,3 +295,48 @@ def from_python(value: Any) -> int:
     if not ref:
         raise ValueError("not a property list")
     return ref
+
+
+# The run loop.
+
+_RUN_FINISHED = 1  # kCFRunLoopRunFinished: the mode has no source nor timer to wait for
+
+
+def default_mode() -> int:
+    """``kCFRunLoopDefaultMode``."""
+    return constant(lib(), "kCFRunLoopDefaultMode")
+
+
+def run_loop(seconds: float, *, once: bool = True) -> bool:
+    """
+    Turn this thread's run loop for up to ``seconds``; with ``once``, return after the first source handled.
+
+    Returns ``False`` when the run loop had nothing to wait for and came back
+    at once: the caller should pause instead of spinning.
+    """
+    return bool(lib().CFRunLoopRunInMode(default_mode(), seconds, once) != _RUN_FINISHED)
+
+
+class RunLoopSource:
+    """
+    A run loop source added to this thread's run loop, in the default mode; :meth:`close` removes it.
+
+    With ``owned``, the source is ours (a ``Create`` result) and :meth:`close`
+    releases it too; otherwise its maker (an IOKit notification port, say)
+    owns it. A NULL source raises ``MacOSError``, saying ``what`` failed.
+    """
+
+    def __init__(self, source: Optional[int], *, owned: bool, what: str) -> None:
+        if not source:
+            raise MacOSError("could not {}: macOS gave no run loop source".format(what))
+        self.source: Optional[int] = source
+        self.owned = owned
+        self.loop = lib().CFRunLoopGetCurrent()
+        lib().CFRunLoopAddSource(self.loop, source, default_mode())
+
+    def close(self) -> None:
+        source, self.source = self.source, None
+        if source:
+            lib().CFRunLoopRemoveSource(self.loop, source, default_mode())
+            if self.owned:
+                release(source)

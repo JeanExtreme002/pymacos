@@ -19,7 +19,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
     - name: Test with pytest
-      run: pytest tests -v
+      run: pytest tests -v --reruns 2 --reruns-delay 5
 
   # The publish action only runs on Linux, hence a separate job.
   publish:

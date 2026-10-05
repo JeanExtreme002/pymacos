@@ -44,6 +44,11 @@ city = macos.dialog.prompt("City:", default="New York")
 password = macos.dialog.prompt("Password:", hidden=True)   # shows dots
 ```
 
+The text typed comes back on `osascript`'s output, never on a command line.
+`default`, though, reaches the dialog as an argument, which other processes of
+the same user can see in the process list while the dialog is open: don't
+pre-fill a `hidden` prompt with a secret.
+
 ## Choosing from a list
 
 ```python

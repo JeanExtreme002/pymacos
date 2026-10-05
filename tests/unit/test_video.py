@@ -76,3 +76,49 @@ def test_video_argument_checks(tmp_path):
         macos.video.from_images([__file__], tmp_path / "out.mov", fps=0)
     with pytest.raises(ValueError, match="every"):
         macos.video.frames(__file__, every=0)
+
+
+def test_convert_refuses_to_write_over_its_source(commands, tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not really a video")
+    link = tmp_path / "link.mp4"
+    link.symlink_to(source)
+    for output in (source, str(source), link):
+        with pytest.raises(ValueError, match="can't write over its source"):
+            macos.video.convert(source, output)
+    assert commands.calls == [] and source.read_bytes() == b"not really a video"
+
+
+@pytest.fixture
+def fake_frames(monkeypatch):
+    """Stands in for AVFoundation's frame reader: a frame is its time, and what's released is recorded."""
+    reads, released = [], []
+
+    def frames_at(source, times, width=None, tolerance=0.0):
+        reads.append(list(times))
+        return [int(moment * 100) + 1 for moment in times]
+
+    monkeypatch.setattr(macos.video, "_frames_at", frames_at)
+    monkeypatch.setattr(macos.video._cf, "release", released.append)
+    return reads, released
+
+
+def test_frames_are_read_a_batch_at_a_time_forwards(fake_frames):
+    reads, released = fake_frames
+    backwards = [0.5, 0.4, 0.3, 0.2, 0.1]
+    stream = macos.video._frame_stream("clip.mov", backwards, batch=2)
+    assert next(stream) == 51 and reads == [[0.4, 0.5]] and released == []  # read forwards, handed out backwards
+    assert list(stream) == [41, 31, 21, 11]
+    assert reads == [[0.4, 0.5], [0.2, 0.3], [0.1]]
+    assert sorted(released) == [11, 21, 31, 41, 51]  # each batch released once done with: never all at once
+
+    stream = macos.video._frame_stream("clip.mov", [0.0, 0.1, 0.2], batch=2)
+    next(stream)
+    stream.close()  # stopped early, by an error writing the video: its batch goes too
+    assert sorted(released[5:]) == [1, 11]
+
+
+def test_batches_hold_about_256_mb_of_frames():
+    assert macos.video._batch(3840, 2160) == 8  # 4K: 33 MB a frame
+    assert macos.video._batch(320, 160) == 64
+    assert macos.video._batch(100000, 100000) == 1

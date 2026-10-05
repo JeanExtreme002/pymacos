@@ -19,10 +19,12 @@ catches {class}`~macos.PermissionDeniedError`, and `except LookupError` catches
 |---|---|
 | {class}`~macos.NotSupportedError` | Not running on macOS, or a required system tool is missing |
 | {class}`~macos.PermissionDeniedError` | A privacy permission is missing, or the user denied access |
+| {class}`~macos.PromptTimeoutError` | A camera or microphone permission prompt went unanswered (also a `TimeoutError`) |
 | {class}`~macos.AppNotFoundError` | No app matches the name, or it didn't start in time |
 | {class}`~macos.ShortcutNotFoundError` | No shortcut has the name (also a `LookupError` and a `CommandError`) |
 | {class}`~macos.KeychainError` | The Keychain returned an error (see its `status`) |
 | {class}`~macos.CommandError` | A system command failed (see its `cmd`, `returncode` and `stderr`) |
+| {class}`~macos.CommandTimeoutError` | A system command didn't finish in time and was stopped (also a `TimeoutError`) |
 | {class}`~macos.MacOSError` | Any other failure macOS reports, such as a page that can't be drawn |
 
 Mistakes in the call, and problems with files, raise the usual builtin

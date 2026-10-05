@@ -16,6 +16,7 @@ index Spotlight already keeps, and match what the Spotlight bar finds.
 import os
 import plistlib
 import subprocess
+import tempfile
 from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -48,18 +49,30 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
     query = args[-1]
     if limit is not None and limit < 0:
         raise ValueError("limit must be zero or more, not {}".format(limit))
+    if query.startswith("-"):
+        # mdfind has no "--": a query such as "-onlyin" or "-s name" would be
+        # taken as its option. A leading space keeps it the query, and the
+        # query parser ignores it (same results either way).
+        args = [*args[:-1], " " + query]
 
     require_macos()
     # No `-interpret`: without it, mdfind already understands Spotlight-bar
     # syntax (plain words, kind:, date:), and with it raw `kMDItem...` queries
     # are taken as text and return wrong results.
+    #
+    # stderr goes to a temporary file, not a pipe: stdout is read to the end
+    # first, and mdfind blocks (so this would too) once a pipe nobody reads
+    # holds 64 KB, which its locale chatter and warnings can reach.
+    errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
-        process = subprocess.Popen(
-            ["mdfind", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8"
-        )
+        process = subprocess.Popen(["mdfind", *args], stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8")
     except FileNotFoundError:
+        errors.close()
         raise NotSupportedError("the 'mdfind' command was not found on this system") from None
-    assert process.stdout is not None and process.stderr is not None
+    except BaseException:
+        errors.close()
+        raise
+    assert process.stdout is not None
 
     try:
         # Read lazily: with a limit, stop (and stop mdfind) once there are
@@ -72,16 +85,16 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
             raise _invalid(query)
         if wanted is None or len(lines) < wanted:
             # mdfind ran to the end, so its exit status is meaningful.
-            stderr = process.stderr.read()
             if process.wait() != 0:
-                raise CommandError(["mdfind", *args], process.returncode, stderr)
+                errors.seek(0)
+                raise CommandError(["mdfind", *args], process.returncode, errors.read())
         return [Path(line) for line in lines[:limit]]
     finally:
         if process.poll() is None:
             process.kill()
         process.wait()
         process.stdout.close()
-        process.stderr.close()
+        errors.close()
 
 
 def search(query: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None) -> List[Path]:

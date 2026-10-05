@@ -27,10 +27,10 @@ _list = list
 PathLike = Union[str, "os.PathLike[str]"]
 
 
-def _run(args: List[str]) -> str:
+def _run(args: List[str], timeout: Optional[float] = None) -> str:
     require_macos()
     try:
-        return _system_run(args)
+        return _system_run(args, timeout=timeout)
     except NotSupportedError:
         raise NotSupportedError("running shortcuts needs macOS 12 or later (the 'shortcuts' command)") from None
 
@@ -48,7 +48,8 @@ def list(*, folder: Optional[str] = None) -> List[str]:
     """Return the names of the shortcuts in the Shortcuts app, or only those in ``folder``."""
     args = ["shortcuts", "list"]
     if folder is not None:
-        args += ["--folder-name", folder]
+        # Joined with "=", so a folder named "-x" or "--help" is its value, not an option.
+        args.append("--folder-name={}".format(folder))
     return [name for name in _run(args).splitlines() if name]
 
 
@@ -57,6 +58,7 @@ def run(
     *,
     input: Union[str, PathLike, Sequence[PathLike], None] = None,
     output: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
 ) -> Optional[str]:
     """
     Run a shortcut and return its text output (``None`` if it produced none).
@@ -69,8 +71,15 @@ def run(
 
     When the shortcut outputs a file (an image, a PDF...), pass ``output`` to
     save it there; the return value is then ``None``.
+
+    ``timeout`` is how many seconds to wait for it: a shortcut still running
+    then (one waiting on a prompt, say) is stopped, and
+    :class:`~macos.errors.CommandTimeoutError` raised.
     """
-    args = ["shortcuts", "run", name]
+    # The name goes last, after "--": a shortcut named "--help" or "-i" is
+    # run by that name, not taken as an option. The paths before it are
+    # absolute, so they can't start with "-" either.
+    args = ["shortcuts", "run"]
     text_file = None
 
     if isinstance(input, str):
@@ -83,16 +92,17 @@ def run(
     elif input is not None:
         paths = [input] if isinstance(input, os.PathLike) else _list(input)
         for path in paths:
-            resolved = Path(path).expanduser()
+            resolved = Path(path).expanduser().absolute()
             if not resolved.exists():
                 raise FileNotFoundError(str(resolved))
             args += ["--input-path", str(resolved)]
 
     if output is not None:
-        args += ["--output-path", str(Path(output).expanduser())]
+        args += ["--output-path", str(Path(output).expanduser().absolute())]
+    args += ["--", name]
 
     try:
-        result = _run(args)
+        result = _run(args, timeout)
     except CommandError as error:
         # The error message is localized, so ask the app whether the shortcut
         # exists instead of parsing it.

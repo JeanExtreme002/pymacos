@@ -17,6 +17,8 @@ macos.system.idle_time()          # datetime.timedelta(seconds=312)
 ```
 
 {func}`~macos.system.memory` is in bytes: divide by `2**30` for GB.
+{func}`~macos.system.model` raises {class}`~macos.MacOSError` when macOS
+doesn't say, as in some virtual machines.
 {func}`~macos.system.uptime` counts from the last restart, including the time
 the Mac spent asleep.
 
@@ -42,7 +44,8 @@ A volume that's busy is retried for a few seconds, since macOS can hold one
 briefly right after it mounts. If it stays busy, the error carries `diskutil`'s
 message, which often names the process that refused. To look yourself,
 {func}`~macos.system.who_uses` lists this user's processes using it (system
-services such as Spotlight don't show up there).
+services such as Spotlight don't show up there). A disk that doesn't answer
+for a minute raises {class}`~macos.CommandTimeoutError`.
 
 ## Disk images
 
@@ -55,7 +58,11 @@ print(list(mounted.iterdir()))
 macos.system.unmount_image(mounted)
 ```
 
-A license the image shows first is accepted. To install the app it holds, see
+A license the image shows first is accepted. `hdiutil` checks a large image
+before mounting it: past `timeout` seconds (5 minutes by default) it's stopped
+and {class}`~macos.CommandTimeoutError` raised. An answer from `hdiutil` that
+can't be read detaches the image again, and raises {class}`~macos.MacOSError`
+with that answer. To install the app it holds, see
 {func}`macos.apps.install_from_dmg`.
 
 ## Software updates
@@ -68,7 +75,9 @@ for update in macos.system.available_updates():
     print(update.title, update.version, "(restart)" if update.restart else "")
 ```
 
-It asks Apple's servers, so it takes a while (often 10 to 30 seconds).
+It asks Apple's servers, so it takes a while (often 10 to 30 seconds); past
+`timeout` seconds (5 minutes by default) it gives up with
+{class}`~macos.CommandTimeoutError`. A title with a comma in it stays whole.
 
 ## Processor and memory
 
@@ -252,6 +261,12 @@ time and start, which macOS keeps from this user. `kill(force=True)` ends a
 process at once, without letting it save; to quit an app, prefer
 {meth}`App.quit() <macos.apps.App.quit>`.
 
+macOS hands a quitted process's pid to a new one sooner or later. So killing
+a {class}`~macos.system.Process` checks first that its pid still belongs to
+it, by its start time and executable, and raises `ProcessLookupError` if
+another process took it. {func}`~macos.system.kill` given a bare pid signals
+whatever has that pid now.
+
 ## Ports
 
 {func}`~macos.system.ports` lists the ports processes listen on, TCP servers
@@ -314,7 +329,9 @@ Without `interval`, {func}`~macos.system.network_usage` gives the totals since
 each process started, for every user's processes, the system's included.
 {func}`~macos.system.energy_usage` measures over one second by default; only
 Apple silicon Macs measure power (Intel Macs read 0), and it sees only this
-user's processes.
+user's processes. A macOS too old to report it raises
+{class}`~macos.NotSupportedError`. A `nettop` that doesn't answer within 30
+seconds past the interval raises {class}`~macos.CommandTimeoutError`.
 
 ## The GPU and the disks
 
@@ -330,7 +347,8 @@ for disk in macos.system.disk_health():
 as Activity Monitor's GPU History does. {func}`~macos.system.disk_health`
 gives each physical disk's SMART status, which warns when a disk is about
 to fail: `"verified"`, `"failing"`, or `None` for disks that don't report
-one, as most USB disks.
+one, as most USB disks. A disk that doesn't answer `diskutil` within a minute
+raises {class}`~macos.CommandTimeoutError`.
 
 ## Crashes and the system log
 
@@ -354,7 +372,11 @@ it by `process`, `subsystem`, text (`contains`) or `level`, and `limit`
 stops at that many messages (1000 by default). `last` is how far back it
 reads: the last 10 minutes by default, or `"30s"`, `"2h"`, `"1d"` or a
 {class}`~datetime.timedelta`. Some messages hide private
-data as `<private>`.
+data as `<private>`. Reading days of an unfiltered log takes long: past
+`timeout` seconds (2 minutes by default, `None` for no limit) `log show` is
+stopped and {class}`~macos.CommandTimeoutError` raised. With an `app`,
+{func}`~macos.system.crash_reports` reads only the first line of other apps'
+reports.
 
 ## Startup items and USB devices
 

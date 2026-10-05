@@ -65,7 +65,7 @@ def test_dialog_choose_rejects_bad_options(options, default):
 
 
 def test_dialog_choose_files(fake_run, tmp_path):
-    fake_run.stdout = "ok\n/a/one.pdf\n/b/two words.pdf\n"
+    fake_run.stdout = "ok\n/a/one.pdf\0/b/two words.pdf\0\n"
 
     assert macos.dialog.choose_files(types=[".pdf", "public.image"], folder=tmp_path) == [
         Path("/a/one.pdf"),
@@ -92,3 +92,13 @@ def test_dialog_timeouts_round_up_to_whole_seconds(fake_run, timeout, seconds):
 def test_dialog_rejects_bad_timeout():
     with pytest.raises(ValueError):
         macos.dialog.confirm("x", timeout=0)
+
+
+def test_dialog_chosen_paths_may_hold_newlines(fake_run):
+    fake_run.stdout = "ok\n/a/first\nline.pdf\0/b/ends with\n\0\n"
+    assert macos.dialog.choose_files() == [Path("/a/first\nline.pdf"), Path("/b/ends with\n")]
+
+    fake_run.stdout = "ok\n/a/odd\nname.pdf\0\n"
+    assert macos.dialog.choose_file() == Path("/a/odd\nname.pdf")
+    fake_run.stdout = "ok\n/Users/me/new\nfolder/\0\n"
+    assert macos.dialog.choose_folder() == Path("/Users/me/new\nfolder")

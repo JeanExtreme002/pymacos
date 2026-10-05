@@ -320,3 +320,160 @@ def test_redact_targets():
     for bad, message in [([], "at least one"), (["  "], "takes texts"), ([3], "takes texts"), ([re.compile("x*")], "empty text")]:
         with pytest.raises(ValueError, match=message):
             _patterns(bad)
+
+
+def _is_encrypted(path):
+    from macos import _objc
+
+    with macos.pdf._open(path) as document:  # opens without a password: no user password left
+        return bool(_objc.send(document, "isEncrypted", restype=_objc.BOOL))
+
+
+@pytest.fixture
+def locked_book(tmp_path):
+    """An encrypted, two-page PDF (password "s3cret") with a title and bookmarks."""
+    from tests.helpers import pdf_with_text
+
+    from macos import _objc
+
+    plain = tmp_path / "plain.pdf"
+    plain.write_bytes(pdf_with_text([("Contract of Jane Doe", 72, 700)]))
+    two = macos.pdf.merge([plain, plain], tmp_path / "two.pdf")
+    marked = macos.pdf.set_bookmarks(two, [("Start", 1), ("Annex", 2), ("Detail", 2, 1)], tmp_path / "marked.pdf")
+    with macos.pdf._open(marked) as document:
+        title = _objc.send(
+            _objc.cls("NSDictionary"),
+            "dictionaryWithObject:forKey:",
+            _objc.nsstring("The contract"),
+            _objc.nsstring("Title"),
+            argtypes=(_objc.id, _objc.id),
+        )
+        _objc.send(document, "setDocumentAttributes:", title, argtypes=(_objc.id,), restype=None)
+        macos.pdf._save(document, marked)
+    locked = macos.pdf.encrypt(marked, tmp_path / "locked.pdf", "s3cret")
+    assert macos.pdf.metadata(locked, password="s3cret").title == "The contract"
+    return locked
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes PDFs with PDFKit")
+def test_edits_of_an_encrypted_pdf_are_not_encrypted(locked_book, tmp_path):
+    assert macos.pdf.page_count(locked_book, password="s3cret") == 2
+    with pytest.raises(macos.PermissionDeniedError):
+        macos.pdf.text(locked_book)
+    rotated = macos.pdf.rotate(locked_book, 90, tmp_path / "rotated.pdf", password="s3cret")
+    redacted = macos.pdf.redact(locked_book, ["Jane Doe"], tmp_path / "redacted.pdf", password="s3cret").path
+    stamped = macos.pdf.add_text(locked_book, "Seen", tmp_path / "stamped.pdf", password="s3cret")
+    marked = macos.pdf.set_bookmarks(locked_book, [("Only", 2)], tmp_path / "marked-again.pdf", password="s3cret")
+    for result in (rotated, redacted, stamped, marked):
+        assert not _is_encrypted(result), result.name
+        assert macos.pdf.page_count(result) == 2
+    # What the copy carries over: the pages as edited, the metadata and the bookmarks, pointing to its own pages.
+    assert macos.pdf.text(rotated, [2]) == "Contract of Jane Doe"
+    assert macos.pdf.metadata(rotated).title == "The contract"
+    assert [(mark.title, mark.page, mark.level) for mark in macos.pdf.bookmarks(rotated)] == [
+        ("Start", 1, 0), ("Annex", 2, 0), ("Detail", 2, 1)
+    ]  # fmt: skip
+    assert [(mark.title, mark.page) for mark in macos.pdf.bookmarks(marked)] == [("Only", 2)]
+    assert "Jane Doe" not in macos.pdf.text(redacted) and macos.pdf.metadata(redacted).title == "The contract"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes PDF forms with PDFKit")
+def test_filling_an_encrypted_form_gives_an_unencrypted_one(tmp_path):
+    from tests.helpers import pdf_form
+
+    locked = macos.pdf.encrypt(pdf_form(tmp_path / "form.pdf"), tmp_path / "locked.pdf", "s3cret")
+    filled = macos.pdf.fill_form(locked, {"Full name": "Ana Souza", "Agree": True}, tmp_path / "filled.pdf", password="s3cret")
+    assert not _is_encrypted(filled)
+    values = {field.name: field.value for field in macos.pdf.form_fields(filled)}
+    assert values["Full name"] == "Ana Souza" and values["Agree"] is True
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes PDFs with PDFKit")
+def test_outputs_get_the_usual_permissions(tmp_path):
+    import os
+    import stat
+
+    from tests.helpers import pdf_with_text
+
+    old = os.umask(0o022)
+    try:
+        source = tmp_path / "source.pdf"
+        source.write_bytes(pdf_with_text([("Hello", 72, 700)]))
+        target = tmp_path / "not" / "yet" / "there" / "rotated.pdf"  # its folders are made, beside it
+        macos.pdf.rotate(source, 90, target)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644  # not a temporary file's 0o600
+        os.chmod(str(target), 0o664)
+        macos.pdf.watermark(target, "DRAFT", target)  # rewritten in place: it keeps its permissions
+        assert stat.S_IMODE(target.stat().st_mode) == 0o664
+        assert sorted(os.listdir(str(target.parent))) == ["rotated.pdf"]
+    finally:
+        os.umask(old)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes PDFs with PDFKit")
+def test_compress_of_an_encrypted_pdf_keeps_the_smaller_one(tmp_path, monkeypatch):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "text.pdf"
+    source.write_bytes(pdf_with_text([("Only some text", 72, 700)]))
+    locked = macos.pdf.encrypt(source, tmp_path / "locked.pdf", "s3cret")
+    written = []
+    real = macos.pdf._write_pdf
+
+    def write(document, name, options=None):
+        done = real(document, name, options)
+        if options:  # the filtered one: make it the bigger of the two
+            with open(name, "ab") as file:
+                file.write(b"%" + b" " * 50000 + b"\n")
+        written.append((name, options is not None))
+        return done
+
+    monkeypatch.setattr(macos.pdf, "_write_pdf", write)
+    result = macos.pdf.compress(locked, tmp_path / "small.pdf", password="s3cret")
+    assert [filtered for _, filtered in written] == [True, False]  # filtered, then the plain copy to compare
+    assert result.stat().st_size < 50000 and not _is_encrypted(result)
+    assert macos.pdf.text(result) == "Only some text"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes PDFs with PDFKit")
+def test_encrypt_with_an_owner_password(tmp_path):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "text.pdf"
+    source.write_bytes(pdf_with_text([("Private", 72, 700)]))
+    locked = macos.pdf.encrypt(source, tmp_path / "locked.pdf", "user-pw", owner_password="owner-pw")
+    assert macos.pdf.text(locked, password="user-pw") == "Private"
+    assert macos.pdf.text(locked, password="owner-pw") == "Private"  # the owner's opens it too
+    with pytest.raises(macos.PermissionDeniedError):
+        macos.pdf.text(locked)
+    with pytest.raises(ValueError, match="owner password"):
+        macos.pdf.encrypt(source, tmp_path / "never.pdf", "user-pw", owner_password="")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads PDFs and runs Vision")
+def test_ocr_opens_the_pdf_once_and_hands_vision_the_drawn_page(tmp_path, monkeypatch):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "text.pdf"
+    source.write_bytes(pdf_with_text([("Invoice number 4821", 72, 700)]))
+    scan = macos.pdf.from_images([macos.pdf.render(source, size=1700)], tmp_path / "scan.pdf")
+    opened, read = [], []
+    real_open, real_words = macos.pdf._open, macos.vision._picture_words
+    monkeypatch.setattr(macos.pdf, "_open", lambda *args: opened.append(args) or real_open(*args))
+    monkeypatch.setattr(macos.pdf, "render", lambda *args, **kwargs: pytest.fail("no PNG round trip"))
+    monkeypatch.setattr(
+        macos.vision, "_picture_words", lambda picture, languages: read.append(1) or real_words(picture, languages)
+    )
+    searchable = macos.pdf.ocr(scan, tmp_path / "searchable.pdf", languages=["en-US"])
+    assert len(opened) == 1 and read == [1]
+    monkeypatch.setattr(macos.pdf, "_open", real_open)
+    assert "Invoice number 4821" in macos.pdf.text(searchable)
+
+
+def test_inverting_samples_flips_every_byte():
+    assert bytes([0, 1, 128, 254, 255]).translate(macos.pdf._INVERTED) == bytes([255, 254, 127, 1, 0])
+
+
+def test_hex_colors_are_read_by_one_parser():
+    assert macos.pdf._color is macos.image._hex_color
+    assert macos.pdf._color("#FF8000") == (1.0, 128 / 255, 0.0)

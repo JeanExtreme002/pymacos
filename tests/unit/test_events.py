@@ -77,3 +77,144 @@ def test_events_names_cover_every_source():
         "network_changed", "usb_connected", "usb_disconnected", "displays_changed",
     }  # fmt: skip
     assert events.Event("usb_connected", device="USB Keyboard").device == "USB Keyboard"
+
+
+class _FakeObjC:
+    """Stands in for the Objective-C bridge while listening: records what's sent, and makes the observer."""
+
+    id = SEL = object()
+
+    def __init__(self):
+        self.sent = []
+
+    def define_class(self, name, methods):
+        return "class"
+
+    def send(self, receiver, selector, *args, **kwargs):
+        self.sent.append((receiver, selector))
+        return {"alloc": "allocated", "init": 77}.get(selector)
+
+    def sel(self, name):
+        return name
+
+    def nsstring(self, text):
+        return text
+
+    def autorelease_pool(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+
+def test_listen_undoes_everything_when_a_watcher_fails(monkeypatch):
+    fake = _FakeObjC()
+    closed = []
+
+    class Power:
+        def __init__(self, listener):
+            assert listener in events._listeners.active()
+
+        def close(self):
+            closed.append("power")
+
+    def network(listener):
+        raise macos.MacOSError("configd is out of reach")
+
+    monkeypatch.setattr(events, "_objc", fake)
+    monkeypatch.setattr(events, "framework", lambda name: None)
+    monkeypatch.setattr(events, "_notification_names", lambda: {"NSWorkspaceDidWakeNotification": "wake"})
+    monkeypatch.setattr(events, "_center", lambda kind: kind)
+    monkeypatch.setitem(events._WATCHERS, events._POWER, Power)
+    monkeypatch.setitem(events._WATCHERS, events._NETWORK, network)
+
+    with pytest.raises(macos.MacOSError, match="configd"):
+        events._listen(["wake", "power_connected", "network_changed"], lambda event: True, None)
+
+    assert closed == ["power"]  # the watcher made before is closed: its callback isn't left scheduled
+    removed = [receiver for receiver, selector in fake.sent if selector == "removeObserver:"]
+    assert sorted(removed) == [events._DISTRIBUTED, events._WORKSPACE]
+    assert (77, "release") in fake.sent
+    assert events._observers == {} and events._listeners.active() == []
+
+
+def test_errors_in_the_notification_callback_come_out_of_the_listener(monkeypatch):
+    from macos import _events
+
+    listener = _events.Listener()
+    monkeypatch.setitem(events._observers, 5, listener)
+
+    def broken(notification):
+        raise LookupError("unreadable notification")
+
+    monkeypatch.setattr(events, "_event", broken)
+    events._handle(5, 0, 0)  # what AppKit calls: it must not raise
+    events._handle(6, 0, 0)  # an observer being removed: ignored
+    monkeypatch.setattr(events._events._objc, "spin", lambda seconds: None)
+    with pytest.raises(LookupError, match="unreadable"):
+        list(listener.drain(1))
+
+
+def test_watchers_close_what_they_made_when_they_fail(monkeypatch):
+    from macos import _events
+
+    released = []
+    monkeypatch.setattr(events._cf, "release", lambda ref: released.append(ref))
+
+    class Store:
+        def SCDynamicStoreCreate(self, *args):
+            return 0  # configd unreachable
+
+    monkeypatch.setattr(events, "_configuration", Store)
+    monkeypatch.setattr(events._cf, "string", lambda text: 1)
+    with pytest.raises(macos.MacOSError, match="could not watch the network"):
+        events._NetworkWatch(_events.Listener())
+
+    class Ports:
+        destroyed = []
+
+        def IONotificationPortCreate(self, port):
+            return 9
+
+        def IOServiceMatching(self, name):
+            return 3
+
+        def IOServiceAddMatchingNotification(self, *args):
+            return -536870201  # kIOReturnNoMemory, as a signed int
+
+        def IONotificationPortDestroy(self, port):
+            self.destroyed.append(port)
+
+    monkeypatch.setattr(events, "_io_registry", Ports)
+    with pytest.raises(macos.MacOSError, match="IOReturn 0xe00002c7"):
+        events._USBWatch(_events.Listener())
+    assert Ports.destroyed == [9]
+
+    class Displays:
+        def CGDisplayRegisterReconfigurationCallback(self, callback, info):
+            return 0
+
+        def CGDisplayRemoveReconfigurationCallback(self, callback, info):
+            released.append("display callback")
+
+    monkeypatch.setattr(_events, "graphics", Displays)
+    released.clear()
+    listener = _events.Listener()
+    displays = events._DisplayWatch(listener)
+    for display, flags in ((1, 1), (1, 16), (2, 16)):  # "about to change", then two displays
+        displays.changed(display, flags, None)
+    displays.close()
+    displays.close()  # twice is harmless
+    assert list(listener.pending) == [events.Event("displays_changed")]
+    assert released == ["display callback"]
+
+
+def test_stop_reaches_every_run_and_wait():
+    from macos import _events
+
+    first, second = _events.Listener(), _events.Listener()
+    with events._listeners.listening(first), events._listeners.listening(second):
+        events.stop()
+    assert first.stop.is_set() and second.stop.is_set()
+    later = _events.Listener()
+    with events._listeners.listening(later):
+        assert not later.stop.is_set()  # a stop() is for the calls in progress only

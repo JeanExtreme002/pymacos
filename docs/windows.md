@@ -48,7 +48,8 @@ window.set_frame(display.x, display.y + 25, display.width // 2, display.height -
 ```
 
 {meth}`~macos.windows.Window.center` centers a window on the display it's on,
-keeping its size:
+keeping its size, in the area the menu bar and the Dock leave, as
+{meth}`~macos.windows.Window.snap` does:
 
 ```python
 window.center()
@@ -102,7 +103,9 @@ nor those of hidden apps, panels or dialogs. Each display tiles its own
 windows; `display=1` gathers them all on the main one. The grid is as square
 as it can be (two windows side by side, four in a 2×2 grid), and the last
 row's windows widen to fill it. Tiling keeps the order the windows are in,
-top to bottom then left to right, so tiling again changes nothing.
+top to bottom then left to right, so tiling again changes nothing. A `gap`
+too large to leave room for the windows raises `ValueError` before any window
+moves.
 
 {func}`~macos.windows.tile` does the same with the windows you pick:
 

@@ -200,8 +200,10 @@ for photo in Path("~/Pictures/Trip").expanduser().glob("*.jpg"):
     macos.image.set_taken_at(photo, macos.image.taken_at(photo) + timedelta(hours=3))
 ```
 
-They change the file itself, or save a copy with `output=`. JPEG, PNG and
-TIFF keep their pixels untouched; HEIC photos may be saved again. A
+They change the file itself, or save a copy with `output=`, in the format of
+its extension, as {func}`~macos.image.convert` does (a `.png` copy of a JPEG
+is a PNG). JPEG, PNG and TIFF keep their pixels untouched when the format
+stays the same; HEIC photos may be saved again. A
 `datetime` with a time zone records it too, and {func}`~macos.image.taken_at`
 returns it.
 

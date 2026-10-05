@@ -45,7 +45,10 @@ macos.pdf.rotate("scan.pdf", -90, "fixed.pdf", pages=[2])  # only page 2, counte
 ```
 
 The output can be the input itself: it's replaced only once the new file is
-written.
+written. Every function here writes that way: the new file goes beside the
+output (its folder is made if missing) and is moved in place when complete,
+so a failure leaves nothing half-written. A file it replaces keeps its
+permissions; a new one gets the usual ones, as any file you save.
 
 ## Watermarks
 
@@ -71,7 +74,10 @@ macos.pdf.compress("scan.pdf", "scan-small.pdf")
 ```
 
 Photos lose detail, so keep the original. A PDF with only text has nothing to
-shrink: then the output is a copy of it, never a bigger file.
+shrink: then the output is a copy of it, never a bigger file. An encrypted PDF
+(opened with `password=`) can't be copied as it is, since the result isn't
+encrypted: the output is then the smaller of the compressed PDF and the
+decrypted one.
 
 ## Grayscale
 
@@ -144,7 +150,10 @@ macos.pdf.merge(["statement.pdf", "cover.pdf"], "all.pdf", password="1234")
 ```
 
 {func}`~macos.pdf.merge` uses the password for every encrypted input, so they
-must share it. The files it writes are not encrypted.
+must share it. The files the functions write are never encrypted, whatever they
+did to the PDF (rotating, filling a form, adding bookmarks, redacting...): its
+pages, metadata and bookmarks are copied into a new, unencrypted PDF. Only
+{func}`~macos.pdf.encrypt` writes encrypted PDFs.
 
 To encrypt a PDF, {func}`~macos.pdf.encrypt` saves a copy that asks for a
 password to open, in Preview, Acrobat and browsers alike:
@@ -152,7 +161,12 @@ password to open, in Preview, Acrobat and browsers alike:
 ```python
 macos.pdf.encrypt("statement.pdf", "locked.pdf", "1234")
 macos.pdf.encrypt("locked.pdf", "relocked.pdf", "new-pass", current_password="1234")
+macos.pdf.encrypt("statement.pdf", "locked.pdf", "1234", owner_password="only-for-me")
 ```
+
+A PDF has two passwords: the one that opens it, and the owner's, meant to
+guard its permissions (printing, copying, editing). By default both are
+`password`; `owner_password` gives the owner's its own.
 
 ## Forms
 

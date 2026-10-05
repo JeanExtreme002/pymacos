@@ -18,7 +18,9 @@ Layouts and the backlight need none.
 ## Typing text
 
 {func}`~macos.keyboard.type` types any text, accents and emoji included,
-whatever the keyboard layout. New lines press Enter and tabs press Tab:
+whatever the keyboard layout. New lines press Enter and tabs press Tab. The
+keys {func}`~macos.keyboard.hold` holds down don't apply, so text typed in a
+`with hold("cmd")` block comes out as written:
 
 ```python
 macos.keyboard.type("Hello! 👋\nSecond line")
@@ -76,7 +78,9 @@ with macos.keyboard.hold("cmd", "option"):
 ```
 
 Keys are written as for {func}`~macos.keyboard.press`. They are released at
-the end of the block, even when it raises.
+the end of the block, even when it raises, each one even if another fails to
+come up. They apply to the clicks and keys of the thread that holds them:
+other threads' don't carry them.
 
 ## Watching keys
 
@@ -118,7 +122,8 @@ macos.keyboard.set_layout("ABC")
 the menu bar's input menu; add more in System Settings › Keyboard › Text
 Input. {func}`~macos.keyboard.set_layout` takes a name from that list, its
 identifier (such as `'com.apple.keylayout.ABC'`), or part of its name when
-only one layout matches.
+only one layout matches. macOS allows these three on the main thread only:
+elsewhere they raise {class}`~macos.errors.MacOSError`.
 
 ## Keyboard backlight
 

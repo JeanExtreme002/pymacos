@@ -26,9 +26,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _iokit, _libc, _objc, defaults
+from ._libc import pids as _pids
 from ._system import framework, require_macos, run as _run
-from .errors import CommandError, MacOSError, NotSupportedError
+from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
 __all__ = [
     "version",
@@ -118,23 +119,8 @@ class _Timeval(ctypes.Structure):
     _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_int32)]
 
 
-@lru_cache(maxsize=None)
-def _libc() -> ctypes.CDLL:
-    require_macos()
-    lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-    lib.sysctlbyname.argtypes = (
-        ctypes.c_char_p,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-    )
-    lib.sysctlbyname.restype = ctypes.c_int
-    return lib
-
-
 def _sysctl(name: str) -> bytes:
-    lib = _libc()
+    lib = _libc.lib()
     size = ctypes.c_size_t()
     if lib.sysctlbyname(name.encode(), None, ctypes.byref(size), None, 0) != 0:
         raise MacOSError("sysctl {} is not available".format(name))
@@ -159,12 +145,26 @@ def build() -> str:
     return _run(["sw_vers", "-buildVersion"]).strip()
 
 
+_PROFILER_TIMEOUT = 60.0  # seconds: system_profiler takes a moment, and has hung on some Macs
+
+
 @lru_cache(maxsize=None)
 def model() -> str:
-    """The Mac's marketing name, e.g. ``'MacBook Pro'`` or ``'Mac mini'``."""
-    # system_profiler takes a moment, and the answer never changes: cache it.
-    report = json.loads(_run(["system_profiler", "SPHardwareDataType", "-json"]))
-    return str(report["SPHardwareDataType"][0]["machine_name"])
+    """
+    The Mac's marketing name, e.g. ``'MacBook Pro'`` or ``'Mac mini'``.
+
+    Raises :class:`~macos.errors.MacOSError` when macOS doesn't say, as in
+    some virtual machines.
+    """
+    # system_profiler takes a moment, and the answer never changes: cache it (a failure isn't cached).
+    output = _run(["system_profiler", "SPHardwareDataType", "-json"], timeout=_PROFILER_TIMEOUT)
+    try:
+        name = json.loads(output)["SPHardwareDataType"][0]["machine_name"]
+    except (ValueError, LookupError, TypeError):
+        name = None  # not JSON, or not shaped as expected: a VM, or a later macOS
+    if not isinstance(name, str) or not name:
+        raise MacOSError("system_profiler didn't tell this Mac's model")
+    return name
 
 
 def model_identifier() -> str:
@@ -193,30 +193,6 @@ def uptime() -> timedelta:
     return timedelta(seconds=round(time.time() - (boot.tv_sec + boot.tv_usec / 1e6)))
 
 
-@lru_cache(maxsize=None)
-def _iokit() -> ctypes.CDLL:
-    io = framework("IOKit")
-    io.IOServiceMatching.argtypes = (ctypes.c_char_p,)
-    io.IOServiceMatching.restype = _cf.CFTypeRef
-    io.IOServiceGetMatchingService.argtypes = (ctypes.c_uint32, _cf.CFTypeRef)
-    io.IOServiceGetMatchingService.restype = ctypes.c_uint32
-    io.IORegistryEntryCreateCFProperty.argtypes = (ctypes.c_uint32, _cf.CFTypeRef, _cf.CFTypeRef, ctypes.c_uint32)
-    io.IORegistryEntryCreateCFProperty.restype = _cf.CFTypeRef
-    io.IOObjectRelease.argtypes = (ctypes.c_uint32,)
-    io.IOObjectRelease.restype = ctypes.c_int
-    io.IOServiceGetMatchingServices.argtypes = (ctypes.c_uint32, _cf.CFTypeRef, ctypes.POINTER(ctypes.c_uint32))
-    io.IOServiceGetMatchingServices.restype = ctypes.c_int
-    io.IOIteratorNext.argtypes = (ctypes.c_uint32,)
-    io.IOIteratorNext.restype = ctypes.c_uint32
-    io.IOObjectGetClass.argtypes = (ctypes.c_uint32, ctypes.c_char_p)
-    io.IOObjectGetClass.restype = ctypes.c_int
-    io.IORegistryEntryCreateCFProperties.argtypes = (
-        ctypes.c_uint32, ctypes.POINTER(_cf.CFTypeRef), _cf.CFTypeRef, ctypes.c_uint32
-    )
-    io.IORegistryEntryCreateCFProperties.restype = ctypes.c_int
-    return io
-
-
 def idle_time() -> timedelta:
     """
     Time since the last keyboard, mouse or trackpad input.
@@ -226,7 +202,7 @@ def idle_time() -> timedelta:
         if macos.system.idle_time() > timedelta(minutes=10):
             run_heavy_job()
     """
-    io = _iokit()
+    io = _iokit.lib()
     # IOServiceGetMatchingService consumes the matching dictionary; 0 is the
     # default main port.
     service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOHIDSystem"))
@@ -279,23 +255,12 @@ class _VMStatistics(ctypes.Structure):
     ]
 
 
-@lru_cache(maxsize=None)
-def _mach() -> ctypes.CDLL:
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-    libc.mach_host_self.restype = ctypes.c_uint32
-    libc.host_statistics.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
-    libc.host_statistics.restype = ctypes.c_int
-    libc.host_statistics64.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
-    libc.host_statistics64.restype = ctypes.c_int
-    return libc
-
-
 def _cpu_ticks() -> Tuple[int, int, int, int]:
     """The processor's user, system, idle and nice ticks since startup, all cores together (32-bit counters)."""
     require_macos()
     ticks = (ctypes.c_uint32 * 4)()  # user, system, idle, nice
     count = ctypes.c_uint32(4)
-    mach = _mach()
+    mach = _libc.lib()
     if mach.host_statistics(mach.mach_host_self(), _CPU_LOAD_INFO, ticks, ctypes.byref(count)) != 0:
         raise MacOSError("could not read the processor load")
     return ticks[0], ticks[1], ticks[2], ticks[3]
@@ -346,7 +311,7 @@ def memory_usage() -> MemoryUsage:
     require_macos()
     stats = _VMStatistics()
     count = ctypes.c_uint32(ctypes.sizeof(_VMStatistics) // 4)  # in 32-bit words
-    mach = _mach()
+    mach = _libc.lib()
     if mach.host_statistics64(mach.mach_host_self(), _VM_INFO64, ctypes.byref(stats), ctypes.byref(count)) != 0:
         raise MacOSError("could not read the memory statistics")
     page = int.from_bytes(_sysctl("hw.pagesize"), "little") or 4096
@@ -516,7 +481,7 @@ def _release(args: List[str]) -> None:
     deadline = time.monotonic() + _BUSY_WAIT
     while True:
         try:
-            _run(args)
+            _run(args, timeout=_HDIUTIL_TIMEOUT)  # a disk that stopped answering mustn't hang the script
             return
         except CommandError as error:
             remaining = deadline - time.monotonic()
@@ -534,7 +499,8 @@ def eject(volume: Union[str, "os.PathLike[str]", Volume]) -> None:
     path. When several volumes share a name, pass the path.
 
     A volume that's busy is retried for a few seconds, since macOS can hold one
-    briefly right after it mounts. If it stays busy, the
+    briefly right after it mounts. One that doesn't answer for a minute raises
+    :class:`~macos.errors.CommandTimeoutError`. If it stays busy, the
     :class:`~macos.errors.CommandError` carries ``diskutil``'s message, which
     often names the process that refused; :func:`who_uses` lists this user's
     processes using it (system services don't show up there).
@@ -563,7 +529,22 @@ def eject(volume: Union[str, "os.PathLike[str]", Volume]) -> None:
     _release(["diskutil", "eject", str(chosen.path)])
 
 
-def mount_image(path: Union[str, "os.PathLike[str]"]) -> Path:
+def _detach(devices: List[str]) -> bool:
+    """Detach the whole disk of an image just attached (the shortest of its devices); whether there was one."""
+    for device in sorted(devices, key=len)[:1]:
+        try:
+            _run(["hdiutil", "detach", device, "-force"], timeout=_HDIUTIL_TIMEOUT)
+        except MacOSError:
+            pass  # the error that made us detach is the one to raise
+        return True
+    return False
+
+
+_HDIUTIL_TIMEOUT = 60.0  # seconds for a detach
+_DEVICE = re.compile(r"/dev/disk\d+(?:s\d+)*")
+
+
+def mount_image(path: Union[str, "os.PathLike[str]"], *, timeout: float = 300.0) -> Path:
     """
     Mount a disk image (``.dmg``, ``.iso``...) like double-clicking it, without opening a Finder window; return where.
 
@@ -573,30 +554,42 @@ def mount_image(path: Union[str, "os.PathLike[str]"]) -> Path:
         ...
         macos.system.unmount_image(mounted)
 
-    A license the image shows first is accepted. See also :func:`macos.apps.install_from_dmg`.
+    A license the image shows first is accepted. ``hdiutil`` checks a large
+    image before mounting it, which takes a while: past ``timeout`` seconds it
+    is stopped and :class:`~macos.errors.CommandTimeoutError` raised. When
+    ``hdiutil``'s answer can't be read, the image is detached again and
+    :class:`~macos.errors.MacOSError` raised with that answer. See also
+    :func:`macos.apps.install_from_dmg`.
     """
     import plistlib
+    from xml.parsers.expat import ExpatError
 
     image = Path(path).expanduser().resolve()
     if not image.is_file():
         raise FileNotFoundError(str(image))
-    # "Y" answers the license agreement some images show before mounting.
-    output = _run(["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n")
+    # "Y" answers the license agreement some images show before mounting. -quiet would hide the
+    # -plist answer too (it closes the output): the license's text before the plist is skipped instead.
+    output = _run(["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n", timeout=timeout)
     start = output.find("<?xml")
+    details: Any = None
     try:
-        details = plistlib.loads(output[start:].encode()) if start >= 0 else {}
-    except (plistlib.InvalidFileException, ValueError):
-        details = {}
-    entities = details.get("system-entities", [])
-    points = [entity["mount-point"] for entity in entities if entity.get("mount-point")]
+        details = plistlib.loads(output[start:].encode()) if start >= 0 else None
+    except (plistlib.InvalidFileException, ValueError, ExpatError):  # cut short, or not a plist at all
+        pass
+    entities = details.get("system-entities") if isinstance(details, dict) else None
+    if not isinstance(entities, list):
+        # Attached, maybe, but where is unknown: detach the disk its text names, rather than leave it attached.
+        detached = _detach(_DEVICE.findall(output))
+        raise MacOSError(
+            "hdiutil attached {} but its answer can't be read{}: {!r}".format(
+                image, " (it was detached)" if detached else "", output[:500]
+            )
+        )
+    entities = [entity for entity in entities if isinstance(entity, dict)]
+    points = [str(entity["mount-point"]) for entity in entities if entity.get("mount-point")]
     if not points:
         # Attached without a volume: detach its disk, so the image isn't left attached.
-        devices = sorted((entity["dev-entry"] for entity in entities if entity.get("dev-entry")), key=len)
-        for device in devices[:1]:
-            try:
-                _run(["hdiutil", "detach", device, "-force"])
-            except MacOSError:
-                pass
+        _detach([str(entity["dev-entry"]) for entity in entities if entity.get("dev-entry")])
         raise MacOSError("{} has no volume to mount".format(image))
     return Path(points[0])
 
@@ -605,7 +598,8 @@ def unmount_image(mount_point: Union[str, "os.PathLike[str]"], *, force: bool = 
     """
     Unmount a disk image mounted with :func:`mount_image` (or from Finder), given where it's mounted.
 
-    Like :func:`eject`, a busy image is retried for a few seconds. ``force=True``
+    Like :func:`eject`, a busy image is retried for a few seconds, and one that
+    doesn't answer for a minute raises :class:`~macos.errors.CommandTimeoutError`. ``force=True``
     unmounts it even while a program has files open on it.
     """
     _release(["hdiutil", "detach", str(Path(mount_point)), *(["-force"] if force else [])])
@@ -626,12 +620,24 @@ class Update:
     """Whether installing it restarts the Mac."""
 
 
+# The fields of an update's second line, "Title: Safari, Version: 27.0, Size: 238423KiB, ...". Only these
+# names start a field: a title with a comma ("Pro Video Formats, 2.3") stays whole.
+_UPDATE_FIELD = re.compile(r"(?:^|,)\s*(Title|Version|Size|Recommended|Action|Build):\s*")
+
+
+def _update_fields(details: str) -> Dict[str, str]:
+    starts = list(_UPDATE_FIELD.finditer(details))
+    fields = {}
+    for match, following in zip(starts, starts[1:] + [None]):
+        value = details[match.end():following.start() if following else len(details)]
+        fields[match.group(1)] = value.strip().rstrip(",").strip()
+    return fields
+
+
 def _updates(output: str) -> List[Update]:
     found = []
     for label, details in re.findall(r"^\*\s*Label:\s*(.+?)\s*\n\s*(.+)$", output, re.M):
-        fields = dict(
-            (key.strip(), value.strip()) for key, _, value in (part.partition(":") for part in details.split(",")) if key.strip()
-        )
+        fields = _update_fields(details)
         size = re.match(r"(\d+)\s*KiB", fields.get("Size", ""))
         found.append(
             Update(
@@ -646,15 +652,16 @@ def _updates(output: str) -> List[Update]:
     return found
 
 
-def available_updates() -> List[Update]:
+def available_updates(*, timeout: float = 300.0) -> List[Update]:
     """
     The macOS and app updates Software Update offers; ``[]`` when everything is up to date.
 
-    Asks Apple's servers, so it takes a while (often 10 to 30 seconds). To
-    install one, run ``softwareupdate --install "<label>"`` (with ``sudo``
-    for most).
+    Asks Apple's servers, so it takes a while (often 10 to 30 seconds); past
+    ``timeout`` seconds (a server that doesn't answer), it gives up with
+    :class:`~macos.errors.CommandTimeoutError`. To install one, run
+    ``softwareupdate --install "<label>"`` (with ``sudo`` for most).
     """
-    return _updates(_run(["softwareupdate", "--list"]))
+    return _updates(_run(["softwareupdate", "--list"], timeout=timeout))
 
 
 def fonts() -> List[str]:
@@ -703,7 +710,7 @@ def lid_closed() -> bool:
 
     Raises :class:`~macos.errors.NotSupportedError` on a Mac without a lid.
     """
-    io = _iokit()
+    io = _iokit.lib()
     service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOPMrootDomain"))
     if not service:
         raise MacOSError("the IOPMrootDomain service is not available")
@@ -798,8 +805,6 @@ _DESKTOP_SERVICES = "com.apple.desktopservices"
 
 def ds_store_on_network() -> bool:
     """Whether Finder writes ``.DS_Store`` files into network shares it opens."""
-    from . import defaults
-
     return not defaults.read(_DESKTOP_SERVICES, "DSDontWriteNetworkStores", default=False)
 
 
@@ -809,82 +814,65 @@ def set_ds_store_on_network(on: bool = True) -> None:
 
     Takes effect at the next login.
     """
-    from . import defaults
-
     defaults.write(_DESKTOP_SERVICES, "DSDontWriteNetworkStores", not on)
 
 
 def ds_store_on_usb() -> bool:
     """Whether Finder writes ``.DS_Store`` files onto USB drives and other external disks."""
-    from . import defaults
-
     return not defaults.read(_DESKTOP_SERVICES, "DSDontWriteUSBStores", default=False)
 
 
 def set_ds_store_on_usb(on: bool = True) -> None:
     """Let Finder write ``.DS_Store`` files onto USB drives and external disks, or not. Takes effect at the next login."""
-    from . import defaults
-
     defaults.write(_DESKTOP_SERVICES, "DSDontWriteUSBStores", not on)
 
 
 def keep_windows_on_quit() -> bool:
     """Whether apps reopen the windows they had when they quit (unchecks "Close windows when quitting an app")."""
-    from . import defaults
-
     return bool(defaults.read(defaults.GLOBAL, "NSQuitAlwaysKeepsWindows", default=False))
 
 
 def set_keep_windows_on_quit(on: bool = True) -> None:
     """Make apps reopen their windows when opened again, or start fresh (``False``)."""
-    from . import defaults
-
     defaults.write(defaults.GLOBAL, "NSQuitAlwaysKeepsWindows", bool(on))
+
+
+def _restart_control_center() -> None:
+    """Quit Control Center, which draws the menu bar's clock and icons: macOS starts it again, reading the settings."""
+    try:
+        _run(["killall", "ControlCenter"])
+    except MacOSError:
+        pass  # not running: it reads them when it starts
 
 
 def battery_percentage_shown() -> bool:
     """Whether the battery icon in the menu bar shows the percentage."""
-    from . import defaults
-
     return bool(defaults.read("com.apple.controlcenter", "BatteryShowPercentage", default=False, current_host=True))
 
 
 def set_show_battery_percentage(on: bool = True) -> None:
     """Show the battery percentage next to its icon in the menu bar, or not."""
-    from . import defaults
-
     defaults.write("com.apple.controlcenter", "BatteryShowPercentage", bool(on), current_host=True)
-    try:
-        _run(["killall", "ControlCenter"])  # macOS starts it again, reading the setting
-    except MacOSError:
-        pass
+    _restart_control_center()
 
 
 def save_to_icloud_by_default() -> bool:
     """Whether new documents are saved to iCloud Drive unless another place is chosen."""
-    from . import defaults
-
     return bool(defaults.read(defaults.GLOBAL, "NSDocumentSaveNewDocumentsToCloud", default=True))
 
 
 def set_save_to_icloud_by_default(on: bool = True) -> None:
     """Offer iCloud Drive first when saving a new document, or the Mac (``False``). Apps pick it up when reopened."""
-    from . import defaults
-
     defaults.write(defaults.GLOBAL, "NSDocumentSaveNewDocumentsToCloud", bool(on))
 
 
 def expanded_save_dialog() -> bool:
     """Whether the Save dialog opens expanded, with the sidebar and the folders."""
-    from . import defaults
-
     return bool(defaults.read(defaults.GLOBAL, "NSNavPanelExpandedStateForSaveMode", default=False))
 
 
 def set_expanded_save_dialog(on: bool = True) -> None:
     """Open the Save dialog expanded, with every folder, or small (``False``). Apps pick it up when reopened."""
-    from . import defaults
-
     for key in ("NSNavPanelExpandedStateForSaveMode", "NSNavPanelExpandedStateForSaveMode2"):
         defaults.write(defaults.GLOBAL, key, bool(on))
 
@@ -907,8 +895,6 @@ def clock_format() -> Dict[str, object]:
     ``{"seconds": False, "day_of_week": True, "am_pm": True, "analog": False, "date": "auto"}``;
     ``date`` is ``"auto"`` (when there's room), ``"always"`` or ``"never"``.
     """
-    from . import defaults
-
     found: Dict[str, object] = {
         name: bool(defaults.read(_CLOCK, key, default=default)) for name, (key, default) in _CLOCK_OPTIONS.items()
     }
@@ -935,8 +921,6 @@ def set_clock_format(
     ``date`` is ``"auto"`` (when there's room), ``"always"`` or ``"never"``.
     Whether it's 12 or 24 hours follows System Settings › General › Date & Time.
     """
-    from . import defaults
-
     options = {"seconds": seconds, "day_of_week": day_of_week, "am_pm": am_pm, "analog": analog}
     if date is None and all(value is None for value in options.values()):
         raise ValueError("say what to change: seconds=, day_of_week=, am_pm=, analog= or date=")
@@ -947,10 +931,7 @@ def set_clock_format(
             defaults.write(_CLOCK, _CLOCK_OPTIONS[name][0], bool(value))
     if date is not None:
         defaults.write(_CLOCK, "ShowDate", _CLOCK_DATES.index(date))
-    try:
-        _run(["killall", "ControlCenter"])  # it draws the clock; macOS starts it again, reading the settings
-    except MacOSError:
-        pass
+    _restart_control_center()
 
 
 # --- Region -----------------------------------------------------------------
@@ -966,8 +947,6 @@ def _locale_measurement() -> str:
 
 def measurement_units() -> str:
     """The units of measure: ``'metric'`` or ``'us'`` (inches, pounds, miles)."""
-    from . import defaults
-
     metric = defaults.read(defaults.GLOBAL, "AppleMetricUnits")
     if metric is None:
         return _locale_measurement()
@@ -976,8 +955,6 @@ def measurement_units() -> str:
 
 def set_measurement_units(units: str) -> None:
     """Use ``"metric"`` or ``"us"`` units, like System Settings › General › Language & Region. Apps pick it up when reopened."""
-    from . import defaults
-
     if units not in ("metric", "us"):
         raise ValueError("units must be 'metric' or 'us', not {!r}".format(units))
     # macOS keeps both, and they must agree.
@@ -987,8 +964,6 @@ def set_measurement_units(units: str) -> None:
 
 def temperature_unit() -> str:
     """The unit of temperatures: ``'celsius'`` or ``'fahrenheit'``."""
-    from . import defaults
-
     found = defaults.read(defaults.GLOBAL, "AppleTemperatureUnit")
     if found in ("Celsius", "Fahrenheit"):
         return found.lower()
@@ -997,8 +972,6 @@ def temperature_unit() -> str:
 
 def set_temperature_unit(unit: str) -> None:
     """Show temperatures in ``"celsius"`` or ``"fahrenheit"``, in Weather and everywhere. Apps pick it up when reopened."""
-    from . import defaults
-
     if unit not in ("celsius", "fahrenheit"):
         raise ValueError("unit must be 'celsius' or 'fahrenheit', not {!r}".format(unit))
     defaults.write(defaults.GLOBAL, "AppleTemperatureUnit", unit.capitalize())
@@ -1009,15 +982,11 @@ def set_temperature_unit(unit: str) -> None:
 
 def open_photos_on_device_connect() -> bool:
     """Whether Photos opens by itself when an iPhone, an iPad or a camera is connected."""
-    from . import defaults
-
     return not defaults.read("com.apple.ImageCapture", "disableHotPlug", default=False, current_host=True)
 
 
 def set_open_photos_on_device_connect(on: bool = True) -> None:
     """Let Photos open by itself when an iPhone, an iPad or a camera is connected, or not (``False``)."""
-    from . import defaults
-
     defaults.write("com.apple.ImageCapture", "disableHotPlug", not on, current_host=True)
 
 
@@ -1026,8 +995,6 @@ def set_open_photos_on_device_connect(on: bool = True) -> None:
 
 def menu_bar_spacing() -> Optional[int]:
     """The space around each icon on the right of the menu bar, in points; ``None`` for macOS's own."""
-    from . import defaults
-
     found = defaults.read(defaults.GLOBAL, "NSStatusItemSpacing", current_host=True)
     return None if found is None else int(found)
 
@@ -1044,8 +1011,6 @@ def set_menu_bar_spacing(spacing: Optional[int], *, padding: Optional[int] = Non
     default). macOS's own is about 16 and 12; 0 to 30 is allowed. Takes
     effect at the next login.
     """
-    from . import defaults
-
     if spacing is None:
         for key in ("NSStatusItemSpacing", "NSStatusItemSelectionPadding"):
             defaults.delete(defaults.GLOBAL, key, current_host=True)
@@ -1078,8 +1043,6 @@ MENU_BAR_ITEMS = tuple(_MENU_BAR_ITEMS)
 
 def menu_bar_items() -> Dict[str, bool]:
     """Which of Control Center's icons the menu bar shows: ``{"wifi": True, "bluetooth": False, ...}``."""
-    from . import defaults
-
     return {
         name: bool(defaults.read("com.apple.controlcenter", "NSStatusItem Visible " + item, default=False))
         for name, item in _MENU_BAR_ITEMS.items()
@@ -1097,8 +1060,6 @@ def set_menu_bar_items(**items: bool) -> None:
     Each name is one of :data:`MENU_BAR_ITEMS`; those left out stay as
     they are. The icons stay in Control Center either way. Applies at once.
     """
-    from . import defaults
-
     if not items:
         raise ValueError("say which icons to show or hide, such as bluetooth=True")
     unknown = set(items) - set(_MENU_BAR_ITEMS)
@@ -1109,10 +1070,7 @@ def set_menu_bar_items(**items: bool) -> None:
         # Control Center keeps the choice for this Mac, and only draws the icons it's also told are visible.
         defaults.write("com.apple.controlcenter", item, _SHOWN if on else _HIDDEN, current_host=True)
         defaults.write("com.apple.controlcenter", "NSStatusItem Visible " + item, bool(on))
-    try:
-        _run(["killall", "ControlCenter"])  # macOS starts it again, reading the settings
-    except MacOSError:
-        pass
+    _restart_control_center()
 
 
 # --- Security -----------------------------------------------------------------
@@ -1248,26 +1206,9 @@ class _TaskInfo(ctypes.Structure):
     ]
 
 
-class _Timebase(ctypes.Structure):
-    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-
-
-@lru_cache(maxsize=None)
 def _libproc() -> Tuple[ctypes.CDLL, float]:
-    """libproc, and how many nanoseconds a tick of its CPU times lasts."""
-    require_macos()
-    lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")  # libproc is part of it: there's no libproc.dylib
-    lib.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
-    lib.proc_pidinfo.restype = ctypes.c_int
-    lib.proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
-    lib.proc_pidpath.restype = ctypes.c_int
-    lib.proc_pidfdinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
-    lib.proc_pidfdinfo.restype = ctypes.c_int
-    lib.proc_pid_rusage.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
-    lib.proc_pid_rusage.restype = ctypes.c_int
-    timebase = _Timebase()
-    lib.mach_timebase_info(ctypes.byref(timebase))
-    return lib, timebase.numer / timebase.denom
+    """libproc (part of libSystem), and how many nanoseconds a tick of its CPU times lasts."""
+    return _libc.lib(), _libc.tick()
 
 
 @dataclass(frozen=True)
@@ -1291,7 +1232,11 @@ class Process:
     Only with ``cpu=True``; ``None`` otherwise, and for other users' processes."""
 
     def kill(self, *, force: bool = False) -> None:
-        """Ask the process to quit, or end it at once (``force=True``). See :func:`kill`."""
+        """
+        Ask the process to quit, or end it at once (``force=True``). See :func:`kill`.
+
+        Raises :class:`ProcessLookupError` when it has quit, even if another process now has its pid.
+        """
         kill(self, force=force)
 
 
@@ -1380,8 +1325,6 @@ def processes(*, cpu: bool = False) -> List[Process]:
     administrator's script run with ``sudo`` sees them all. No permission
     is needed.
     """
-    from .apps import _pids  # retries when processes start while it lists them
-
     def read_all() -> List[Process]:
         found = [_read_process(pid) for pid in sorted(set(_pids()))]
         return [process for process in found if process is not None]
@@ -1410,6 +1353,29 @@ def process(pid: int, *, cpu: bool = False) -> Optional[Process]:
     return _with_cpu([found], again, started)[0]
 
 
+def _check_same(expected: Process) -> None:
+    """
+    Raise :class:`ProcessLookupError` unless ``expected``'s pid still belongs to that very process.
+
+    macOS gives a quitted process's pid to a new one sooner or later: a :class:`Process` kept
+    a while could otherwise end an unrelated program. Its start time tells them apart; its
+    executable too, when both are known (other users' processes have no start time to read).
+    """
+    current = _read_process(expected.pid)
+    if current is None:
+        raise ProcessLookupError("{} (pid {}) has quit".format(expected.name, expected.pid))
+    if expected.started is not None and current.started is not None and current.started != expected.started:
+        changed = True
+    elif expected.path is not None and current.path is not None and current.path != expected.path:
+        changed = True
+    else:
+        changed = expected.started is not None and current.started is None  # was readable, now isn't: not the same
+    if changed:
+        raise ProcessLookupError(
+            "{} (pid {}) has quit; pid {} is now {}'s".format(expected.name, expected.pid, expected.pid, current.name)
+        )
+
+
 def kill(process: Union[int, Process], *, force: bool = False) -> None:
     """
     Ask a process (a :class:`Process` or its pid) to quit, as ``kill`` does, or end it at once (``force=True``).
@@ -1418,6 +1384,11 @@ def kill(process: Union[int, Process], *, force: bool = False) -> None:
     ``force`` doesn't. To quit an app, prefer :meth:`macos.apps.App.quit`.
     A process already gone raises :class:`ProcessLookupError`; another
     user's, :class:`PermissionError`.
+
+    Given a :class:`Process`, it first checks the pid still belongs to that
+    process (by its start time and executable), and raises
+    :class:`ProcessLookupError` if it quit and another took the pid. Given
+    a bare pid, it signals whatever process has it now.
     """
     import signal
 
@@ -1425,6 +1396,8 @@ def kill(process: Union[int, Process], *, force: bool = False) -> None:
     pid = process.pid if isinstance(process, Process) else int(process)
     if pid <= 1:
         raise ValueError("pid must be a process's, not {}".format(pid))
+    if isinstance(process, Process):
+        _check_same(process)  # as close to the signal as can be: the pid could still change in between, rarely
     os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
 
 
@@ -1570,8 +1543,6 @@ def _socket(lib: ctypes.CDLL, pid: int, fd: int) -> Optional[_Socket]:
 
 def _each_socket() -> Iterator[Tuple[int, str, _Socket]]:
     """``(pid, process name, socket)`` for every internet socket this user's processes have."""
-    from .apps import _pids
-
     require_macos()
     lib, _ = _libproc()
     for pid in _pids():
@@ -1715,8 +1686,6 @@ def who_uses(path: Union[str, "os.PathLike[str]"]) -> List[Process]:
     of its names (hard links). Like ``lsof`` without ``sudo``: only this
     user's processes are seen.
     """
-    from .apps import _pids
-
     target = os.path.realpath(os.path.expanduser(os.fspath(path)))
     if not os.path.exists(target):
         raise FileNotFoundError(target)
@@ -1757,11 +1726,17 @@ class NetworkUsage:
 def _nettop_samples(interval: Optional[float]) -> List[Tuple[int, str, int, int]]:
     """``(pid, name, received, sent)`` rows: the totals, or the deltas over ``interval`` seconds."""
     args = ["nettop", "-P", "-x", "-J", "bytes_in,bytes_out"]
+    seconds = 0
     if interval is None:
         args += ["-L", "1"]
     else:
-        args += ["-L", "2", "-d", "-s", str(max(1, round(interval)))]
-    return _nettop_rows(_run(args))
+        seconds = max(1, round(interval))
+        args += ["-L", "2", "-d", "-s", str(seconds)]
+    # Its samples take a moment beyond the interval; a nettop that hangs past that is stopped.
+    return _nettop_rows(_run(args, timeout=seconds + _NETTOP_SLACK))
+
+
+_NETTOP_SLACK = 30.0  # seconds nettop may take beyond the interval it measures
 
 
 def _nettop_rows(output: str) -> List[Tuple[int, str, int, int]]:
@@ -1792,7 +1767,8 @@ def network_usage(interval: Optional[float] = None) -> List[NetworkUsage]:
     Without ``interval``, the totals since each process started; with it,
     what they moved in that many seconds (at least 1). Unlike the other
     process functions, it sees every user's processes, the system's
-    included. Goes through ``nettop``.
+    included. Goes through ``nettop``; one that doesn't answer within 30
+    seconds past ``interval`` raises :class:`~macos.errors.CommandTimeoutError`.
     """
     if interval is not None and interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
@@ -1852,16 +1828,19 @@ def energy_usage(interval: float = 1.0) -> List[EnergyUsage]:
 
     It also tells the bytes each read and wrote on disk. Power is measured
     by Apple silicon Macs; on Intel Macs it reads 0. Only this user's
-    processes are seen, as with :func:`processes`.
+    processes are seen, as with :func:`processes`. A macOS too old to
+    report it (``rusage_info_v6``, macOS 12) raises
+    :class:`~macos.errors.NotSupportedError`.
     """
-    from .apps import _pids
-
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
     require_macos()
     lib, _ = _libproc()
     started = time.monotonic()
     before = {pid: found for pid in _pids() for found in [_rusage(lib, pid)] if found}
+    if not before and _rusage(lib, os.getpid()) is None:
+        # Not even this very process could be read: the kernel doesn't know this version of the record.
+        raise NotSupportedError("this version of macOS doesn't report processes' energy use")
     time.sleep(interval)
     elapsed = time.monotonic() - started
     usage = []
@@ -1910,7 +1889,7 @@ def gpu_usage() -> List[GPUUsage]:
     Handy to watch a local AI model or a game. No permission is needed.
     """
     require_macos()
-    io = _iokit()
+    io = _iokit.lib()
     iterator = ctypes.c_uint32()
     # The graphics drivers register as IOAccelerator; 0 is kIOMainPortDefault.
     if io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator)) != 0:
@@ -1966,6 +1945,9 @@ class DiskHealth:
     Most USB disks don't."""
 
 
+_DISKUTIL_TIMEOUT = 60.0  # seconds for diskutil to describe a disk
+
+
 def disk_health() -> List[DiskHealth]:
     """
     The Mac's physical disks and their SMART status, which warns when a disk is about to fail.
@@ -1976,15 +1958,17 @@ def disk_health() -> List[DiskHealth]:
             if disk.smart == "failing":
                 print("Back up", disk.name, "now")
 
-    Goes through ``diskutil``. Many USB disks don't report a status.
+    Goes through ``diskutil``. Many USB disks don't report a status. A
+    disk that doesn't answer within a minute (a failing one may not) raises
+    :class:`~macos.errors.CommandTimeoutError`.
     """
     import plistlib
 
     require_macos()
-    listed = plistlib.loads(_run(["diskutil", "list", "-plist", "physical"]).encode())
+    listed = plistlib.loads(_run(["diskutil", "list", "-plist", "physical"], timeout=_DISKUTIL_TIMEOUT).encode())
     disks = []
     for device in listed.get("WholeDisks", []):
-        info = plistlib.loads(_run(["diskutil", "info", "-plist", device]).encode())
+        info = plistlib.loads(_run(["diskutil", "info", "-plist", device], timeout=_DISKUTIL_TIMEOUT).encode())
         status = str(info.get("SMARTStatus") or "").lower()
         disks.append(
             DiskHealth(
@@ -2018,12 +2002,16 @@ class CrashReport:
     """The report, to read or share with the app's developers."""
 
 
-def _crash_report(path: Path) -> Optional[CrashReport]:
+def _crash_report(path: Path, app: Optional[str] = None) -> Optional[CrashReport]:
+    """The crash a report tells, or ``None`` for another kind of report, a broken one, or (with ``app``) another app's."""
     try:
         with open(path, encoding="utf-8", errors="replace") as file:
             header = json.loads(file.readline())
             if not isinstance(header, dict) or str(header.get("bug_type")) not in _CRASHES:
                 return None
+            named = header.get("app_name") or header.get("name")
+            if app and named and str(named).lower() != app.lower():
+                return None  # another app's: its body, often hundreds of kilobytes, isn't read
             try:
                 body = json.loads(file.read())
             except ValueError:
@@ -2085,7 +2073,7 @@ def crash_reports(app: Optional[str] = None, *, since: Optional[datetime] = None
         except OSError:
             continue
         for path in candidates:
-            report = _crash_report(path)
+            report = _crash_report(path, app)
             if report is None or (app and report.app.lower() != app.lower()):
                 continue
             if since and report.date and _before(report.date, since):
@@ -2151,6 +2139,7 @@ def logs(
     level: Optional[str] = None,
     last: Union[str, timedelta] = "10m",
     limit: Optional[int] = 1000,
+    timeout: Optional[float] = 120.0,
 ) -> List[LogEntry]:
     """
     Read the system log (Console's), oldest first, filtered by process, subsystem, text or level.
@@ -2166,9 +2155,14 @@ def logs(
     ``"30s"``, ``"10m"``, ``"2h"``, ``"1d"`` or a :class:`~datetime.timedelta`.
     The log is large (thousands of messages a minute): filter it, and
     ``limit`` stops at that many messages (``None`` for all). Goes through
-    ``log show``; some messages hide private data as ``<private>``.
+    ``log show``; some messages hide private data as ``<private>``. Reading
+    days of an unfiltered log takes long: past ``timeout`` seconds (``None``
+    to wait for as long as it takes) ``log show`` is stopped and
+    :class:`~macos.errors.CommandTimeoutError` raised.
     """
     import subprocess
+    import tempfile
+    import threading
 
     if isinstance(last, timedelta):
         last = "{}s".format(max(1, int(last.total_seconds())))
@@ -2178,6 +2172,8 @@ def logs(
         raise ValueError("level must be one of {}, not {!r}".format(", ".join(_LOG_LEVELS), level))
     if limit is not None and limit < 1:
         raise ValueError("limit must be 1 or more, or None, not {}".format(limit))
+    if timeout is not None and timeout <= 0:
+        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     require_macos()
     conditions = []
     if process:
@@ -2196,22 +2192,41 @@ def logs(
     if conditions:
         args += ["--predicate", " AND ".join(conditions)]
     entries: List[LogEntry] = []
-    reader = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-    assert reader.stdout is not None and reader.stderr is not None
-    stopped = False  # by us, at the limit: not a failure
-    try:
-        for line in reader.stdout:
-            entry = _log_entry(line) if line.startswith("{") else None
-            if entry:
-                entries.append(entry)
-                if limit is not None and len(entries) >= limit:
-                    stopped = True
-                    break
-    finally:
-        if stopped:
-            reader.kill()
-        reader.wait()
-        errors = reader.stderr.read()
+    # Its errors go to a file, not a second pipe: a pipe only read once the output ends would fill up
+    # (64 KB) on a chatty failure, and log show would wait on it forever while we wait on the output.
+    with tempfile.TemporaryFile() as errors_file:
+        reader = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors_file, text=True, encoding="utf-8")
+        assert reader.stdout is not None
+        stopped = False  # by us, at the limit: not a failure
+        expired = threading.Event()
+
+        def expire() -> None:
+            expired.set()
+            reader.kill()  # its output ends, and so does the loop below
+
+        timer = threading.Timer(timeout, expire) if timeout is not None else None
+        if timer is not None:
+            timer.daemon = True
+            timer.start()
+        try:
+            for line in reader.stdout:
+                entry = _log_entry(line) if line.startswith("{") else None
+                if entry:
+                    entries.append(entry)
+                    if limit is not None and len(entries) >= limit:
+                        stopped = True
+                        break
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if stopped or expired.is_set():
+                reader.kill()
+            reader.wait()
+            reader.stdout.close()
+        errors_file.seek(0)
+        errors = errors_file.read().decode("utf-8", "replace")
+    if expired.is_set() and not stopped:
+        raise CommandTimeoutError(args, timeout or 0)
     if not stopped and reader.returncode != 0:
         raise CommandError(args, reader.returncode, errors)
     return entries
@@ -2275,7 +2290,7 @@ def usb_devices() -> List[USBDevice]:
     :mod:`macos.events`.
     """
     require_macos()
-    io = _iokit()
+    io = _iokit.lib()
     iterator = ctypes.c_uint32()
     if io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator)) != 0:
         return []

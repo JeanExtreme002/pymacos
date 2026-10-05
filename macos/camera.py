@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from . import _capture, _objc
+from . import _capture, _files, _objc
 from ._system import framework
 from .errors import MacOSError
 
@@ -145,10 +145,28 @@ def _session(inputs: List[int], output: int) -> int:
     return session
 
 
-# The delegates AVFoundation calls back, keyed by the delegate object: what each capture got.
+# The delegates AVFoundation calls back, keyed by the delegate object: what each capture got. Only the
+# delegates still waited for take results: one that timed out is forgotten, and a callback arriving late
+# for it is dropped, or it would stay here for good, and be read by the next delegate given the same
+# address.
 _results: Dict[int, Dict[str, Any]] = {}
+_waiting: set = set()  # delegates whose capture is under way
 _started: set = set()  # movie delegates whose recording has begun
 _lock = threading.Lock()
+
+
+def _store(delegate: int, result: Dict[str, Any]) -> None:
+    with _lock:
+        if delegate in _waiting:
+            _results[delegate] = result
+
+
+def _forget(delegate: int) -> None:
+    with _lock:
+        _waiting.discard(delegate)
+        _started.discard(delegate)
+        _results.pop(delegate, None)
+
 
 _PhotoDone = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _MovieStarted = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
@@ -163,13 +181,13 @@ def _photo_done(delegate: int, _cmd: int, output: int, photo: int, error: int) -
         result["error"] = _objc.error_message(ctypes.c_void_p(error))
     else:
         result["data"] = _objc.pybytes(_objc.send(photo, "fileDataRepresentation"))
-    with _lock:
-        _results[delegate] = result
+    _store(delegate, result)
 
 
 def _movie_started(delegate: int, _cmd: int, output: int, url: int, connections: int) -> None:
     with _lock:
-        _started.add(delegate)
+        if delegate in _waiting:
+            _started.add(delegate)
 
 
 def _movie_done(delegate: int, _cmd: int, output: int, url: int, connections: int, error: int) -> None:
@@ -182,12 +200,11 @@ def _movie_done(delegate: int, _cmd: int, output: int, url: int, connections: in
         )
         if not (finished and _objc.send(finished, "boolValue", restype=_objc.BOOL)):
             result["error"] = _objc.error_message(ctypes.c_void_p(error))
-    with _lock:
-        _results[delegate] = result
+    _store(delegate, result)
 
 
 def _delegate(kind: str) -> int:
-    """A new delegate object (autoreleased) whose callback lands in ``_results``."""
+    """A new delegate object (autoreleased) whose callback lands in ``_results``, until :func:`_forget`."""
     if kind == "photo":
         name = "PymacosPhotoDelegate"
         _objc.define_class(
@@ -213,15 +230,22 @@ def _delegate(kind: str) -> int:
             },
             protocols=("AVCaptureFileOutputRecordingDelegate",),
         )
-    return _objc.new(name)
+    delegate = _objc.new(name)
+    with _lock:
+        _waiting.add(delegate)
+    return delegate
 
 
 def _wait(delegate: int, what: str) -> Dict[str, Any]:
-    # The callbacks come on the main queue: turn the run loop while waiting.
-    if not _objc.run_until(lambda: delegate in _results, _TIMEOUT):
-        raise MacOSError("the camera didn't finish the {} within {} seconds".format(what, _TIMEOUT))
-    with _lock:
-        result = _results.pop(delegate)
+    # The callbacks come on the main queue: turn the run loop while waiting (on the main thread, which
+    # photo() and record() check first: another thread's run loop never gets them).
+    try:
+        if not _objc.run_until(lambda: delegate in _results, _TIMEOUT):
+            raise MacOSError("the camera didn't finish the {} within {} seconds".format(what, _TIMEOUT))
+        with _lock:
+            result = _results[delegate]
+    finally:
+        _forget(delegate)
     if "error" in result:
         raise MacOSError("the camera couldn't take the {}: {}".format(what, result["error"]))
     return result
@@ -255,14 +279,15 @@ def photo(path: Optional[PathLike] = None, *, camera: Union[str, Camera, None] =
     """
     target, temporary = _output_path(path, ".jpg", _PHOTO_FORMATS)
     try:
+        _files.require_main_thread("macos.camera.photo()")
         _capture.require_permission(_capture.VIDEO)
         with _objc.autorelease_pool():
             device = _device(camera)
             output = _objc.new("AVCapturePhotoOutput")
             session = _session([_input(device)], output)
+            delegate = _delegate("photo")
             try:
                 _objc.run_until(lambda: False, _WARM_UP)
-                delegate = _delegate("photo")
                 settings = _objc.send(_objc.cls("AVCapturePhotoSettings"), "photoSettings")
                 _objc.send(
                     output,
@@ -274,12 +299,12 @@ def photo(path: Optional[PathLike] = None, *, camera: Union[str, Camera, None] =
                 )
                 data = _wait(delegate, "photo").get("data")
             finally:
+                _forget(delegate)
                 _objc.send(session, "stopRunning", restype=None)
         if not data:
             raise MacOSError("the camera returned no photo")
-        target.parent.mkdir(parents=True, exist_ok=True)
         if target.suffix.lower() in (".jpg", ".jpeg"):
-            target.write_bytes(data)
+            _files.write_atomically(target, lambda name: Path(name).write_bytes(data))
         else:
             from . import image
 
@@ -314,12 +339,18 @@ def record(
     target = Path(path).expanduser().absolute()
     if target.suffix.lower() != ".mov":
         raise ValueError("webcam videos are .mov files, not {!r}".format(target.suffix))
+    _files.require_main_thread("macos.camera.record()")
     _capture.require_permission(_capture.VIDEO)
     if audio:
         _capture.require_permission(_capture.AUDIO)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        target.unlink()  # the recorder refuses to replace a file
+    # Recorded beside the target, at a path where nothing is yet (the recorder refuses to replace a file),
+    # and moved over it once saved: a recording that fails leaves the file that was there as it was.
+    with _files.replacing(target) as temporary:
+        _record(temporary, seconds, camera, audio)
+    return target
+
+
+def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audio: bool) -> None:
     with _objc.autorelease_pool():
         inputs = [_input(_device(camera))]
         if audio:
@@ -334,8 +365,8 @@ def record(
             inputs.append(_input(microphone))
         output = _objc.new("AVCaptureMovieFileOutput")
         session = _session(inputs, output)
+        delegate = _delegate("movie")
         try:
-            delegate = _delegate("movie")
             _objc.send(
                 output,
                 "startRecordingToOutputFileURL:recordingDelegate:",
@@ -354,11 +385,9 @@ def record(
                 _objc.run_until(lambda: time.monotonic() >= end or delegate in _results, seconds + 1)
             finally:
                 _objc.send(output, "stopRecording", restype=None)
-                with _lock:
-                    _started.discard(delegate)
             _wait(delegate, "video")
         finally:
+            _forget(delegate)
             _objc.send(session, "stopRunning", restype=None)
     if not target.exists():
         raise MacOSError("the video wasn't saved")
-    return target

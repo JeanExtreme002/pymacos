@@ -89,12 +89,15 @@ def play(sound: Union[str, "os.PathLike[str]"], *, volume: float = 1.0, wait: bo
     """
     if not 0.0 <= volume <= 1.0:
         raise ValueError("volume must be from 0.0 to 1.0, not {}".format(volume))
-    player = _load(sound)
-    _objc.send(player, "setVolume:", volume, argtypes=(ctypes.c_float,), restype=None)
-    duration = float(_objc.send(player, "duration", restype=ctypes.c_double))
-    if not _objc.send(player, "play", restype=BOOL):
-        _objc.send(player, "release", restype=None)
-        raise ValueError("{!r} could not be played".format(os.fspath(sound)))
+    # The strings made to name the sound are autoreleased: drain them here, not never (a script has no
+    # run loop draining a pool for it). The player itself is retained, and outlives the pool.
+    with _objc.autorelease_pool():
+        player = _load(sound)
+        _objc.send(player, "setVolume:", volume, argtypes=(ctypes.c_float,), restype=None)
+        duration = float(_objc.send(player, "duration", restype=ctypes.c_double))
+        if not _objc.send(player, "play", restype=BOOL):
+            _objc.send(player, "release", restype=None)
+            raise ValueError("{!r} could not be played".format(os.fspath(sound)))
 
     # NSSound only reports progress through the run loop, which a script
     # doesn't spin, so the sound's own length decides when it's done. It must

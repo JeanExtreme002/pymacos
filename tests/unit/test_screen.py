@@ -9,14 +9,31 @@ import macos
 from macos import _system, screen
 
 
-def test_screenshot_arguments(fake_run, tmp_path):
+@pytest.fixture
+def capture(fake_run, monkeypatch):
+    """``fake_run``, also writing a few bytes where ``screencapture`` saves its image, as it does."""
+
+    def run(args, **kwargs):
+        result = fake_run(args, **kwargs)
+        if args[0] == "screencapture" and fake_run.returncode == 0:
+            with open(args[-1], "wb") as image:
+                image.write(b"\x89PNG")
+        return result
+
+    monkeypatch.setattr(_system.subprocess, "run", run)
+    return fake_run
+
+
+def test_screenshot_arguments(capture, tmp_path):
+    fake_run = capture
     target = macos.screenshot(tmp_path / "shot.JPG", region=(1, 2, 30, 40), display=2, cursor=True, check_permission=False)
 
     assert target == (tmp_path / "shot.JPG").resolve()
     assert fake_run.args == ["screencapture", "-x", "-t", "jpg", "-C", "-R1,2,30,40", "-D2", str(target)]
 
 
-def test_screenshot_defaults_to_a_temporary_png(fake_run):
+def test_screenshot_defaults_to_a_temporary_png(capture):
+    fake_run = capture
     target = macos.screenshot(check_permission=False)
     try:
         assert target.suffix == ".png"
@@ -46,6 +63,19 @@ def test_failed_screenshot_removes_its_temporary_file(fake_run, monkeypatch, tmp
         macos.screenshot(display=9, check_permission=False)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_screenshot_that_saved_nothing_is_an_error(fake_run, monkeypatch, tmp_path):
+    # screencapture exited 0 but wrote nothing: the empty temporary file isn't returned, and is removed.
+    monkeypatch.setattr(screen.tempfile, "tempdir", str(tmp_path))
+    with pytest.raises(macos.MacOSError, match="didn't save a screenshot"):
+        macos.screenshot(check_permission=False)
+    assert list(tmp_path.iterdir()) == []
+
+    # Into a given path: nothing there afterwards is an error too.
+    with pytest.raises(macos.MacOSError, match="didn't save a screenshot"):
+        macos.screenshot(tmp_path / "shot.png", check_permission=False)
+    assert fake_run.calls[-1]["timeout"] > 0  # a hung screencapture is stopped
 
 
 def test_start_screensaver(fake_run):

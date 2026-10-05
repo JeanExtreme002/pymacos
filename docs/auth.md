@@ -60,6 +60,19 @@ someone else using the Mac from running the script's sensitive part. It isn't
 encryption: a Keychain item isn't locked behind Touch ID, since that takes an
 app signed with Apple's entitlements, which Python isn't.
 
+It checks that the user is present, within this process; it isn't a security
+boundary against code running in the same process. Anything that can run
+code there (an imported package, a plugin) can skip the prompt: call
+whatever the decorated function calls, or reach the original through its
+closure. {func}`~macos.auth.required` keeps the function's name and docstring
+but drops `__wrapped__`, so `inspect.unwrap()` and tools that follow it don't
+skip the prompt by accident, but that's no protection against code meaning
+to. Guard what matters with something outside the process too (the
+Keychain's own prompt, a server-side check).
+
+Only one prompt shows at a time: calls to {func}`~macos.auth.confirm` from
+several threads wait their turn.
+
 ## Reference
 
 - {func}`macos.auth.confirm`

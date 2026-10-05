@@ -6,13 +6,11 @@ compositions, and exporting them to a file.
 """
 
 import ctypes
-import os
-import tempfile
 from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 
-from . import _objc
+from . import _files, _objc
 from ._system import framework
 from .errors import MacOSError
 
@@ -115,10 +113,7 @@ def copy_track(target: int, track: int, kind: str, until: float) -> int:
     The track keeps its place on the timeline: a sound that starts late
     still does, and one that ends early isn't stretched to ``until``.
     """
-    media = framework("CoreMedia")
-    media.CMTimeRangeGetIntersection.argtypes = (CMTimeRange, CMTimeRange)
-    media.CMTimeRangeGetIntersection.restype = CMTimeRange
-    span = media.CMTimeRangeGetIntersection(_objc.send(track, "timeRange", restype=CMTimeRange), time_range(0, until))
+    span = _core_media().CMTimeRangeGetIntersection(_objc.send(track, "timeRange", restype=CMTimeRange), time_range(0, until))
     copy = add_track(target, kind)
     if seconds(span.duration) > 0:
         error = ctypes.c_void_p()
@@ -135,6 +130,14 @@ def copy_track(target: int, track: int, kind: str, until: float) -> int:
         if not ok:
             raise MacOSError("could not edit the track: {}".format(_objc.error_message(error) or "unknown error"))
     return copy
+
+
+@lru_cache(maxsize=None)
+def _core_media() -> ctypes.CDLL:
+    media = framework("CoreMedia")
+    media.CMTimeRangeGetIntersection.argtypes = (CMTimeRange, CMTimeRange)
+    media.CMTimeRangeGetIntersection.restype = CMTimeRange
+    return media
 
 
 @lru_cache(maxsize=None)
@@ -188,53 +191,45 @@ def export(
     extension = output.suffix.lower()
     if extension not in FILE_TYPES:
         raise ValueError("can't write {!r} files; use one of {}".format(output.suffix, ", ".join(sorted(FILE_TYPES))))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(output.parent), suffix=extension)
-    os.close(handle)
-    os.unlink(name)  # the exporter refuses to replace a file
-    try:
-        with _objc.autorelease_pool():
-            session = _objc.send(
-                _objc.cls("AVAssetExportSession"),
-                "exportSessionWithAsset:presetName:",
-                media,
-                _objc.nsstring(preset),
-                argtypes=(_objc.id, _objc.id),
-            )
-            if not session:
-                raise MacOSError("this media can't be exported that way")
-            _objc.send(session, "setOutputURL:", _objc.file_url(name), argtypes=(_objc.id,), restype=None)
+    # Beside the output, at a path where nothing is yet: the exporter refuses to replace a file.
+    with _files.replacing(output) as temporary, _objc.autorelease_pool():
+        session = _objc.send(
+            _objc.cls("AVAssetExportSession"),
+            "exportSessionWithAsset:presetName:",
+            media,
+            _objc.nsstring(preset),
+            argtypes=(_objc.id, _objc.id),
+        )
+        if not session:
+            raise MacOSError("this media can't be exported that way")
+        _objc.send(session, "setOutputURL:", _objc.file_url(temporary), argtypes=(_objc.id,), restype=None)
+        _objc.send(
+            session, "setOutputFileType:", _objc.nsstring(FILE_TYPES[extension]), argtypes=(_objc.id,), restype=None
+        )
+        if audio_mix:
+            _objc.send(session, "setAudioMix:", audio_mix, argtypes=(_objc.id,), restype=None)
+        if video_composition:
+            _objc.send(session, "setVideoComposition:", video_composition, argtypes=(_objc.id,), restype=None)
+        if length is not None:
+            _objc.send(session, "setTimeRange:", time_range(0, length), argtypes=(CMTimeRange,), restype=None)
+        if time_pitch:
             _objc.send(
-                session, "setOutputFileType:", _objc.nsstring(FILE_TYPES[extension]), argtypes=(_objc.id,), restype=None
+                session, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None
             )
-            if audio_mix:
-                _objc.send(session, "setAudioMix:", audio_mix, argtypes=(_objc.id,), restype=None)
-            if video_composition:
-                _objc.send(session, "setVideoComposition:", video_composition, argtypes=(_objc.id,), restype=None)
-            if length is not None:
-                _objc.send(session, "setTimeRange:", time_range(0, length), argtypes=(CMTimeRange,), restype=None)
-            if time_pitch:
-                _objc.send(
-                    session, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None
-                )
-            _objc.send(
-                session,
-                "exportAsynchronouslyWithCompletionHandler:",
-                ignore_completion(),
-                argtypes=(ctypes.c_void_p,),
-                restype=None,
-            )
-            done = lambda: _objc.send(session, "status", restype=_objc.NSInteger) >= _COMPLETED  # noqa: E731
-            if not _objc.run_until(done, timeout):
-                _objc.send(session, "cancelExport", restype=None)
-                raise MacOSError("the export didn't finish within {} seconds".format(timeout))
-            status = _objc.send(session, "status", restype=_objc.NSInteger)
-            if status != _COMPLETED:
-                error = _objc.send(session, "error")
-                message = _objc.pystring(_objc.send(error, "localizedDescription")) if error else "unknown error"
-                raise MacOSError("the export failed: {}".format(message))
-        os.replace(name, str(output))
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+        _objc.send(
+            session,
+            "exportAsynchronouslyWithCompletionHandler:",
+            ignore_completion(),
+            argtypes=(ctypes.c_void_p,),
+            restype=None,
+        )
+        done = lambda: _objc.send(session, "status", restype=_objc.NSInteger) >= _COMPLETED  # noqa: E731
+        if not _objc.run_until(done, timeout):
+            _objc.send(session, "cancelExport", restype=None)
+            raise MacOSError("the export didn't finish within {} seconds".format(timeout))
+        status = _objc.send(session, "status", restype=_objc.NSInteger)
+        if status != _COMPLETED:
+            error = _objc.send(session, "error")
+            message = _objc.pystring(_objc.send(error, "localizedDescription")) if error else "unknown error"
+            raise MacOSError("the export failed: {}".format(message))
     return output

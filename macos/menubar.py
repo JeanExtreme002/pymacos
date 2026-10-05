@@ -44,7 +44,7 @@ _SLICE = 0.1  # seconds the event loop waits before checking timers, calls and q
 _Clicked = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 
 _lock = threading.Lock()
-_quit = threading.Event()
+_running: List[threading.Event] = []  # the quit flag of each run() in progress: quit() sets them all
 _clicks: Deque[int] = deque()  # tags of the menu items clicked, run by run() after the click
 _calls: Deque[Callable[[], None]] = deque()  # changes made from other threads, done on the main one
 _actions: Dict[int, "MenuItem"] = {}
@@ -227,7 +227,7 @@ class Item:
             self.set_tooltip(tooltip)
         if quit is not None:
             line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
-            self._quit_entry = _native_entry(str(quit), _quit.set, None, True, False)
+            self._quit_entry = _native_entry(str(quit), _quit_all, None, True, False)
             for native in (line, self._quit_entry._native):
                 _objc.send(self._menu, "addItem:", native, argtypes=(_objc.id,), restype=None)
             self._quit_line = line
@@ -445,9 +445,15 @@ def every(seconds: float, callback: Callable[[], object]) -> Timer:
     return timer
 
 
+def _quit_all() -> None:
+    with _lock:
+        for flag in _running:
+            flag.set()
+
+
 def quit() -> None:
     """Make :func:`run` return, from a menu action, a timer or another thread."""
-    _quit.set()
+    _quit_all()
 
 
 def _due_timers(now: float) -> List[Timer]:
@@ -500,11 +506,19 @@ def run(*, timeout: Optional[float] = None) -> None:
     menu bar after it returns, until :meth:`Item.remove` or the script ends.
     """
     _require_main_thread("macos.menubar.run()")
-    app = _application()
-    _quit.clear()
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while not _quit.is_set():
-        wait = _SLICE if deadline is None else min(_SLICE, deadline - time.monotonic())
-        if wait <= 0:
-            break
-        _pump(app, wait)
+    # Its own flag, counted in before anything else: a quit() from now on is
+    # kept, and an old one, made while nothing ran, doesn't stop this run.
+    stopped = threading.Event()
+    with _lock:
+        _running.append(stopped)
+    try:
+        app = _application()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not stopped.is_set():
+            wait = _SLICE if deadline is None else min(_SLICE, deadline - time.monotonic())
+            if wait <= 0:
+                break
+            _pump(app, wait)
+    finally:
+        with _lock:
+            _running.remove(stopped)

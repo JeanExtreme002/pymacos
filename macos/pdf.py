@@ -22,7 +22,6 @@ import math
 import os
 import re
 import shutil
-import tempfile
 from contextlib import contextmanager
 from functools import lru_cache
 from dataclasses import dataclass
@@ -30,10 +29,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _files, _objc
 from ._objc import BOOL, NSUInteger
 from ._system import framework
 from .errors import MacOSError, PermissionDeniedError
+from .image import _hex_color as _color
 
 __all__ = [
     "page_count",
@@ -67,6 +67,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 _MAX_RENDER = 4096
 _MEDIA_BOX = 0  # kPDFDisplayBoxMediaBox
+_OPAQUE_RGB = 5  # kCGImageAlphaNoneSkipLast: the pixels of a bitmap drawn here, on an opaque page
 
 
 @dataclass(frozen=True)
@@ -179,43 +180,32 @@ def metadata(path: PathLike, *, password: Optional[str] = None) -> Metadata:
         )
 
 
-def _write_atomically(output: PathLike, write: Callable[[str], bool]) -> Path:
-    """
-    Call ``write`` with a temporary path next to ``output``, then move the file in place.
-
-    The output may be one of the inputs, which PDFKit reads lazily while
-    writing; and a failure never leaves a half-written file behind.
-    """
-    target = Path(output).expanduser().absolute()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(target.parent), suffix=".pdf")
-    os.close(handle)
-    try:
-        if not write(name):
-            raise MacOSError("could not write {}".format(target))
-        os.replace(name, str(target))
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-    return target
+def _write_pdf(document: int, name: str, options: Optional[int] = None) -> bool:
+    """Write ``document`` to the file ``name``, with ``writeToFile:withOptions:`` when there are ``options``."""
+    if options:
+        return bool(
+            _objc.send(
+                document,
+                "writeToFile:withOptions:",
+                _objc.nsstring(name),
+                options,
+                argtypes=(_objc.id, _objc.id),
+                restype=BOOL,
+            )
+        )
+    return bool(_objc.send(document, "writeToFile:", _objc.nsstring(name), argtypes=(_objc.id,), restype=BOOL))
 
 
 def _save(document: int, output: PathLike, options: Optional[int] = None) -> Path:
-    def write(name: str) -> bool:
-        if options:
-            return bool(
-                _objc.send(
-                    document,
-                    "writeToFile:withOptions:",
-                    _objc.nsstring(name),
-                    options,
-                    argtypes=(_objc.id, _objc.id),
-                    restype=BOOL,
-                )
-            )
-        return bool(_objc.send(document, "writeToFile:", _objc.nsstring(name), argtypes=(_objc.id,), restype=BOOL))
+    """
+    Write ``document`` to ``output``, never encrypted unless ``options`` asks for it, and return the path.
 
-    return _write_atomically(output, write)
+    Through a file beside ``output``, moved in place at the end: the output
+    may be one of the inputs, which PDFKit reads lazily while writing, and a
+    failure never leaves a half-written file behind.
+    """
+    plain = _decrypted(document)
+    return _files.write_atomically(output, lambda name: _write_pdf(plain, name, options))
 
 
 def _new_document() -> int:
@@ -226,6 +216,64 @@ def _append(target: int, page: int) -> None:
     # Copy the page: inserting the original would move it out of its document.
     copy = _objc.send(_objc.send(page, "copy"), "autorelease")
     _objc.send(target, "insertPage:atIndex:", copy, _count(target), argtypes=(_objc.id, NSUInteger), restype=None)
+
+
+def _decrypted(document: int) -> int:
+    """
+    ``document`` itself, or, when it's encrypted, an unencrypted copy of it (autoreleased).
+
+    PDFKit writes an unlocked document with the encryption it was opened
+    with: the result of rotating or redacting an encrypted PDF would still
+    ask for its password. So its pages (annotations and form fields come
+    with them), its metadata and its bookmarks go into a new document, the
+    one every function here saves, the same way for all of them.
+    """
+    if not _objc.send(document, "isEncrypted", restype=BOOL):
+        return document
+    plain = _new_document()
+    for number in range(1, _count(document) + 1):
+        _append(plain, _page(document, number))
+    attributes = _objc.send(document, "documentAttributes")
+    if attributes:
+        _objc.send(plain, "setDocumentAttributes:", attributes, argtypes=(_objc.id,), restype=None)
+    root = _objc.send(document, "outlineRoot")
+    if root:
+        copy = _objc.new("PDFOutline")
+        _copy_outline(document, root, plain, copy)
+        _objc.send(plain, "setOutlineRoot:", copy, argtypes=(_objc.id,), restype=None)
+    return plain
+
+
+def _copy_outline(source: int, outline: int, target: int, copy: int) -> None:
+    """Rebuild the entries under ``outline`` (of ``source``) under ``copy``, pointing to ``target``'s pages."""
+    pages = _count(target)
+    for index in range(int(_objc.send(outline, "numberOfChildren", restype=NSUInteger))):
+        child = _objc.send(outline, "childAtIndex:", index, argtypes=(NSUInteger,))
+        entry = _objc.new("PDFOutline")
+        _objc.send(entry, "setLabel:", _objc.send(child, "label"), argtypes=(_objc.id,), restype=None)
+        destination = _objc.send(child, "destination")
+        page = _objc.send(destination, "page") if destination else None
+        at = int(_objc.send(source, "indexForPage:", page, argtypes=(_objc.id,), restype=NSUInteger)) if page else pages
+        if at < pages:
+            # The same spot, on the copy of its page: the old destination points into the encrypted document.
+            point = _objc.send(destination, "point", restype=_objc.CGPoint)
+            moved = _objc.send(
+                _objc.send(_objc.cls("PDFDestination"), "alloc"),
+                "initWithPage:atPoint:",
+                _objc.send(target, "pageAtIndex:", at, argtypes=(NSUInteger,)),
+                point,
+                argtypes=(_objc.id, _objc.CGPoint),
+            )
+            _objc.send(moved, "autorelease")
+            _objc.send(entry, "setDestination:", moved, argtypes=(_objc.id,), restype=None)
+        else:
+            action = _objc.send(child, "action")  # a link to a web page or another file: no page to remap
+            if action:
+                _objc.send(entry, "setAction:", action, argtypes=(_objc.id,), restype=None)
+        _objc.send(entry, "setIsOpen:", _objc.send(child, "isOpen", restype=BOOL), argtypes=(BOOL,), restype=None)
+        count = int(_objc.send(copy, "numberOfChildren", restype=NSUInteger))
+        _objc.send(copy, "insertChild:atIndex:", entry, count, argtypes=(_objc.id, NSUInteger), restype=None)
+        _copy_outline(source, child, target, entry)
 
 
 def merge(inputs: Sequence[PathLike], output: PathLike, *, password: Optional[str] = None) -> Path:
@@ -294,7 +342,14 @@ def _pdfkit_string(name: str) -> int:
     return ctypes.c_void_p.in_dll(framework("PDFKit"), name).value or 0
 
 
-def encrypt(path: PathLike, output: PathLike, password: str, *, current_password: Optional[str] = None) -> Path:
+def encrypt(
+    path: PathLike,
+    output: PathLike,
+    password: str,
+    *,
+    current_password: Optional[str] = None,
+    owner_password: Optional[str] = None,
+) -> Path:
     """
     Save a copy of a PDF that asks for ``password`` to open, and return its path.
 
@@ -302,15 +357,27 @@ def encrypt(path: PathLike, output: PathLike, password: str, *, current_password
     PDF that is already encrypted, to change its password. To read or change
     an encrypted PDF with this module, pass ``password=`` to the other
     functions.
+
+    ``owner_password`` is the PDF's other password, the one meant to guard
+    its permissions (printing, copying, editing); by default it's
+    ``password`` too. Give it a different one when the people who open the
+    PDF shouldn't hold the owner's password as well.
     """
     if not password:
         raise ValueError("the password can't be empty")
+    if owner_password is not None and not owner_password:
+        raise ValueError("the owner password can't be empty; leave it out to use password")
     with _open(path, current_password) as document:
-        secret = _objc.nsstring(password)
         options = _objc.send(_objc.cls("NSMutableDictionary"), "dictionary")
-        for key in ("PDFDocumentUserPasswordOption", "PDFDocumentOwnerPasswordOption"):
+        secrets = (("PDFDocumentUserPasswordOption", password), ("PDFDocumentOwnerPasswordOption", owner_password or password))
+        for key, secret in secrets:
             _objc.send(
-                options, "setObject:forKey:", secret, _pdfkit_string(key), argtypes=(_objc.id, _objc.id), restype=None
+                options,
+                "setObject:forKey:",
+                _objc.nsstring(secret),
+                _pdfkit_string(key),
+                argtypes=(_objc.id, _objc.id),
+                restype=None,
             )
         return _save(document, output, options)
 
@@ -361,13 +428,6 @@ def _line(text: str, size: float) -> Tuple[int, float, float]:
     return line, float(width), ascent.value + descent.value
 
 
-def _color(text: str) -> Tuple[float, float, float]:
-    value = text.strip().lstrip("#")
-    if len(value) != 6 or any(char not in "0123456789abcdefABCDEF" for char in value):
-        raise ValueError("color must be a hex color such as '#ff0000', not {!r}".format(text))
-    return (int(value[0:2], 16) / 255, int(value[2:4], 16) / 255, int(value[4:6], 16) / 255)
-
-
 def _open_for_drawing(source: Path, password: Optional[str]) -> int:
     """An owned, unlocked ``CGPDFDocument``, to draw its pages elsewhere; release it with ``CGPDFDocumentRelease``."""
     from . import _cf
@@ -388,6 +448,81 @@ def _open_for_drawing(source: Path, password: Optional[str]) -> int:
 
 
 _INVISIBLE = 3  # kCGTextInvisible: text that selection and search find, but that doesn't show
+
+
+def _seen_size(graphics: ctypes.CDLL, page: int) -> Tuple[float, float]:
+    """The size of a ``CGPDFPage``, in points, as it shows: turned when its /Rotate is a quarter turn."""
+    box = graphics.CGPDFPageGetBoxRect(page, _MEDIA_BOX)
+    width, height = box.size.width, box.size.height
+    if graphics.CGPDFPageGetRotationAngle(page) % 180:
+        width, height = height, width
+    return width, height
+
+
+def _draw_page(graphics: ctypes.CDLL, context: int, page: int, width: float, height: float) -> None:
+    """Draw a ``CGPDFPage`` over ``width`` x ``height`` points of ``context``, from its corner, turned as it shows."""
+    frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
+    graphics.CGContextSaveGState(context)
+    graphics.CGContextConcatCTM(context, graphics.CGPDFPageGetDrawingTransform(page, _MEDIA_BOX, frame, 0, True))
+    graphics.CGContextDrawPDFPage(context, page)
+    graphics.CGContextRestoreGState(context)
+
+
+def _write_pages(
+    output: PathLike, sizes: Sequence[Tuple[float, float]], draw: Callable[[int, int, float, float], None]
+) -> Path:
+    """
+    Write a new PDF with one page per size in ``sizes`` (in points), and return its path.
+
+    ``draw(context, index, width, height)`` fills page ``index`` (from 0) of
+    the PDF context. What :func:`ocr`, :func:`watermark`, :func:`sign` and
+    :func:`from_images` share: they redraw every page into a new PDF. Each
+    page is drawn in an autorelease pool of its own, so what drawing one
+    page made doesn't pile up until the last.
+    """
+    graphics = _graphics()
+
+    def write(name: str) -> bool:
+        with _cf.owned(_cf.file_url(name)) as url:
+            context = graphics.CGPDFContextCreateWithURL(url, None, None)
+        if not context:
+            return False
+        try:
+            for index, (width, height) in enumerate(sizes):
+                frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
+                graphics.CGContextBeginPage(context, ctypes.byref(frame))
+                with _objc.autorelease_pool():
+                    draw(context, index, width, height)
+                graphics.CGContextEndPage(context)
+            graphics.CGPDFContextClose(context)
+        finally:
+            graphics.CGContextRelease(context)
+        return True
+
+    return _files.write_atomically(output, write)
+
+
+def _picture_of_page(graphics: ctypes.CDLL, page: int, longest: int) -> int:
+    """An owned ``CGImage`` of a ``CGPDFPage`` as it shows, on white, ``longest`` pixels on its longest side."""
+    width, height = _seen_size(graphics, page)
+    scale = longest / (max(width, height) or 1.0)
+    pixels_wide, pixels_high = max(1, round(width * scale)), max(1, round(height * scale))
+    space = graphics.CGColorSpaceCreateDeviceRGB()
+    context = graphics.CGBitmapContextCreate(None, pixels_wide, pixels_high, 8, 0, space, _OPAQUE_RGB)
+    graphics.CGColorSpaceRelease(space)
+    if not context:
+        raise MacOSError("could not draw a page of {} x {} pixels".format(pixels_wide, pixels_high))
+    try:
+        graphics.CGContextSetRGBFillColor(context, 1.0, 1.0, 1.0, 1.0)
+        graphics.CGContextFillRect(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(pixels_wide, pixels_high)))
+        graphics.CGContextScaleCTM(context, scale, scale)
+        _draw_page(graphics, context, page, width, height)
+        picture = graphics.CGBitmapContextCreateImage(context)
+    finally:
+        graphics.CGContextRelease(context)
+    if not picture:
+        raise MacOSError("could not draw a page of {} x {} pixels".format(pixels_wide, pixels_high))
+    return int(picture)
 
 
 def ocr(
@@ -413,56 +548,36 @@ def ocr(
     :func:`macos.vision.lines` (``["fr-FR", "en-US"]``). ``password`` opens an
     encrypted PDF; the result isn't encrypted.
     """
-    from . import _cf, vision
+    from . import vision
 
-    source = Path(path).expanduser().absolute()
-    if not source.exists():
-        raise FileNotFoundError(str(source))
+    source = _files.existing(path)
     graphics, core_text = _graphics(), _core_text()
     document = _open_for_drawing(source, password)
     try:
         pages = graphics.CGPDFDocumentGetNumberOfPages(document)
-        # Read every page first: rendering and OCR use the file, not the context being written.
+        # Read every page first: Vision reads the pages of the file, not the PDF being written. The file is
+        # opened once (PDFKit only tells which pages have text), and each page goes to Vision as the
+        # picture drawn here, with no image file in between.
         found: Dict[int, List[Any]] = {}
-        for number in range(1, pages + 1):
-            if not redo and text(source, [number], password=password).strip():
-                continue
-            page = graphics.CGPDFDocumentGetPage(document, number)
-            box = graphics.CGPDFPageGetBoxRect(page, _MEDIA_BOX)
-            longest = max(box.size.width, box.size.height)
-            image = render(source, number, size=int(min(4096, max(1024, longest * 3))), password=password)
-            # Word by word: one stretched line would space its words wrong for search and copy.
-            found[number] = vision._words(image, languages=languages)
-
-        def write(name: str) -> bool:
-            with _cf.owned(_cf.file_url(name)) as url:
-                context = graphics.CGPDFContextCreateWithURL(url, None, None)
-            if not context:
-                return False
-            try:
-                for number in range(1, pages + 1):
+        with _open(source, password) as readable:
+            for number in range(1, pages + 1):
+                with _objc.autorelease_pool():
+                    if not redo and (_objc.pystring(_objc.send(_page(readable, number), "string")) or "").strip():
+                        continue
                     page = graphics.CGPDFDocumentGetPage(document, number)
-                    box = graphics.CGPDFPageGetBoxRect(page, _MEDIA_BOX)
-                    width, height = box.size.width, box.size.height
-                    if graphics.CGPDFPageGetRotationAngle(page) % 180:
-                        width, height = height, width  # drawn as it shows, turned, like render() reads it
-                    frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
-                    graphics.CGContextBeginPage(context, ctypes.byref(frame))
-                    graphics.CGContextSaveGState(context)
-                    graphics.CGContextConcatCTM(
-                        context, graphics.CGPDFPageGetDrawingTransform(page, _MEDIA_BOX, frame, 0, True)
-                    )
-                    graphics.CGContextDrawPDFPage(context, page)
-                    graphics.CGContextRestoreGState(context)
-                    for word, word_box in found.get(number, []):
-                        _draw_invisible(graphics, core_text, context, word, word_box, width, height)
-                    graphics.CGContextEndPage(context)
-                graphics.CGPDFContextClose(context)
-            finally:
-                graphics.CGContextRelease(context)
-            return True
+                    longest = max(_seen_size(graphics, page))
+                    picture = _picture_of_page(graphics, page, int(min(4096, max(1024, longest * 3))))
+                    with _cf.owned(picture):
+                        # Word by word: one stretched line would space its words wrong for search and copy.
+                        found[number] = vision._picture_words(picture, languages)
 
-        return _write_atomically(output, write)
+        def draw(context: int, index: int, width: float, height: float) -> None:
+            _draw_page(graphics, context, graphics.CGPDFDocumentGetPage(document, index + 1), width, height)
+            for word, word_box in found.get(index + 1, []):
+                _draw_invisible(graphics, core_text, context, word, word_box, width, height)
+
+        sizes = [_seen_size(graphics, graphics.CGPDFDocumentGetPage(document, number)) for number in range(1, pages + 1)]
+        return _write_pages(output, sizes, draw)
     finally:
         graphics.CGPDFDocumentRelease(document)
 
@@ -477,8 +592,6 @@ def _draw_invisible(
     height: float,
 ) -> None:
     """Write ``words`` invisibly over ``box`` (fractions of the page from its top-left), stretched to its width."""
-    from . import _cf
-
     if not words.strip():
         return
     left, top, wide, tall = box[0] * width, box[1] * height, box[2] * width, box[3] * height
@@ -528,59 +641,33 @@ def watermark(
     if not 0.0 < opacity <= 1.0:
         raise ValueError("opacity must be above 0.0 and at most 1.0, not {}".format(opacity))
     red, green, blue = _color(color)
-    source = Path(path).expanduser().absolute()
-    if not source.exists():
-        raise FileNotFoundError(str(source))
-    from . import _cf
-
+    source = _files.existing(path)
     graphics, core_text = _graphics(), _core_text()
     document = _open_for_drawing(source, password)
     try:
         pages = graphics.CGPDFDocumentGetNumberOfPages(document)
+        probe, natural, _ = _line(text, 100)
+        _cf.release(probe)
 
-        def write(name: str) -> bool:
-            with _cf.owned(_cf.file_url(name)) as url:
-                context = graphics.CGPDFContextCreateWithURL(url, None, None)
-            if not context:
-                return False
+        def draw(context: int, index: int, width: float, height: float) -> None:
+            _draw_page(graphics, context, graphics.CGPDFDocumentGetPage(document, index + 1), width, height)
+            # The text along the page's diagonal, over 70% of its length.
+            angle = math.atan2(height, width)
+            size = 100 * 0.7 * math.hypot(width, height) / max(natural, 1.0)
+            line, line_width, line_height = _line(text, size)
             try:
-                for number in range(1, pages + 1):
-                    page = graphics.CGPDFDocumentGetPage(document, number)
-                    box = graphics.CGPDFPageGetBoxRect(page, _MEDIA_BOX)
-                    width, height = box.size.width, box.size.height
-                    if graphics.CGPDFPageGetRotationAngle(page) % 180:
-                        width, height = height, width  # draw it as it shows, turned
-                    frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
-                    graphics.CGContextBeginPage(context, ctypes.byref(frame))
-                    graphics.CGContextSaveGState(context)
-                    graphics.CGContextConcatCTM(
-                        context, graphics.CGPDFPageGetDrawingTransform(page, _MEDIA_BOX, frame, 0, True)
-                    )
-                    graphics.CGContextDrawPDFPage(context, page)
-                    graphics.CGContextRestoreGState(context)
-                    # The text along the page's diagonal, over 70% of its length.
-                    angle = math.atan2(height, width)
-                    probe, natural, _ = _line(text, 100)
-                    _cf.release(probe)
-                    size = 100 * 0.7 * math.hypot(width, height) / max(natural, 1.0)
-                    line, line_width, line_height = _line(text, size)
-                    try:
-                        graphics.CGContextSaveGState(context)
-                        graphics.CGContextSetRGBFillColor(context, red, green, blue, opacity)
-                        graphics.CGContextTranslateCTM(context, width / 2, height / 2)
-                        graphics.CGContextRotateCTM(context, angle)
-                        graphics.CGContextSetTextPosition(context, -line_width / 2, -line_height / 3)
-                        core_text.CTLineDraw(line, context)
-                        graphics.CGContextRestoreGState(context)
-                    finally:
-                        _cf.release(line)
-                    graphics.CGContextEndPage(context)
-                graphics.CGPDFContextClose(context)
+                graphics.CGContextSaveGState(context)
+                graphics.CGContextSetRGBFillColor(context, red, green, blue, opacity)
+                graphics.CGContextTranslateCTM(context, width / 2, height / 2)
+                graphics.CGContextRotateCTM(context, angle)
+                graphics.CGContextSetTextPosition(context, -line_width / 2, -line_height / 3)
+                core_text.CTLineDraw(line, context)
+                graphics.CGContextRestoreGState(context)
             finally:
-                graphics.CGContextRelease(context)
-            return True
+                _cf.release(line)
 
-        return _write_atomically(output, write)
+        sizes = [_seen_size(graphics, graphics.CGPDFDocumentGetPage(document, number)) for number in range(1, pages + 1)]
+        return _write_pages(output, sizes, draw)
     finally:
         graphics.CGPDFDocumentRelease(document)
 
@@ -593,7 +680,9 @@ def compress(path: PathLike, output: PathLike, *, password: Optional[str] = None
     and photos several times smaller; text and drawings stay sharp. Photos
     lose detail, so keep the original. A PDF with no images to shrink (only
     text) can't get smaller: then ``output`` is a copy of it, never a bigger
-    file. ``password`` opens an encrypted PDF; the result isn't encrypted.
+    file. ``password`` opens an encrypted PDF; the result isn't encrypted,
+    so the copy it may fall back to is the decrypted PDF, which can come
+    out a little bigger than the encrypted file.
     """
     return _filtered(path, output, "Reduce File Size", password, keep_smaller=True)
 
@@ -626,40 +715,29 @@ def _filtered(path: PathLike, output: PathLike, name: str, password: Optional[st
             _objc.nsstring("QuartzFilter"),
             argtypes=(_objc.id, _objc.id),
         )
-        encrypted = bool(_objc.send(document, "isEncrypted", restype=BOOL))
-        source = Path(path).expanduser().absolute()
-        target = Path(output).expanduser().absolute()
-        if encrypted:
-            # PDFKit keeps the encryption when it writes an unlocked
-            # document: copy its pages into a new, unencrypted one.
-            plain = _new_document()
-            for number in range(1, _count(document) + 1):
-                _append(plain, _page(document, number))
-            document = plain
-        if not keep_smaller or encrypted:
+        if not keep_smaller:
             return _save(document, output, options)
-        # Rewriting a PDF can make it bigger (PDFKit writes less compactly
-        # than some tools do), and the filter only shrinks images: write it
-        # aside first, and keep the original when it isn't smaller. That also
-        # protects the original when the output is the input itself.
-        handle, name = tempfile.mkstemp(dir=str(target.parent) if target.parent.is_dir() else None, suffix=".pdf")
-        os.close(handle)
-        candidate = Path(name)
-        try:
-            _save(document, candidate, options)
-            smaller = candidate.stat().st_size < source.stat().st_size
-        except BaseException:
-            candidate.unlink(missing_ok=True)
-            raise
-    try:
-        if smaller:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(candidate), str(target))
-        elif target != source:
-            _write_atomically(target, lambda name: bool(shutil.copyfile(str(source), name)))
-    finally:
-        candidate.unlink(missing_ok=True)
-    return target
+        source = Path(path).expanduser().absolute()
+        encrypted = bool(_objc.send(document, "isEncrypted", restype=BOOL))
+        plain = _decrypted(document)
+
+        def write(name: str) -> bool:
+            # Rewriting a PDF can make it bigger (PDFKit writes less compactly than some tools do), and the
+            # filter only shrinks images: keep the original when the filtered PDF isn't smaller. An
+            # encrypted original can't be kept as it is, since the result is never encrypted: its
+            # decrypted copy, unfiltered, stands for it. All of it beside the output, moved in place at
+            # the end, which also protects the original when the output is the input itself.
+            if not _write_pdf(plain, name, options):
+                return False
+            if encrypted:
+                fallback = name + ".unfiltered.pdf"
+                if _write_pdf(plain, fallback) and os.path.getsize(fallback) < os.path.getsize(name):
+                    os.replace(fallback, name)
+            elif os.path.getsize(name) >= source.stat().st_size:
+                shutil.copyfile(str(source), name)
+            return True
+
+        return _files.write_atomically(output, write)
 
 
 def render(path: PathLike, page: int = 1, *, size: int = 1024, password: Optional[str] = None) -> bytes:
@@ -731,6 +809,15 @@ def _graphics() -> ctypes.CDLL:
         "CGContextSetTextPosition": ((pointer, ctypes.c_double, ctypes.c_double), None),
         "CGContextSetTextDrawingMode": ((pointer, ctypes.c_int32), None),
         "CGContextScaleCTM": ((pointer, ctypes.c_double, ctypes.c_double), None),
+        "CGContextFillRect": ((pointer, _objc.CGRect), None),
+        "CGColorSpaceCreateDeviceRGB": ((), pointer),
+        "CGColorSpaceRelease": ((pointer,), None),
+        "CGBitmapContextCreate": (
+            (pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32),
+            pointer,
+        ),
+        "CGBitmapContextCreateImage": ((pointer,), pointer),
+        "CGImageRelease": ((pointer,), None),
     }
     for name, (argtypes, restype) in signatures.items():
         function = getattr(graphics, name)
@@ -802,31 +889,22 @@ def from_images(images: Sequence[Union[PathLike, bytes]], output: PathLike) -> P
                 raise ValueError("{} is not an image macOS can read".format(label))
             pictures.append((picture, orientation))
 
-        def write(name: str) -> bool:
-            with _cf.owned(_cf.file_url(name)) as url:
-                context = graphics.CGPDFContextCreateWithURL(url, None, None)
-            if not context:
-                return False
-            try:
-                for picture, orientation in pictures:
-                    width, height = float(graphics.CGImageGetWidth(picture)), float(graphics.CGImageGetHeight(picture))
-                    upright = (height, width) if orientation in (5, 6, 7, 8) else (width, height)
-                    page = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(*upright))
-                    graphics.CGContextBeginPage(context, ctypes.byref(page))
-                    graphics.CGContextSaveGState(context)
-                    graphics.CGContextConcatCTM(
-                        context, _objc.CGAffineTransform(*_upright_transform(orientation, width, height))
-                    )
-                    area = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
-                    graphics.CGContextDrawImage(context, area, picture)
-                    graphics.CGContextRestoreGState(context)
-                    graphics.CGContextEndPage(context)
-                graphics.CGPDFContextClose(context)
-            finally:
-                graphics.CGContextRelease(context)
-            return True
+        def stored(picture: int) -> Tuple[float, float]:
+            return float(graphics.CGImageGetWidth(picture)), float(graphics.CGImageGetHeight(picture))
 
-        return _write_atomically(output, write)
+        def draw(context: int, index: int, page_width: float, page_height: float) -> None:
+            picture, orientation = pictures[index]
+            width, height = stored(picture)
+            graphics.CGContextSaveGState(context)
+            graphics.CGContextConcatCTM(context, _objc.CGAffineTransform(*_upright_transform(orientation, width, height)))
+            graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)), picture)
+            graphics.CGContextRestoreGState(context)
+
+        sizes = []
+        for picture, orientation in pictures:
+            width, height = stored(picture)
+            sizes.append((height, width) if orientation in (5, 6, 7, 8) else (width, height))
+        return _write_pages(output, sizes, draw)
     finally:
         for picture, _ in pictures:
             _cf.release(picture)
@@ -1130,44 +1208,33 @@ def sign(
                 _page(document, target)  # checks the number
             aspect = graphics.CGImageGetHeight(picture) / max(graphics.CGImageGetWidth(picture), 1)
 
-            def write(name: str) -> bool:
-                with _cf.owned(_cf.file_url(name)) as url:
-                    context = graphics.CGPDFContextCreateWithURL(url, None, None)
-                if not context:
-                    return False
-                try:
-                    for number in range(1, count + 1):
-                        current = _page(document, number)
-                        bounds = _objc.send(
-                            current, "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect
-                        )
-                        if _objc.send(current, "rotation", restype=ctypes.c_long) % 180:
-                            bounds = _objc.CGRect(bounds.origin, _objc.CGSize(bounds.size.height, bounds.size.width))
-                        box = _objc.CGRect(_objc.CGPoint(0, 0), bounds.size)
-                        graphics.CGContextBeginPage(context, ctypes.byref(box))
-                        # PDFKit draws the page as it looks, rotation and form fields included.
-                        _objc.send(
-                            current,
-                            "drawWithBox:toContext:",
-                            _MEDIA_BOX,
-                            context,
-                            argtypes=(ctypes.c_long, _objc.id),
-                            restype=None,
-                        )
-                        if number == target:
-                            size = _objc.CGSize(width, width * aspect)
-                            if anchor is not None:
-                                x, y = _next_to(anchor, size.width, size.height, side, gap)
-                            else:
-                                x, y = _origin(corner, size.width, size.height, box.size.width, box.size.height, margin)
-                            graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(x, y), size), picture)
-                        graphics.CGContextEndPage(context)
-                    graphics.CGPDFContextClose(context)
-                finally:
-                    graphics.CGContextRelease(context)
-                return True
+            def seen(number: int) -> Tuple[float, float]:
+                bounds = _objc.send(
+                    _page(document, number), "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect
+                )
+                if _objc.send(_page(document, number), "rotation", restype=ctypes.c_long) % 180:
+                    return bounds.size.height, bounds.size.width
+                return bounds.size.width, bounds.size.height
 
-            return _write_atomically(output, write)
+            def draw(context: int, index: int, page_width: float, page_height: float) -> None:
+                # PDFKit draws the page as it looks, rotation and form fields included.
+                _objc.send(
+                    _page(document, index + 1),
+                    "drawWithBox:toContext:",
+                    _MEDIA_BOX,
+                    context,
+                    argtypes=(ctypes.c_long, _objc.id),
+                    restype=None,
+                )
+                if index + 1 == target:
+                    size = _objc.CGSize(width, width * aspect)
+                    if anchor is not None:
+                        x, y = _next_to(anchor, size.width, size.height, side, gap)
+                    else:
+                        x, y = _origin(corner, size.width, size.height, page_width, page_height, margin)
+                    graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(x, y), size), picture)
+
+            return _write_pages(output, [seen(number) for number in range(1, count + 1)], draw)
     finally:
         _cf.release(picture)
 
@@ -1405,6 +1472,7 @@ _RAW, _JPEG, _JPEG2000 = 0, 1, 2  # CGPDFDataFormat
 _COMPONENTS = {b"DeviceRGB": 3, b"DeviceGray": 1, b"DeviceCMYK": 4}
 _CALIBRATED = {b"CalRGB": 3, b"CalGray": 1}  # written as arrays: [/CalRGB << ... >>], drawn here as device colors
 _Visitor = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p)
+_INVERTED = bytes(range(255, -1, -1))  # each 8-bit sample s becomes 255 - s, through bytes.translate
 
 
 @lru_cache(maxsize=None)
@@ -1427,16 +1495,13 @@ def _pdf_objects() -> ctypes.CDLL:
         "CGPDFStreamCopyData": ((pointer, ctypes.POINTER(ctypes.c_int)), pointer),
         "CGDataProviderCreateWithCFData": ((pointer,), pointer),
         "CGDataProviderRelease": ((pointer,), None),
-        "CGColorSpaceCreateDeviceRGB": ((), pointer),
         "CGColorSpaceCreateDeviceGray": ((), pointer),
         "CGColorSpaceCreateDeviceCMYK": ((), pointer),
-        "CGColorSpaceRelease": ((pointer,), None),
         "CGImageCreate": (
             (ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32,
              pointer, pointer, ctypes.c_bool, ctypes.c_int),
             pointer,
         ),
-        "CGImageRelease": ((pointer,), None),
     }
     for name, (argtypes, restype) in signatures.items():
         function = getattr(graphics, name)
@@ -1525,7 +1590,7 @@ def _save_image(graphics: ctypes.CDLL, stream: int, target: Path) -> Optional[Pa
         pixels = data
         if mapping == "inverted":
             # A new buffer with the samples flipped; the original stays with its owner above.
-            pixels = _cf.data(bytes(255 - value for value in _cf.to_bytes(data)[: width * height * components]))
+            pixels = _cf.data(_cf.to_bytes(data)[: width * height * components].translate(_INVERTED))
         create = {1: "CGColorSpaceCreateDeviceGray", 3: "CGColorSpaceCreateDeviceRGB", 4: "CGColorSpaceCreateDeviceCMYK"}
         space = getattr(graphics, create[components])()
         provider = graphics.CGDataProviderCreateWithCFData(pixels)
@@ -1635,15 +1700,11 @@ def images(
 Target = Union[str, "re.Pattern[str]"]
 
 
-class _NSRange(ctypes.Structure):
-    _fields_ = [("location", NSUInteger), ("length", NSUInteger)]
-
-
 _CROP_BOX = 1  # kPDFDisplayBoxCropBox: the part of the page that shows
 _REDACTION_SCALE = 3.0  # 216 dots per inch: sharp enough to read and print the rest of the page
 _REDACTION_LONGEST = 6000  # pixels, for huge pages
 _BLOCK = "\u2588"  # █, what redacted text becomes in metadata and bookmarks
-_OPAQUE_RGB = 5  # kCGImageAlphaNoneSkipLast
+_REDACTION_QUALITY = 0.9  # JPEG quality of a flattened page: crisp text, a fraction of the raw pixels
 
 
 def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.Pattern[str]"]]:
@@ -1771,7 +1832,7 @@ def _redactions(
             if not match.group():
                 continue
             start, end = offsets[match.start()], offsets[match.end()]
-            selection = _objc.send(page, "selectionForRange:", _NSRange(start, end - start), argtypes=(_NSRange,))
+            selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
             if not selection:
                 raise MacOSError(
                     "{!r} is on page {}, but where it's drawn can't be told, so nothing was written".format(label, number)
@@ -1803,30 +1864,11 @@ def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> 
     Replace page ``number`` with a picture of it, the ``boxes`` blacked out: its text is gone, not covered.
 
     The picture is of the page's visible part (its crop box), as it's seen: what was cropped away is gone
-    too, and the new page shows the same size.
+    too, and the new page shows the same size. It's kept as a JPEG, as PDFKit would write it anyway:
+    the document holds every flattened page until it's saved, a few hundred kilobytes each this way,
+    not the tens of megabytes of their raw pixels.
     """
     graphics = _graphics()
-    graphics.CGColorSpaceCreateDeviceRGB.argtypes = ()
-    graphics.CGColorSpaceCreateDeviceRGB.restype = ctypes.c_void_p
-    graphics.CGColorSpaceRelease.argtypes = (ctypes.c_void_p,)
-    graphics.CGColorSpaceRelease.restype = None
-    graphics.CGBitmapContextCreate.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    )
-    graphics.CGBitmapContextCreate.restype = ctypes.c_void_p
-    graphics.CGBitmapContextCreateImage.argtypes = (ctypes.c_void_p,)
-    graphics.CGBitmapContextCreateImage.restype = ctypes.c_void_p
-    graphics.CGContextFillRect.argtypes = (ctypes.c_void_p, _objc.CGRect)
-    graphics.CGContextFillRect.restype = None
-    graphics.CGImageRelease.argtypes = (ctypes.c_void_p,)
-    graphics.CGImageRelease.restype = None
-
     page = _page(document, number)
     bounds = _objc.send(page, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
     width, height = bounds.size.width, bounds.size.height
@@ -1853,9 +1895,13 @@ def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> 
             margin = 1.0  # a point around it: no edge of a letter peeks out
             area = _objc.CGRect(_objc.CGPoint(x - margin, y - margin), _objc.CGSize(wide + 2 * margin, tall + 2 * margin))
             graphics.CGContextFillRect(context, area)
-        picture = graphics.CGBitmapContextCreateImage(context)
+        raw = graphics.CGBitmapContextCreateImage(context)
     finally:
         graphics.CGContextRelease(context)
+    if not raw:
+        raise MacOSError("could not draw page {}".format(number))
+    with _cf.owned(raw):
+        picture = _jpeg(raw, _REDACTION_QUALITY)
     if not picture:
         raise MacOSError("could not draw page {}".format(number))
     try:
@@ -1875,6 +1921,32 @@ def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> 
         graphics.CGImageRelease(picture)
     _objc.send(document, "insertPage:atIndex:", flat, number - 1, argtypes=(_objc.id, NSUInteger), restype=None)
     _objc.send(document, "removePageAtIndex:", number, argtypes=(NSUInteger,), restype=None)
+
+
+def _jpeg(picture: int, quality: float) -> Optional[int]:
+    """
+    An owned ``CGImage`` of ``picture`` compressed as a JPEG, or ``None``.
+
+    It reads from the JPEG's bytes, which a PDF context embeds as they are:
+    compressed once, here, not again when the PDF is written.
+    """
+    from . import image as images
+
+    io = images._io()
+    encoded = _objc.send(_objc.cls("NSMutableData"), "data")  # a CFMutableData, autoreleased
+    with _cf.owned(_cf.string("public.jpeg")) as kind:
+        destination = io.CGImageDestinationCreateWithData(encoded, kind, 1, None)
+    if not destination:
+        return None
+    with _cf.owned(destination), _cf.owned(images._options({"kCGImageDestinationLossyCompressionQuality": quality})) as options:
+        io.CGImageDestinationAddImage(destination, picture, options)
+        if not io.CGImageDestinationFinalize(destination):
+            return None
+    with _cf.owned(io.CGImageSourceCreateWithData(encoded, None)) as source:
+        if not source:
+            return None
+        compressed = io.CGImageSourceCreateImageAtIndex(source, 0, None)
+    return int(compressed) if compressed else None
 
 
 def _scrub(text: str, patterns: Sequence[Tuple[str, "re.Pattern[str]"]], counts: List[int]) -> str:
@@ -2007,7 +2079,10 @@ def redact(
                 "or run macos.pdf.ocr() first on a scan".format(", ".join(missing))
             )
         for number, boxes in flatten.items():
-            _flatten(document, number, boxes)
+            # A pool per page: drawing one leaves autoreleased objects behind, which would pile up until the
+            # end of a long PDF.
+            with _objc.autorelease_pool():
+                _flatten(document, number, boxes)
         saved = _save(document, output)
     matches = {label: count for (label, _), count in zip(patterns, counts)}
     return Redaction(path=saved, matches=matches, pages=per_page)

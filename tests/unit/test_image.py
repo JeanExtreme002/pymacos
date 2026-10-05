@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.image`. They run on any platform."""
 
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -104,3 +105,46 @@ def test_image_argument_checks(tmp_path):
         macos.image.contact_sheet([], tmp_path / "out.png")
     with pytest.raises(ValueError, match="positive"):
         macos.image.contact_sheet([__file__], tmp_path / "out.png", columns=0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_a_metadata_copy_takes_the_format_of_its_extension(tmp_path):
+    from tests.helpers import rgb_png
+
+    picture = tmp_path / "picture.png"
+    picture.write_bytes(rgb_png(40, 30, lambda x, y: (200, 30, 30)))
+    photo = macos.image.convert(picture, tmp_path / "photo.jpg")
+    when = datetime(2024, 5, 1, 10, 30)
+
+    as_png = macos.image.set_taken_at(photo, when, output=tmp_path / "copy.png")
+    assert as_png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" and macos.image.info(as_png).format == "png"
+    assert macos.image.taken_at(as_png) == when
+    same = macos.image.set_location(photo, -22.95, -43.21, output=tmp_path / "copy.jpeg")
+    assert macos.image.info(same).format == "jpeg" and macos.image.location(same) == pytest.approx((-22.95, -43.21))
+    # In place, the image keeps its own format, whatever its name says.
+    misnamed = tmp_path / "really-a-jpeg.png"
+    misnamed.write_bytes(photo.read_bytes())
+    macos.image.set_taken_at(misnamed, when)
+    assert misnamed.read_bytes()[:2] == b"\xff\xd8" and macos.image.taken_at(misnamed) == when
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_written_images_get_the_usual_permissions(tmp_path):
+    import os
+    import stat
+
+    from tests.helpers import rgb_png
+
+    old = os.umask(0o022)
+    try:
+        picture = tmp_path / "picture.png"
+        picture.write_bytes(rgb_png(40, 30, lambda x, y: (200, 30, 30)))
+        photo = macos.image.convert(picture, tmp_path / "new" / "photo.jpg")
+        assert stat.S_IMODE(photo.stat().st_mode) == 0o644
+        os.chmod(str(photo), 0o660)
+        macos.image.set_taken_at(photo, datetime(2024, 5, 1, 10, 30))
+        macos.image.rotate(photo, photo, 90)
+        assert stat.S_IMODE(photo.stat().st_mode) == 0o660
+        assert os.listdir(str(photo.parent)) == ["photo.jpg"]
+    finally:
+        os.umask(old)

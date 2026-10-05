@@ -65,7 +65,9 @@ macos.audio.request_permission()
 If the user denies it, {mod}`macos.camera`, {func}`macos.audio.record`,
 {func}`~macos.audio.record_until_silence` and {func}`~macos.audio.input_level` raise
 {class}`~macos.PermissionDeniedError`; allow it again in System Settings ›
-Privacy & Security, then restart the app running Python.
+Privacy & Security, then restart the app running Python. If the prompt is left
+unanswered until the time runs out, they raise {class}`~macos.PromptTimeoutError`
+instead: run the call again and answer it.
 
 ## Accessibility
 

@@ -39,6 +39,16 @@ it produced none. When the shortcut outputs a file (an image, a PDF...), pass
 macos.shortcuts.run("Make GIF", input=[Path("a.png"), Path("b.png")], output="animation.gif")
 ```
 
+`timeout` stops a shortcut still running after that many seconds (one stuck
+on a prompt, say) and raises {class}`~macos.errors.CommandTimeoutError`:
+
+```python
+macos.shortcuts.run("Backup Notes", timeout=60)
+```
+
+Names are passed as names: a shortcut called `--help` runs that shortcut, it
+doesn't print the command's usage.
+
 ## Listing shortcuts
 
 ```python

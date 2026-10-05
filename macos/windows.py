@@ -33,7 +33,7 @@ from typing import Any, Optional, Sequence, Tuple, Union
 from . import _cf, _objc, apps
 from ._objc import CGPoint, CGSize
 from ._system import framework, run as _run
-from .errors import MacOSError, PermissionDeniedError
+from .errors import CommandError, MacOSError, PermissionDeniedError
 
 __all__ = [
     "Window",
@@ -56,6 +56,7 @@ __all__ = [
 ]
 
 _SUCCESS = 0
+_FAILURE = -25200  # kAXErrorFailure: the app refused, without saying why
 _API_DISABLED = -25211  # kAXErrorAPIDisabled: no Accessibility permission
 _INVALID_ELEMENT = -25202  # kAXErrorInvalidUIElement: the window is gone
 _CANNOT_COMPLETE = -25204  # kAXErrorCannotComplete: the app didn't answer, or quit
@@ -101,10 +102,20 @@ def request_permission() -> bool:
     Privacy & Security › Accessibility, that app must be restarted.
     """
     ax = _accessibility()
-    key = ctypes.c_void_p.in_dll(ax, "kAXTrustedCheckOptionPrompt").value or 0
+    key = ctypes.c_void_p.in_dll(ax, "kAXTrustedCheckOptionPrompt").value
+    if not key:  # a NULL key can't go in a dictionary
+        raise MacOSError("could not ask for the Accessibility permission: macOS lacks its prompt option")
     options = _cf.dictionary({key: _cf.constant(_cf.lib(), "kCFBooleanTrue")})
     with _cf.owned(options):
         return bool(ax.AXIsProcessTrustedWithOptions(options))
+
+
+class _AXError(MacOSError):
+    """An Accessibility call failed with ``status`` (an AXError), for the callers that tell the codes apart."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _check(status: int, what: str) -> None:
@@ -116,10 +127,10 @@ def _check(status: int, what: str) -> None:
             "System Settings › Privacy & Security › Accessibility, then restart it"
         )
     if status == _INVALID_ELEMENT:
-        raise MacOSError("could not {}: the window is gone".format(what))
+        raise _AXError("could not {}: the window is gone".format(what), status)
     if status == _CANNOT_COMPLETE:
-        raise MacOSError("could not {}: its app didn't answer (it may be busy, or have quit)".format(what))
-    raise MacOSError("could not {} (AXError {})".format(what, status))
+        raise _AXError("could not {}: its app didn't answer (it may be busy, or have quit)".format(what), status)
+    raise _AXError("could not {} (AXError {})".format(what, status), status)
 
 
 def _copy(element: int, attribute: str) -> Tuple[int, Optional[int]]:
@@ -245,8 +256,8 @@ class Window:
         def request() -> None:
             try:
                 self._set_flag("AXFullScreen", on, what)
-            except MacOSError as error:
-                if on and "AXError -25200" in str(error):  # kAXErrorFailure
+            except _AXError as error:
+                if on and error.status == _FAILURE:
                     raise MacOSError("this window can't go full screen: its app doesn't allow it") from None
                 raise
 
@@ -302,26 +313,14 @@ class Window:
         """
         Center it on the display it's on (the main one, if it's on none), keeping its size.
 
-        A window taller than the display keeps its top edge on the display.
+        Like :meth:`snap`, it centers in the area the menu bar and the Dock
+        leave. A window taller than that keeps its top edge below the menu bar.
         """
-        from . import screen
-
-        x, y, width, height = self.frame
-        middle_x, middle_y = x + width / 2, y + height / 2
-        displays = screen.displays()
-        if not displays:
-            raise MacOSError("no display is connected")
-        display = next(
-            (
-                candidate
-                for candidate in displays
-                if candidate.x <= middle_x < candidate.x + candidate.width
-                and candidate.y <= middle_y < candidate.y + candidate.height
-            ),
-            displays[0],  # the main display comes first
-        )
-        left = display.x + (display.width - width) / 2
-        top = max(display.y + (display.height - height) / 2, display.y)
+        frame = self.frame
+        area_x, area_y, area_width, area_height = _area_of(frame, _usable_areas())
+        _, _, width, height = frame
+        left = area_x + (area_width - width) / 2
+        top = max(area_y + (area_height - height) / 2, area_y)
         self.move(round(left), round(top))
 
     def snap(self, layout: str, *, display: Optional[int] = None) -> None:
@@ -349,12 +348,7 @@ class Window:
                 raise ValueError("there's no display {}: there are {}".format(display, len(areas)))
             area = areas[display - 1]
         else:
-            x, y, width, height = self.frame
-            middle_x, middle_y = x + width / 2, y + height / 2
-            area = next(
-                (a for a in areas if a[0] <= middle_x < a[0] + a[2] and a[1] <= middle_y < a[1] + a[3]),
-                areas[0],
-            )
+            area = _area_of(self.frame, areas)
         left, top, wide, tall = LAYOUTS[layout]
         area_x, area_y, area_width, area_height = area
         self.set_frame(
@@ -454,6 +448,22 @@ LAYOUTS = {
     "maximize": (0.0, 0.0, 1.0, 1.0),
 }
 """The layouts :meth:`Window.snap` takes: ``(x, y, width, height)`` as fractions of the display's usable area."""
+
+
+def _index_of(frame: Tuple[int, int, int, int], areas: Sequence[Tuple[float, float, float, float]]) -> int:
+    """Which of ``areas`` holds the middle of ``frame``: the main display's (0) when none does."""
+    x, y, width, height = frame
+    middle_x, middle_y = x + width / 2, y + height / 2
+    for index, (left, top, wide, tall) in enumerate(areas):
+        if left <= middle_x < left + wide and top <= middle_y < top + tall:
+            return index
+    return 0  # off every display: the main one
+
+
+def _area_of(
+    frame: Tuple[int, int, int, int], areas: Sequence[Tuple[float, float, float, float]]
+) -> Tuple[float, float, float, float]:
+    return areas[_index_of(frame, areas)]
 
 
 def _usable_areas() -> "builtins.list[Tuple[float, float, float, float]]":
@@ -605,11 +615,16 @@ def set_double_click_title_bar(action: Optional[str]) -> None:
     defaults.write(defaults.GLOBAL, "AppleActionOnDoubleClick", _TITLE_BAR_ACTIONS[action])
 
 
+_NO_MATCHING_PROCESS = 1  # killall's exit status when no process has the name
+
+
 def _restart_window_manager() -> None:
     try:
         _run(["killall", "WindowManager"])  # macOS starts it again, reading the settings
-    except MacOSError:
-        pass  # not running: it reads them when it starts
+    except CommandError as error:
+        if error.returncode != _NO_MATCHING_PROCESS:
+            raise
+        # Not running: it reads them when it starts.
 
 
 def tiling() -> bool:
@@ -678,6 +693,9 @@ def _grid(
     rows = math.ceil(count / across)
     x, y, width, height = area
     height_each = (height - gap * (rows + 1)) / rows
+    narrowest = (width - gap * (across + 1)) / across
+    if height_each < 1 or narrowest < 1:
+        raise ValueError("a gap of {} points leaves no room for {} windows on the display".format(gap, count))
     frames = []
     for row in range(rows):
         in_row = min(across, count - row * across)
@@ -698,12 +716,7 @@ def _grid(
 
 
 def _display_of(window: Window, areas: Sequence[Tuple[float, float, float, float]]) -> int:
-    x, y, width, height = window.frame
-    middle_x, middle_y = x + width / 2, y + height / 2
-    for index, (left, top, wide, tall) in enumerate(areas):
-        if left <= middle_x < left + wide and top <= middle_y < top + tall:
-            return index
-    return 0  # off every display: the main one
+    return _index_of(window.frame, areas)
 
 
 def tile(
@@ -736,10 +749,14 @@ def tile(
         x, y = window.position
         target = display - 1 if display is not None else _display_of(window, areas)
         groups.setdefault(target, []).append(((y, x), window))
+    # Every frame worked out before the first window moves: a gap too large
+    # for one display raises with nothing tiled, rather than half the windows.
+    moves: "builtins.list[Tuple[Window, Tuple[int, int, int, int]]]" = []
     for index, members in groups.items():
         members.sort(key=lambda member: member[0])  # as they're arranged now, so tiling again keeps them in place
-        for (_, window), frame in zip(members, _grid(len(members), areas[index], columns, gap)):
-            window.set_frame(*frame)
+        moves.extend(zip((window for _, window in members), _grid(len(members), areas[index], columns, gap)))
+    for window, frame in moves:
+        window.set_frame(*frame)
 
 
 def tile_all(

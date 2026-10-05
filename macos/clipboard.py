@@ -41,6 +41,10 @@ __all__ = [
 _TYPE_STRING = "public.utf8-plain-text"  # NSPasteboardTypeString
 _TYPE_PNG = "public.png"  # NSPasteboardTypePNG
 _TYPE_TIFF = "public.tiff"  # NSPasteboardTypeTIFF
+# The nspasteboard.org markers clipboard managers (Alfred, Raycast, Maccy,
+# Paste, 1Password's own...) honor: Concealed, don't show or store the
+# contents; Transient, don't keep them in the history. Their value is unused.
+_MARKERS = ("org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType")
 
 
 def _pasteboard() -> int:
@@ -48,11 +52,31 @@ def _pasteboard() -> int:
     return _objc.send(_objc.cls("NSPasteboard"), "generalPasteboard")
 
 
-def copy(text: str) -> None:
-    """Replace the clipboard contents with ``text``."""
+def copy(text: str, *, sensitive: bool = False) -> None:
+    """
+    Replace the clipboard contents with ``text``.
+
+    ``sensitive=True``, for a password or a token, also marks it as concealed
+    and transient, so clipboard managers that follow the nspasteboard.org
+    convention (most do) neither show it nor keep it in their history. Apps
+    pasting it get the text as usual. It's a request, not a protection: any
+    app can still read the clipboard; clear it after use.
+    """
     with _objc.autorelease_pool():
         pasteboard = _pasteboard()
         _objc.send(pasteboard, "clearContents", restype=NSInteger)
+        # The markers go first, so a manager reading as soon as the text lands already sees them.
+        for marker in _MARKERS if sensitive else ():
+            if not _objc.send(
+                pasteboard,
+                "setData:forType:",
+                _objc.nsdata(b""),
+                _objc.nsstring(marker),
+                argtypes=(_objc.id, _objc.id),
+                restype=BOOL,
+            ):
+                _objc.send(pasteboard, "clearContents", restype=NSInteger)
+                raise MacOSError("the pasteboard refused the sensitive-content markers")
         ok = _objc.send(
             pasteboard,
             "setString:forType:",
@@ -161,7 +185,11 @@ def copy_image(image: Union[bytes, str, "os.PathLike[str]"]) -> None:
     Any format macOS can open works (PNG, JPEG, HEIC, GIF, TIFF, PDF...).
     Other apps receive it the same way as an image copied in Preview.
     """
-    data = bytes(image) if isinstance(image, (bytes, bytearray)) else open(os.fspath(image), "rb").read()
+    if isinstance(image, (bytes, bytearray)):
+        data = bytes(image)
+    else:
+        with open(os.fspath(image), "rb") as file:
+            data = file.read()
     framework("AppKit")  # defines NSImage
     with _objc.autorelease_pool():
         picture = _objc.send(_objc.cls("NSImage"), "alloc")

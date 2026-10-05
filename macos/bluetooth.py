@@ -22,7 +22,7 @@ import json
 import time
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Set, Tuple, Union
 
 from . import _objc
 from ._system import framework, run as _run
@@ -153,14 +153,19 @@ def devices() -> List[Device]:
     except ValueError:
         raise MacOSError("system_profiler returned something unexpected") from None
     found: List[Device] = []
-    seen = set()
+    seen: Set[Tuple[str, str]] = set()
     for section in sections:
         for key, connected in (("device_connected", True), ("device_not_connected", False)):
             for entry in section.get(key) or []:
                 for name, properties in _entries(entry):
                     device = _device(name, properties, connected)
-                    if device.address not in seen:
-                        seen.add(device.address)
+                    # The same device can be listed twice (connected, and in the
+                    # paired list): one entry each. Some (a few accessories,
+                    # older macOS) come without an address: tell those apart by
+                    # name, or they'd all collapse into the first one.
+                    identity = ("address", device.address) if device.address else ("name", device.name)
+                    if identity not in seen:
+                        seen.add(identity)
                         found.append(device)
     return found
 
@@ -169,10 +174,13 @@ def _find(target: Union[str, Device]) -> Device:
     """A paired device by :class:`Device`, address, full name or a unique part of its name."""
     if isinstance(target, Device):
         return target
-    paired = devices()
     wanted = target.strip()
+    if not wanted:
+        # "" is part of every name: it would pick the only device paired.
+        raise ValueError("name a Bluetooth device: its address, its name or part of it")
+    paired = devices()
     for device in paired:
-        if wanted.upper().replace("-", ":") == device.address or wanted == device.name:
+        if (device.address and wanted.upper().replace("-", ":") == device.address) or wanted == device.name:
             return device
     loose = [device for device in paired if wanted.casefold() in device.name.casefold()]
     if len(loose) == 1:

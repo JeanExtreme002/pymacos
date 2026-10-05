@@ -53,3 +53,19 @@ def test_sleep_blockers_keep_the_ones_that_block_sleep():
     local = started.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
     assert caffeinate.since == local and caffeinate.until == local + timedelta(seconds=300)
     assert blockers[1].until is None and blockers[1].reason == "Video Wake Lock" and blockers[1].pid == 990
+
+
+def test_iokit_is_declared_once_for_every_module():
+    import sys
+
+    import pytest
+
+    if sys.platform != "darwin":
+        pytest.skip("loads IOKit")
+    from macos import _cf, _iokit, _system
+
+    io = _iokit.lib()
+    assert io is _iokit.lib() is _system.framework("IOKit")  # one handle, its signatures set once
+    for name in ("IOPSCopyPowerSourcesInfo", "IOPSCopyExternalPowerAdapterDetails", "IORegistryEntryCreateCFProperty"):
+        assert getattr(io, name).restype is _cf.CFTypeRef
+    assert macos.power.battery() is None or 0 <= macos.power.battery().percent <= 100

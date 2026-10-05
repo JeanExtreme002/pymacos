@@ -161,3 +161,65 @@ def test_schedule_when_changed_and_at_mount(fake_run, home):
     assert plist["StartOnMount"] is True and plist["StartInterval"] == 600
     assert plist["WatchPaths"] == [str(home / "a"), str(Path("b").absolute())]
     assert job.at_mount is True and job.every == 600 and len(job.when_changed) == 2
+
+
+@pytest.mark.parametrize("name", ["backup\n", "back up", "", "-x"])
+def test_schedule_rejects_a_name_with_a_trailing_newline(fake_run, home, name):
+    with pytest.raises(ValueError, match="name must be"):
+        macos.schedule.add(name, home / "backup.py", every=60)
+
+
+def test_schedule_rejects_a_time_with_a_trailing_newline(fake_run, home):
+    with pytest.raises(ValueError, match="a time such as"):
+        macos.schedule.add("x", home / "backup.py", at="09:00\n9")
+
+
+def _failing_bootstrap(monkeypatch, fake_run):
+    import subprocess
+
+    from macos import _system
+
+    calls = []
+
+    def launchctl(args, **kwargs):
+        calls.append(list(args))
+        if args[1] == "bootstrap" and len([call for call in calls if call[1] == "bootstrap"]) == 1:
+            return subprocess.CompletedProcess(args, 5, "", "Bootstrap failed: 5: Input/output error")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", launchctl)
+    return calls
+
+
+def test_schedule_add_removes_its_plist_when_bootstrap_fails(fake_run, home, monkeypatch):
+    calls = _failing_bootstrap(monkeypatch, fake_run)
+
+    with pytest.raises(macos.errors.CommandError, match="Bootstrap failed"):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert not (home / "Library/LaunchAgents/pymacos.backup.plist").exists()  # nothing left for the next login
+    assert [call[1] for call in calls if call[1] == "bootstrap"] == ["bootstrap"]
+
+
+def test_schedule_add_restores_the_replaced_job_when_bootstrap_fails(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    calls = _failing_bootstrap(monkeypatch, fake_run)
+
+    with pytest.raises(macos.errors.CommandError):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert _plist(home, "backup")["StartInterval"] == 3600  # the old job is back...
+    path = str(home / "Library/LaunchAgents/pymacos.backup.plist")
+    assert calls[-1] == ["launchctl", "bootstrap", "gui/501", path]  # ...and loaded again
+
+
+def test_schedule_add_keeps_a_replaced_paused_job_paused_when_bootstrap_fails(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    calls = _failing_bootstrap(monkeypatch, fake_run)
+    monkeypatch.setattr(macos.schedule, "_paused", lambda: ["backup"])
+
+    with pytest.raises(macos.errors.CommandError):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert _plist(home, "backup")["StartInterval"] == 3600
+    assert calls[-1] == ["launchctl", "disable", "gui/501/pymacos.backup"]

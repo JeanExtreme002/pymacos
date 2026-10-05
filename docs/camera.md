@@ -49,6 +49,14 @@ macos.video.convert("hello.mov", "hello.mp4", quality="medium")
 `.mov`; {func}`macos.video.convert` makes it an `.mp4` or smaller. With sound,
 it also records the default microphone, which needs the Microphone permission.
 
+It records beside the file and moves the video in place once saved: if the
+recording fails, a file that was already there stays as it was.
+
+The camera reports back on the main thread's run loop, which these functions
+turn while they wait: call {func}`~macos.camera.photo` and
+{func}`~macos.camera.record` from the main thread. From another one they raise
+{class}`~macos.MacOSError`, instead of waiting for a photo that never comes.
+
 To know whether an app is using the camera right now, see
 {func}`macos.system.camera_in_use`.
 

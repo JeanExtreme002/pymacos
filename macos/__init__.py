@@ -51,63 +51,101 @@ docs builds), but its functions raise :class:`NotSupportedError` outside macOS.
 
 __version__ = "1.20.0"
 
-from . import (
-    appearance,
-    apps,
-    audio,
-    auth,
-    bluetooth,
-    browser,
-    camera,
-    clipboard,
-    defaults,
-    dialog,
-    dock,
-    document,
-    events,
-    finder,
-    hotkeys,
-    image,
-    keyboard,
-    keychain,
-    language,
-    maps,
-    menubar,
-    mouse,
-    music,
-    network,
-    notifications,
-    pdf,
-    power,
-    printer,
-    schedule,
-    screen,
-    settings,
-    shortcuts,
-    sound,
-    speech,
-    spotlight,
-    system,
-    time_machine,
-    trackpad,
-    video,
-    vision,
-    volume,
-    windows,
-)
+import importlib
+from typing import TYPE_CHECKING, Any, List
+
 from .errors import (
     AppNotFoundError,
     CommandError,
+    CommandTimeoutError,
     KeychainError,
     MacOSError,
     NotSupportedError,
     PermissionDeniedError,
+    PromptTimeoutError,
     ShortcutNotFoundError,
 )
-from .launch import open, open_with
-from .notifications import notify
-from .screen import screenshot
-from .speech import say
+
+if TYPE_CHECKING:  # what the lazy loading below provides, spelled out for type checkers
+    from . import (
+        appearance,
+        apps,
+        audio,
+        auth,
+        bluetooth,
+        browser,
+        camera,
+        clipboard,
+        defaults,
+        dialog,
+        dock,
+        document,
+        events,
+        finder,
+        hotkeys,
+        image,
+        keyboard,
+        keychain,
+        language,
+        maps,
+        menubar,
+        mouse,
+        music,
+        network,
+        notifications,
+        pdf,
+        power,
+        printer,
+        schedule,
+        screen,
+        settings,
+        shortcuts,
+        sound,
+        speech,
+        spotlight,
+        system,
+        time_machine,
+        trackpad,
+        video,
+        vision,
+        volume,
+        windows,
+    )
+    from .launch import open, open_with
+    from .notifications import notify
+    from .screen import screenshot
+    from .speech import say
+
+# The submodules, and the shortcuts to their most used functions, are imported
+# on first use (PEP 562): ``import macos`` stays fast, and a script that only
+# sends a notification never loads the PDF or video code.
+_SUBMODULES = frozenset({"appearance", "apps", "audio", "auth", "bluetooth", "browser", "camera", "clipboard", "defaults", "dialog", "dock", "document", "events", "finder", "hotkeys", "image", "keyboard", "keychain", "language", "maps", "menubar", "mouse", "music", "network", "notifications", "pdf", "power", "printer", "schedule", "screen", "settings", "shortcuts", "sound", "speech", "spotlight", "system", "time_machine", "trackpad", "video", "vision", "volume", "windows"})
+_SHORTCUTS = {
+    "open": "launch",
+    "open_with": "launch",
+    "notify": "notifications",
+    "screenshot": "screen",
+    "say": "speech",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SHORTCUTS:
+        value = getattr(importlib.import_module("." + _SHORTCUTS[name], __name__), name)
+        globals()[name] = value  # resolved once
+        return value
+    # Any submodule, private ones included, as when they were all imported up front.
+    try:
+        return importlib.import_module("." + name, __name__)
+    except ModuleNotFoundError as error:
+        if error.name != "{}.{}".format(__name__, name):
+            raise  # a module that exists failed to import something else
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | _SUBMODULES | set(_SHORTCUTS))
+
 
 __all__ = [
     "appearance",
@@ -158,9 +196,11 @@ __all__ = [
     "screenshot",
     "AppNotFoundError",
     "CommandError",
+    "CommandTimeoutError",
     "KeychainError",
     "MacOSError",
     "NotSupportedError",
     "PermissionDeniedError",
+    "PromptTimeoutError",
     "ShortcutNotFoundError",
 ]

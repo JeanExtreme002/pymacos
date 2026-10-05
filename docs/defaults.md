@@ -49,6 +49,12 @@ preferences when they start: restart the app to see it. For the Dock, the
 Finder and the screenshots, see [Dock](dock.md), [Finder](finder.md) and
 [Screen](screen.md), which restart what's needed.
 
+A domain this process can't write raises
+{class}`~macos.errors.PermissionDeniedError` instead of looking like it
+worked: one managed by a configuration profile, another user's or the
+system's, or a sandboxed app's container. The `set_*` functions built on it
+(appearance, trackpad, Dock...) raise it too.
+
 ## This Mac only
 
 A few settings are kept per Mac, such as the screen saver's delay:
@@ -76,6 +82,8 @@ It restores the preferences only: restart what reads them, as the `set_*`
 functions do.
 
 Name `(domain, key)` pairs, or a whole domain such as `"com.apple.dock"`.
+If a key can't be written back, the others are still restored, then the
+first {class}`~macos.errors.PermissionDeniedError` is raised.
 
 ## Reference
 

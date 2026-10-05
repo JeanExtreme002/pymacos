@@ -15,10 +15,12 @@ call names its ``argtypes``/``restype`` instead of relying on ctypes defaults.
 import ctypes
 import os
 import platform
+import time
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Iterator, Optional, Sequence
 
+from . import _cf
 from ._system import framework, require_macos
 
 id = ctypes.c_void_p
@@ -221,15 +223,7 @@ def cgimage_png(image: Optional[int]) -> bytes:
         send(rep, "autorelease")
         return png(rep)
     finally:
-        _core_foundation().CFRelease(image)
-
-
-@lru_cache(maxsize=None)
-def _core_foundation() -> ctypes.CDLL:
-    cf = framework("CoreFoundation")
-    cf.CFRelease.argtypes = (ctypes.c_void_p,)
-    cf.CFRelease.restype = None
-    return cf
+        _cf.release(image)
 
 
 class CGAffineTransform(ctypes.Structure):
@@ -266,6 +260,15 @@ def ciimage(image: "bytes | bytearray | os.PathLike[str] | str") -> int:
     return picture
 
 
+@lru_cache(maxsize=None)
+def _color_space_model() -> Any:
+    """``CGColorSpaceGetModel``, declared once: CoreGraphics' handle is shared."""
+    function = framework("CoreGraphics").CGColorSpaceGetModel
+    function.argtypes = (ctypes.c_void_p,)
+    function.restype = ctypes.c_int
+    return function
+
+
 def ciimage_cgimage(image: int) -> int:
     """
     Render a ``CIImage`` into an owned ``CGImage``.
@@ -276,10 +279,7 @@ def ciimage_cgimage(image: int) -> int:
     context = send(cls("CIContext"), "contextWithOptions:", None, argtypes=(id,))
     extent = send(image, "extent", restype=CGRect)
     space = send(image, "colorSpace", restype=ctypes.c_void_p)
-    graphics = framework("CoreGraphics")
-    graphics.CGColorSpaceGetModel.argtypes = (ctypes.c_void_p,)
-    graphics.CGColorSpaceGetModel.restype = ctypes.c_int
-    if space and graphics.CGColorSpaceGetModel(space) == 1:  # kCGColorSpaceModelRGB
+    if space and _color_space_model()(space) == 1:  # kCGColorSpaceModelRGB
         rgba8 = ctypes.c_int.in_dll(framework("CoreImage"), "kCIFormatRGBA8").value
         rendered = send(
             context,
@@ -395,6 +395,19 @@ def define_class(name: str, methods: Any, protocols: Sequence[str] = ()) -> int:
     return int(new_class)
 
 
+def spin(seconds: float) -> None:
+    """
+    Turn this thread's run loop once, for up to ``seconds``, inside an autorelease pool.
+
+    The pool drains what the callbacks run meanwhile autoreleased, so a
+    listener turning the run loop for hours doesn't grow. A run loop with
+    nothing to wait for comes back at once: then just pause.
+    """
+    with autorelease_pool():
+        if not _cf.run_loop(seconds):
+            time.sleep(seconds)
+
+
 def run_until(done: Any, timeout: float) -> bool:
     """
     Spin the current thread's run loop until ``done()`` is true or ``timeout`` seconds pass; return ``done()``.
@@ -402,16 +415,13 @@ def run_until(done: Any, timeout: float) -> bool:
     Callbacks scheduled on the main queue (the camera's, for example) only
     run while the main thread's run loop turns, which a script never does.
     """
-    import time
-
-    cf = framework("CoreFoundation")
-    cf.CFRunLoopRunInMode.argtypes = (ctypes.c_void_p, ctypes.c_double, ctypes.c_bool)
-    cf.CFRunLoopRunInMode.restype = ctypes.c_int32
-    mode = ctypes.c_void_p.in_dll(cf, "kCFRunLoopDefaultMode")
     deadline = time.monotonic() + timeout
     while not done():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        cf.CFRunLoopRunInMode(mode, min(0.05, remaining), False)
+        # No pool here: what the callbacks hand over (to camera's delegate,
+        # say) must outlive the slice, until the caller's own pool drains it.
+        if not _cf.run_loop(min(0.05, remaining), once=False):
+            time.sleep(min(0.05, remaining))
     return bool(done())

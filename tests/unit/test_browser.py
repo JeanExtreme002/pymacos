@@ -75,9 +75,12 @@ def test_browser_run_js(browsers):
     script = 'document.querySelector("h1").textContent'
 
     assert macos.browser.run_js(script) == "pymacos"
-    assert browsers.args[3:] == ["--", script]  # an argument, never pasted into the AppleScript
+    call = browsers.calls[-1]
+    assert call["args"][:2] == ["osascript", "-e"] and len(call["args"]) == 3  # nothing after the source
+    assert call["input"] == script  # on stdin: not in the process list, nor pasted into the AppleScript
+    assert script not in call["args"][2] and 'tell application "Google Chrome"' in call["args"][2]
     macos.browser.run_js("-1")
-    assert browsers.args[3:] == ["--", "-1"]  # not an option of osascript
+    assert browsers.calls[-1]["input"] == "-1" and len(browsers.args) == 3
     browsers.stdout = "missing value\n"
     assert macos.browser.run_js("undefined") is None
 
@@ -118,3 +121,18 @@ def test_browser_tab_reload_and_go(browsers):
     tab.go("https://example.com/?q=\"quoted\"")
     assert browsers.args[3:] == ["--", "7", "2", "https://example.com/?q=\"quoted\""]  # the URL is an argument
     assert "set URL of tab" in browsers.args[2]
+
+
+def test_browser_run_js_without_the_automation_permission(browsers, monkeypatch):
+    def refuse(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, "", "execution error: Not authorized to send Apple events. (-1743)")
+
+    monkeypatch.setattr(_system.subprocess, "run", refuse)
+    with pytest.raises(macos.PermissionDeniedError, match="Automation permission.*Google Chrome"):
+        macos.browser.run_js("1")
+
+
+def test_browser_open_refuses_a_url_that_looks_like_an_option(browsers):
+    with pytest.raises(ValueError, match="must not start with '-'"):
+        macos.browser.open("-g")
+    assert browsers.calls == []

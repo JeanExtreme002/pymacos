@@ -18,7 +18,6 @@ module checks the permission first and raises
 
 import ctypes
 import os
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -27,9 +26,9 @@ from pathlib import Path
 from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _objc, defaults
 from ._system import framework, private_framework, run as _run
-from .errors import MacOSError, NotSupportedError, PermissionDeniedError
+from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
     "screenshot",
@@ -82,6 +81,7 @@ __all__ = [
     "stop_mirroring",
 ]
 
+_CAPTURE_TIMEOUT = 60.0  # seconds: a screenshot takes a fraction of one, but screencapture has hung on some Macs
 _FORMATS = {".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".heic": "heic", ".tiff": "tiff", ".gif": "gif", ".pdf": "pdf"}
 
 
@@ -137,6 +137,10 @@ def screenshot(
     - ``cursor``: include the mouse pointer.
     - ``check_permission``: raise if the Screen Recording permission is
       missing. Pass ``False`` to accept a capture without other apps' windows.
+
+    Raises :class:`~macos.errors.MacOSError` when ``screencapture`` saves
+    nothing, and :class:`~macos.errors.CommandTimeoutError` when it doesn't
+    finish within a minute.
     """
     options = ["-C"] if cursor else []
     if region is not None:
@@ -170,7 +174,15 @@ def _capture(path: Union[str, "os.PathLike[str]", None], options: List[str], che
     args = ["screencapture", "-x", "-t", _FORMATS[extension], *options, str(target)]  # -x: no shutter sound
 
     try:
-        _run(args)
+        _run(args, timeout=_CAPTURE_TIMEOUT)
+        # screencapture can exit 0 without writing anything (a display that went away, a capture
+        # cancelled by the system): an empty or missing file isn't a screenshot.
+        try:
+            written = target.stat().st_size
+        except OSError:
+            written = 0
+        if not written:
+            raise MacOSError("screencapture didn't save a screenshot to {}".format(target))
     except BaseException:
         if path is None:
             target.unlink(missing_ok=True)
@@ -310,16 +322,12 @@ def _apply_capture_settings() -> None:
 
 def screenshot_folder() -> Path:
     """Where ⌘⇧3, ⌘⇧4 and ⌘⇧5 save screenshots: the Desktop unless changed."""
-    from . import defaults
-
     location = defaults.read(_CAPTURE_SETTINGS, "location")
     return Path(os.path.expanduser(location)) if location else Path.home() / "Desktop"
 
 
 def set_screenshot_folder(folder: Union[str, "os.PathLike[str]"]) -> None:
     """Save the screenshots taken with the keyboard shortcuts in ``folder``, which must exist."""
-    from . import defaults
-
     target = Path(folder).expanduser().resolve()
     if not target.is_dir():
         raise NotADirectoryError(str(target))
@@ -329,8 +337,6 @@ def set_screenshot_folder(folder: Union[str, "os.PathLike[str]"]) -> None:
 
 def screenshot_format() -> str:
     """The format the screenshot shortcuts save in: ``'png'`` unless changed."""
-    from . import defaults
-
     found = str(defaults.read(_CAPTURE_SETTINGS, "type", default="png")).lower()
     return "jpg" if found == "jpeg" else found
 
@@ -341,8 +347,6 @@ def set_screenshot_format(format: str) -> None:
 
     One of ``'png'``, ``'jpg'``, ``'heic'``, ``'tiff'``, ``'gif'``, ``'pdf'`` or ``'bmp'``.
     """
-    from . import defaults
-
     wanted = format.lower().lstrip(".")
     wanted = "jpg" if wanted == "jpeg" else wanted
     if wanted not in _SETTING_FORMATS:
@@ -353,30 +357,22 @@ def set_screenshot_format(format: str) -> None:
 
 def screenshot_thumbnail() -> bool:
     """Whether a screenshot first shows as a thumbnail in the corner, to edit or drag, before it's saved."""
-    from . import defaults
-
     return bool(defaults.read(_CAPTURE_SETTINGS, "show-thumbnail", default=True))
 
 
 def set_screenshot_thumbnail(on: bool = True) -> None:
     """Show the floating thumbnail after a screenshot, or save it at once (``False``)."""
-    from . import defaults
-
     defaults.write(_CAPTURE_SETTINGS, "show-thumbnail", bool(on))
     _apply_capture_settings()
 
 
 def screenshot_name() -> Optional[str]:
     """The name screenshots' files start with; ``None`` for macOS's own ("Screenshot", in the system's language)."""
-    from . import defaults
-
     return defaults.read(_CAPTURE_SETTINGS, "name") or None
 
 
 def set_screenshot_name(name: Optional[str]) -> None:
     """Start screenshots' file names with ``name`` (``"Capture"``...), or macOS's own (``None``). The date follows it."""
-    from . import defaults
-
     if name is None:
         defaults.delete(_CAPTURE_SETTINGS, "name")
     else:
@@ -391,8 +387,6 @@ _SCREENSHOT_TARGETS = ("file", "clipboard", "preview", "mail", "messages")
 
 def screenshot_target() -> str:
     """Where the shortcuts send screenshots: ``'file'``, ``'clipboard'``, ``'preview'``, ``'mail'`` or ``'messages'``."""
-    from . import defaults
-
     found = defaults.read(_CAPTURE_SETTINGS, "target", default="file")
     return found if found in _SCREENSHOT_TARGETS else "file"
 
@@ -402,8 +396,6 @@ def set_screenshot_target(target: str) -> None:
     Send screenshots to a ``"file"`` (in :func:`screenshot_folder`), the ``"clipboard"``, or open them in
     ``"preview"``, ``"mail"`` or ``"messages"``, like the Options menu of ⌘⇧5.
     """
-    from . import defaults
-
     if target not in _SCREENSHOT_TARGETS:
         raise ValueError("target must be one of {}, not {!r}".format(", ".join(_SCREENSHOT_TARGETS), target))
     defaults.write(_CAPTURE_SETTINGS, "target", target)
@@ -412,15 +404,11 @@ def set_screenshot_target(target: str) -> None:
 
 def screenshot_shadow() -> bool:
     """Whether screenshots of a window (⌘⇧4, then Space) keep its shadow."""
-    from . import defaults
-
     return not defaults.read(_CAPTURE_SETTINGS, "disable-shadow", default=False)
 
 
 def set_screenshot_shadow(on: bool = True) -> None:
     """Keep windows' shadows in screenshots of a window, or leave them out for tight images."""
-    from . import defaults
-
     defaults.write(_CAPTURE_SETTINGS, "disable-shadow", not on)
     _apply_capture_settings()
 
@@ -882,7 +870,7 @@ def record(
     args.append(str(target))
     try:
         _run(args, timeout=max(1, round(seconds)) + 60)  # screencapture has hung on some Macs, VMs among them
-    except subprocess.TimeoutExpired:
+    except CommandTimeoutError:
         raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
     if not target.exists():
         raise MacOSError("the screen recording wasn't saved")
@@ -891,16 +879,12 @@ def record(
 
 def screensaver_delay() -> Optional[float]:
     """Minutes of inactivity before the screen saver starts; ``None`` when it never does."""
-    from . import defaults
-
     seconds = defaults.read("com.apple.screensaver", "idleTime", default=1200, current_host=True)
     return round(float(seconds) / 60, 2) if seconds else None
 
 
 def set_screensaver_delay(minutes: Optional[float]) -> None:
     """Start the screen saver after ``minutes`` of inactivity, or never (``None``), like System Settings › Lock Screen."""
-    from . import defaults
-
     if minutes is not None and minutes <= 0:
         raise ValueError("minutes must be positive, or None for never, not {}".format(minutes))
     # At least a second: 0 is how macOS says "never".

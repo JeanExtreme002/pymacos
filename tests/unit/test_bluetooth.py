@@ -144,3 +144,35 @@ def test_bluetooth_argument_checks():
     # Rejected before switching anything.
     with pytest.raises(ValueError, match="timeout"):
         macos.bluetooth.set_power(False, timeout=0)
+
+
+def test_bluetooth_devices_without_an_address_stay_apart(commands):
+    import json
+
+    listed = {
+        "SPBluetoothDataType": [
+            {
+                "device_not_connected": [
+                    {"Pencil": {"device_minorType": "Pen"}},
+                    {"Remote": {"device_minorType": "Remote"}},
+                    {"Remote": {"device_minorType": "Remote"}},
+                ]
+            }
+        ]
+    }
+    commands.answers["SPBluetoothDataType"] = (0, json.dumps(listed), "")
+
+    assert [(device.name, device.address) for device in macos.bluetooth.devices()] == [("Pencil", ""), ("Remote", "")]
+    assert macos.bluetooth._find("Pencil").name == "Pencil"
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_bluetooth_refuses_an_empty_name(commands, name):
+    import json
+
+    single = {"SPBluetoothDataType": [{"device_connected": [{"AirPods": {"device_address": "AA:BB:CC:DD:EE:01"}}]}]}
+    commands.answers["SPBluetoothDataType"] = (0, json.dumps(single), "")
+
+    with pytest.raises(ValueError, match="name a Bluetooth device"):
+        macos.bluetooth.connect(name)
+    assert commands.calls == []  # refused before listing anything

@@ -103,24 +103,47 @@ def test_read_wav_handles_the_extensible_format():
         macos.audio._read_wav(b"not a wav file at all")
 
 
+def _wav(samples, channels, rate):
+    """The bytes of a 16-bit WAV file holding ``samples``."""
+    import array
+    import io
+    import sys
+    import wave
+
+    data = array.array("h", samples)
+    if sys.byteorder == "big":
+        data.byteswap()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(2)
+        writer.setframerate(rate)
+        writer.writeframes(data.tobytes())
+    return buffer.getvalue()
+
+
 @pytest.fixture
 def fake_pcm(monkeypatch):
     """Stands in for afconvert: decoding gives stereo samples, encoding records what was written."""
-    import array
+    import io
+    from contextlib import contextmanager
 
     written = {}
     stereo = [100, -100, 200, -200, 300, -300, 400, -400, 500, -500]  # 5 frames at 10 frames a second
 
-    def decode(path, rate=None, channels=None):
-        return 2, 10, array.array("h", stereo)
+    @contextmanager
+    def decoded(path, rate=None, channels=None):
+        yield macos.audio._Samples(io.BytesIO(_wav(stereo, 2, 10)))
 
-    def encode(samples, channels, rate, output, quality, lossless):
-        written.update(samples=list(samples), channels=channels, rate=rate)
-        return output
+    @contextmanager
+    def encoding_to(output, channels, rate, quality, lossless):
+        pieces = []
+        yield lambda samples: pieces.append(list(samples))
+        written.update(samples=[value for piece in pieces for value in piece], channels=channels, rate=rate, pieces=pieces)
 
     monkeypatch.setattr(macos.audio, "_existing", lambda path: path)
-    monkeypatch.setattr(macos.audio, "_decode", decode)
-    monkeypatch.setattr(macos.audio, "_encode", encode)
+    monkeypatch.setattr(macos.audio, "_decoded", decoded)
+    monkeypatch.setattr(macos.audio, "_encoding_to", encoding_to)
     return written
 
 
@@ -141,6 +164,35 @@ def test_audio_sample_editing(fake_pcm):
 
     macos.audio.concat(["a.wav", "b.wav"], "out.wav")
     assert len(fake_pcm["samples"]) == 20 and fake_pcm["channels"] == 2
+
+
+def test_trim_and_gain_go_a_piece_at_a_time(fake_pcm, monkeypatch):
+    monkeypatch.setattr(macos.audio, "_CHUNK_FRAMES", 2)
+    macos.audio.trim("in.wav", "out.wav", 0.1)
+    assert fake_pcm["pieces"] == [[200, -200, 300, -300], [400, -400, 500, -500]]  # frames 1 to 4, two at a time
+    macos.audio.gain("in.wav", "out.wav", -20)  # 10 times quieter
+    assert fake_pcm["pieces"] == [[10, -10, 20, -20], [30, -30, 40, -40], [50, -50]]
+    with pytest.raises(ValueError, match="past the end"):
+        macos.audio.trim("in.wav", "out.wav", 0.5)
+
+
+def test_gain_table_matches_multiplying_each_sample():
+    for decibels in (-60, -6, 0.5, 6, 20):
+        factor = 10 ** (decibels / 20)
+        table = macos.audio._gain_table(factor)
+        for value in (-32768, -32767, -12345, -1, 0, 1, 777, 32767):
+            assert table[value] == macos.audio._clip(value * factor)
+
+
+def test_wav_samples_are_read_in_whole_frames():
+    import io
+
+    samples = macos.audio._Samples(io.BytesIO(_wav([1, -1, 2, -2, 3, -3], 2, 8000)))
+    assert (samples.channels, samples.rate, samples.frames) == (2, 8000, 3)
+    assert list(samples.read(2)) == [1, -1, 2, -2]
+    assert list(samples.read(5)) == [3, -3]  # what's left
+    samples.seek(1)
+    assert list(samples.read(1)) == [2, -2]
 
 
 def test_record_until_silence_stops_after_quiet(monkeypatch, tmp_path):

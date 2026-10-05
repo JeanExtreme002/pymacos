@@ -35,8 +35,10 @@ macos.notify("Backup done")
 {func}`~macos.time_machine.progress` how far it is, from 0.0 to 1.0 (`None` when
 none runs, or while it's getting ready).
 {func}`~macos.time_machine.last_backup` returns when the latest backup was made,
-or `None` when there's none yet or the backup disk isn't connected; it may need
-Full Disk Access for the app running Python.
+or `None` when there's none yet or the backup disk isn't connected. It may need
+Full Disk Access for the app running Python: without it,
+{class}`~macos.PermissionDeniedError` is raised, rather than `None` passing
+for "no backup".
 
 ## Leaving files out
 

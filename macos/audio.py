@@ -19,6 +19,7 @@ first time.
 
 import array
 import ctypes
+import io
 import math
 import os
 import struct
@@ -26,12 +27,13 @@ import sys
 import tempfile
 import time
 import wave
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
-from . import _capture, _cf, _media, _objc
+from . import _capture, _cf, _files, _media, _objc
 from ._system import framework, run as _run
 from .errors import MacOSError, NotSupportedError
 
@@ -539,11 +541,24 @@ class _StreamDescription(ctypes.Structure):
     ]
 
 
-def _existing(path: PathLike) -> Path:
-    resolved = Path(path).expanduser().absolute()
-    if not resolved.exists():
-        raise FileNotFoundError(str(resolved))
-    return resolved
+_existing = _files.existing
+
+
+@lru_cache(maxsize=None)
+def _core_media() -> ctypes.CDLL:
+    media = framework("CoreMedia")
+    pointer = ctypes.c_void_p
+    signatures = {
+        "CMAudioFormatDescriptionGetStreamBasicDescription": ((pointer,), ctypes.POINTER(_StreamDescription)),
+        "CMSampleBufferGetDataBuffer": ((pointer,), pointer),
+        "CMBlockBufferGetDataLength": ((pointer,), ctypes.c_size_t),
+        "CMBlockBufferCopyDataBytes": ((pointer, ctypes.c_size_t, ctypes.c_size_t, pointer), ctypes.c_int32),
+    }
+    for name, (argtypes, restype) in signatures.items():
+        function = getattr(media, name)
+        function.argtypes = argtypes
+        function.restype = restype
+    return media
 
 
 def info(path: PathLike) -> AudioInfo:
@@ -552,9 +567,7 @@ def info(path: PathLike) -> AudioInfo:
 
     source = _existing(path)
     framework("AVFoundation")
-    media = framework("CoreMedia")
-    media.CMAudioFormatDescriptionGetStreamBasicDescription.argtypes = (ctypes.c_void_p,)
-    media.CMAudioFormatDescriptionGetStreamBasicDescription.restype = ctypes.POINTER(_StreamDescription)
+    media = _core_media()
     with _objc.autorelease_pool():
         asset = video._asset(source)
         tracks = video._tracks(asset, "soun")
@@ -599,16 +612,7 @@ def _encoding(target: Path, quality: str, lossless: bool) -> List[str]:
 
 def _afconvert(source: Path, target: Path, options: List[str]) -> Path:
     """Convert with afconvert through a temporary file next to ``target``, so the source may be the target."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix)
-    os.close(handle)
-    try:
-        _run(["afconvert", *options, str(source), name])
-        os.replace(name, str(target))
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-    return target
+    return _files.write_atomically(target, lambda name: _run(["afconvert", *options, str(source), name]))
 
 
 def convert(source: PathLike, output: PathLike, *, quality: str = "high", lossless: bool = False) -> Path:
@@ -628,58 +632,117 @@ def convert(source: PathLike, output: PathLike, *, quality: str = "high", lossle
     return _afconvert(original, target, _encoding(target, quality, lossless))
 
 
-# Editing: decode to 16-bit PCM, change the samples, encode to the output's format.
+# Editing: decode to 16-bit PCM, change the samples, encode to the output's format. The samples go
+# through a WAV file on each side, read and written a piece at a time where the edit allows it (trim,
+# gain), so a long recording isn't held in memory whole, let alone several times over.
+
+_CHUNK_FRAMES = 1 << 16  # frames edited at a time: 256 KiB of 16-bit stereo
+
+
+def _wav_layout(stream: io.BufferedIOBase) -> Tuple[int, int, int, int]:
+    """``(channels, sample rate, where the samples start, their size in bytes)`` of a 16-bit WAV file."""
+    stream.seek(0, os.SEEK_END)
+    end = stream.tell()
+    stream.seek(0)
+    head = stream.read(12)
+    if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+        raise MacOSError("afconvert didn't write a WAV file")
+    channels = rate = 0
+    start = size = 0
+    offset = 12
+    while offset + 8 <= end:
+        stream.seek(offset)
+        header = stream.read(8)
+        kind, length = header[:4], struct.unpack("<I", header[4:8])[0]
+        if kind == b"fmt ":
+            channels, rate = struct.unpack("<HI", stream.read(16)[2:8])
+        elif kind == b"data":
+            start, size = offset + 8, min(length, end - offset - 8)
+        offset += 8 + length + (length & 1)  # chunks are padded to an even size
+    if not channels or not rate:
+        raise MacOSError("afconvert wrote a WAV file without a format")
+    return channels, rate, start, size - size % 2
 
 
 def _read_wav(data: bytes) -> Tuple[int, int, bytes]:
     """``(channels, sample rate, sample bytes)`` of a 16-bit WAV file, the extensible variant included."""
-    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise MacOSError("afconvert didn't write a WAV file")
-    channels = rate = 0
-    samples = b""
-    offset = 12
-    while offset + 8 <= len(data):
-        kind, size = data[offset : offset + 4], struct.unpack("<I", data[offset + 4 : offset + 8])[0]
-        body = data[offset + 8 : offset + 8 + size]
-        if kind == b"fmt ":
-            channels, rate = struct.unpack("<HI", body[2:8])
-        elif kind == b"data":
-            samples = body
-        offset += 8 + size + (size & 1)  # chunks are padded to an even size
-    if not channels or not rate:
-        raise MacOSError("afconvert wrote a WAV file without a format")
-    return channels, rate, samples[: len(samples) - len(samples) % 2]
+    channels, rate, start, size = _wav_layout(io.BytesIO(data))
+    return channels, rate, data[start : start + size]
 
 
-def _decode(path: Path, rate: Optional[int] = None, channels: Optional[int] = None) -> Tuple[int, int, "array.array[int]"]:
-    """``(channels, sample rate, 16-bit samples)`` of an audio file, optionally resampled and remixed."""
+class _Samples:
+    """The 16-bit samples of a WAV file, read a piece at a time, in frames (one sample per channel)."""
+
+    def __init__(self, stream: io.BufferedIOBase) -> None:
+        self.stream = stream
+        self.channels, self.rate, self.start, size = _wav_layout(stream)
+        self.frames = size // (2 * self.channels)
+        self.seek(0)
+
+    def seek(self, frame: int) -> None:
+        self.stream.seek(self.start + frame * 2 * self.channels)
+
+    def read(self, frames: int) -> "array.array[int]":
+        """The next ``frames`` frames (fewer at the end), read straight into the array: no copy in between."""
+        samples = array.array("h", [0]) * (frames * self.channels)
+        count = (self.stream.readinto(memoryview(samples).cast("B")) or 0) // 2
+        del samples[count - count % self.channels :]  # whole frames only
+        if sys.byteorder == "big":
+            samples.byteswap()  # WAV is little-endian
+        return samples
+
+
+@contextmanager
+def _decoded(path: Path, rate: Optional[int] = None, channels: Optional[int] = None) -> Iterator[_Samples]:
+    """The samples of an audio file, decoded by afconvert (optionally resampled and remixed), to read."""
     with tempfile.TemporaryDirectory() as folder:
         decoded = Path(folder) / "decoded.wav"
         options = ["-f", "WAVE", "-d", "LEI16" + ("@{}".format(rate) if rate else "")]
         if channels:
             options += ["-c", str(channels)]
         _run(["afconvert", *options, str(path), str(decoded)])
-        count, frequency, data = _read_wav(decoded.read_bytes())
-        samples = array.array("h", data)
-    if sys.byteorder == "big":
-        samples.byteswap()  # WAV is little-endian
-    return count, frequency, samples
+        with open(str(decoded), "rb") as stream:
+            yield _Samples(stream)
 
 
-def _encode(samples: "array.array[int]", channels: int, rate: int, output: PathLike, quality: str, lossless: bool) -> Path:
+@contextmanager
+def _encoding_to(
+    output: PathLike, channels: int, rate: int, quality: str, lossless: bool
+) -> Iterator[Callable[["array.array[int]"], None]]:
+    """
+    A function to write samples with, a piece at a time; at the end, they're encoded into ``output``.
+
+    Through a WAV file, which afconvert then turns into ``output``'s format.
+    """
     target = Path(output).expanduser().absolute()
     options = _encoding(target, quality, lossless)
     with tempfile.TemporaryDirectory() as folder:
         plain = Path(folder) / "edited.wav"
-        data = array.array("h", samples)
-        if sys.byteorder == "big":
-            data.byteswap()
         with wave.open(str(plain), "wb") as writer:
             writer.setnchannels(channels)
             writer.setsampwidth(2)
             writer.setframerate(rate)
-            writer.writeframes(data.tobytes())
-        return _afconvert(plain, target, options)
+
+            def write(samples: "array.array[int]") -> None:
+                if sys.byteorder == "big":
+                    samples = array.array("h", samples)
+                    samples.byteswap()  # WAV is little-endian
+                writer.writeframesraw(samples)  # its bytes, as they are: no copy
+
+            yield write
+        _afconvert(plain, target, options)
+
+
+def _decode(path: Path, rate: Optional[int] = None, channels: Optional[int] = None) -> Tuple[int, int, "array.array[int]"]:
+    """``(channels, sample rate, 16-bit samples)`` of an audio file, optionally resampled and remixed."""
+    with _decoded(path, rate, channels) as samples:
+        return samples.channels, samples.rate, samples.read(samples.frames)
+
+
+def _encode(samples: "array.array[int]", channels: int, rate: int, output: PathLike, quality: str, lossless: bool) -> Path:
+    with _encoding_to(output, channels, rate, quality, lossless) as write:
+        write(samples)
+    return Path(output).expanduser().absolute()
 
 
 def _clip(value: float) -> int:
@@ -705,12 +768,18 @@ def trim(
     """
     if start < 0 or (duration is not None and duration <= 0):
         raise ValueError("start must not be negative and duration must be positive")
-    channels, rate, samples = _decode(_existing(source))
-    first = int(start * rate) * channels
-    if first >= len(samples):
-        raise ValueError("start={} is past the end of the audio".format(start))
-    last = len(samples) if duration is None else min(len(samples), first + int(duration * rate) * channels)
-    return _encode(samples[first:last], channels, rate, output, quality, lossless)
+    _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
+    with _decoded(_existing(source)) as samples:
+        first = int(start * samples.rate)
+        if first >= samples.frames:
+            raise ValueError("start={} is past the end of the audio".format(start))
+        last = samples.frames if duration is None else min(samples.frames, first + int(duration * samples.rate))
+        with _encoding_to(output, samples.channels, samples.rate, quality, lossless) as write:
+            # Only the part kept is read, a piece at a time.
+            samples.seek(first)
+            for at in range(first, last, _CHUNK_FRAMES):
+                write(samples.read(min(_CHUNK_FRAMES, last - at)))
+    return Path(output).expanduser().absolute()
 
 
 def concat(
@@ -764,6 +833,16 @@ def fade(
     return _encode(samples, channels, rate, output, quality, lossless)
 
 
+def _gain_table(factor: float) -> List[int]:
+    """
+    What each 16-bit sample becomes, ``factor`` times louder and clipped, indexed by the sample itself.
+
+    The negative samples come last, so that ``table[sample]`` finds them as
+    Python indexes a list from its end: -1 is the last entry.
+    """
+    return [_clip(value * factor) for value in range(32768)] + [_clip(value * factor) for value in range(-32768, 0)]
+
+
 def gain(
     source: PathLike, output: PathLike, decibels: float, *, quality: str = "high", lossless: bool = False
 ) -> Path:
@@ -773,10 +852,14 @@ def gain(
     +6 dB is about twice as loud, -6 dB half. Loud parts pushed past the
     maximum are clipped. ``quality`` and ``lossless`` work as in :func:`convert`.
     """
-    factor = 10 ** (decibels / 20)
-    channels, rate, samples = _decode(_existing(source))
-    louder = array.array("h", (_clip(value * factor) for value in samples))
-    return _encode(louder, channels, rate, output, quality, lossless)
+    _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
+    # 65536 possible samples: work each one out once, then look them up, which runs in C, chunk by chunk.
+    table = _gain_table(10 ** (decibels / 20))
+    with _decoded(_existing(source)) as samples:
+        with _encoding_to(output, samples.channels, samples.rate, quality, lossless) as write:
+            for _ in range(0, samples.frames, _CHUNK_FRAMES):
+                write(array.array("h", map(table.__getitem__, samples.read(_CHUNK_FRAMES))))
+    return Path(output).expanduser().absolute()
 
 
 def reverse(source: PathLike, output: PathLike, *, quality: str = "high", lossless: bool = False) -> Path:
@@ -816,31 +899,121 @@ def speed(
         raise ValueError("factor must be positive, not {}".format(factor))
     target = Path(output).expanduser().absolute()
     _encoding(target, quality, lossless)  # check the output before the work
-    with tempfile.TemporaryDirectory() as folder:
-        stretched = Path(folder) / "stretched.m4a"
+    original = _existing(source)
+    details = info(original)
+    channels = 1 if details.channels == 1 else 2
+    with _encoding_to(target, channels, details.sample_rate, quality, lossless) as write, _objc.autorelease_pool():
+        edited = _media.editable(_media.asset(original))
+        length = _media.duration(edited)
+        _objc.send(
+            edited,
+            "scaleTimeRange:toDuration:",
+            _media.time_range(0, length),
+            _media.time(length / factor),
+            argtypes=(_media.CMTimeRange, _media.CMTime),
+            restype=None,
+        )
+        # Read back as plain samples, stretched on the way, straight into the file to encode: nothing is
+        # compressed until the output, once, in its own format. The exact length, too: no codec pads it.
+        _read_samples(
+            edited,
+            write,
+            rate=details.sample_rate,
+            channels=channels,
+            length=length / factor,
+            time_pitch="Spectral" if keep_pitch else "Varispeed",
+        )
+    return target
+
+
+_READING, _READ, _READ_FAILED = 1, 2, 3  # AVAssetReaderStatus
+
+
+def _read_samples(
+    media: int,
+    write: Callable[["array.array[int]"], None],
+    *,
+    rate: int,
+    channels: int,
+    length: float,
+    time_pitch: str,
+) -> None:
+    """
+    Decode the sound of an asset or a composition, its tracks mixed, as 16-bit samples given to ``write``.
+
+    Its first ``length`` seconds, a buffer at a time, with ``time_pitch``
+    (``"Spectral"``, ``"Varispeed"``) for the parts it plays faster or slower.
+    """
+    framework("AVFoundation")
+    error = ctypes.c_void_p()
+    reader = _objc.send(
+        _objc.send(_objc.cls("AVAssetReader"), "alloc"),
+        "initWithAsset:error:",
+        media,
+        ctypes.byref(error),
+        argtypes=(_objc.id, ctypes.c_void_p),
+    )
+    if not reader:
+        raise MacOSError("could not read the sound: {}".format(_objc.error_message(error) or "unknown error"))
+    _objc.send(reader, "autorelease")
+    settings = {
+        "AVFormatIDKey": _four_char("lpcm"),
+        "AVSampleRateKey": rate,
+        "AVNumberOfChannelsKey": channels,
+        "AVLinearPCMBitDepthKey": 16,
+        "AVLinearPCMIsFloatKey": 0,
+        "AVLinearPCMIsNonInterleaved": 0,
+        "AVLinearPCMIsBigEndianKey": 1 if sys.byteorder == "big" else 0,  # this Mac's own order, as write() takes
+    }
+    number = lambda value: _objc.send(  # noqa: E731
+        _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
+    )
+    dictionary = _objc.send(
+        _objc.cls("NSDictionary"),
+        "dictionaryWithObjects:forKeys:",
+        _objc.nsarray_of([number(value) for value in settings.values()]),
+        _objc.nsarray_of([_objc.nsstring(key) for key in settings]),
+        argtypes=(_objc.id, _objc.id),
+    )
+    output = _objc.send(
+        _objc.cls("AVAssetReaderAudioMixOutput"),
+        "assetReaderAudioMixOutputWithAudioTracks:audioSettings:",
+        _objc.nsarray_of(_media.tracks(media, "soun")),
+        dictionary,
+        argtypes=(_objc.id, _objc.id),
+    )
+    _objc.send(output, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None)
+    if not output or not _objc.send(reader, "canAddOutput:", output, argtypes=(_objc.id,), restype=_objc.BOOL):
+        raise MacOSError("could not read the sound as samples")
+    _objc.send(reader, "addOutput:", output, argtypes=(_objc.id,), restype=None)
+    _objc.send(reader, "setTimeRange:", _media.time_range(0, length), argtypes=(_media.CMTimeRange,), restype=None)
+    if not _objc.send(reader, "startReading", restype=_objc.BOOL):
+        failure = _objc.send(reader, "error")
+        message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
+        raise MacOSError("could not read the sound: {}".format(message or "unknown error"))
+    media_library = _core_media()
+    remaining = int(round(length * rate))  # frames
+    frame_size = 2 * channels
+    while remaining > 0:
         with _objc.autorelease_pool():
-            edited = _media.editable(_media.asset(_existing(source)))
-            length = _media.duration(edited)
-            _objc.send(
-                edited,
-                "scaleTimeRange:toDuration:",
-                _media.time_range(0, length),
-                _media.time(length / factor),
-                argtypes=(_media.CMTimeRange, _media.CMTime),
-                restype=None,
-            )
-            _media.export(
-                edited,
-                stretched,
-                preset="AVAssetExportPresetAppleM4A",
-                time_pitch="Spectral" if keep_pitch else "Varispeed",
-                length=length / factor,
-            )
-        # AAC pads the start and end of what it encodes: cut the exact length
-        # from the decoded samples, and encode only once, in the output's format.
-        channels, rate, samples = _decode(stretched)
-        exact = int(round(length / factor * rate)) * channels
-        return _encode(samples[:exact], channels, rate, target, quality, lossless)
+            buffer = _objc.send(output, "copyNextSampleBuffer", restype=ctypes.c_void_p)
+            if not buffer:
+                break
+            with _cf.owned(buffer):
+                block = media_library.CMSampleBufferGetDataBuffer(buffer)
+                frames = min(media_library.CMBlockBufferGetDataLength(block) // frame_size, remaining) if block else 0
+                if not frames:
+                    continue
+                samples = array.array("h", [0]) * (frames * channels)
+                address, _ = samples.buffer_info()
+                if media_library.CMBlockBufferCopyDataBytes(block, 0, frames * frame_size, address) != 0:
+                    raise MacOSError("could not read the sound's samples")
+        write(samples)
+        remaining -= frames
+    if _objc.send(reader, "status", restype=_objc.NSInteger) == _READ_FAILED:
+        failure = _objc.send(reader, "error")
+        message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
+        raise MacOSError("could not read the sound: {}".format(message or "unknown error"))
 
 
 # Sound classification, through SoundAnalysis.
