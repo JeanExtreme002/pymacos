@@ -26,7 +26,10 @@ def test_timers_skip_missed_ticks_instead_of_bursting():
         assert timer._next == 11.0
         # Busy for 5 s: one call now, the next a full interval later.
         assert menubar._due_timers(16.0) == [timer]
-        assert timer._next == 16.0
+        assert timer._next == 17.0
+        assert menubar._due_timers(16.1) == []  # not again at the next slice
+        assert menubar._due_timers(17.0) == [timer]
+        assert timer._next == 18.0
     finally:
         timer.cancel()
     assert timer not in menubar._timers

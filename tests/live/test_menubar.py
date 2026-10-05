@@ -159,3 +159,35 @@ def test_main_thread_only():
     worker.start()
     worker.join()
     assert errors and "main thread" in errors[0]
+
+
+def test_a_bad_icon_leaves_nothing_in_the_menu_bar(monkeypatch):
+    calls = []
+    send = _objc.send
+
+    def recording(receiver, selector, *args, **kwargs):
+        calls.append(selector)
+        return send(receiver, selector, *args, **kwargs)
+
+    monkeypatch.setattr(menubar._objc, "send", recording)
+    count = len(menubar._items)
+    with pytest.raises(ValueError, match="not an image"):
+        macos.menubar.Item("pymacos", icon=b"not an image")
+    assert "statusItemWithLength:" not in calls  # failed before installing anything
+    assert len(menubar._items) == count
+
+
+def test_remove_forgets_actions_and_detaches_entries(item):
+    calls = []
+    bar = item("pymacos")
+    entry = bar.add("Act", lambda: calls.append(1))
+    tags = [entry._tag, bar._quit_entry._tag]
+    _click(bar, "Act")  # clicked just before removal: must not run afterwards
+    bar.remove()
+    assert all(tag not in menubar._actions for tag in tags)
+    assert entry._native is None and bar._removed
+    entry.title = "gone"  # no crash: changes to a removed item do nothing
+    entry.checked = True
+    bar.title = "gone"
+    macos.menubar.run(timeout=0.2)
+    assert calls == []

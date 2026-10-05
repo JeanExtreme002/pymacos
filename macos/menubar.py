@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, List, Optional, Union
+from typing import Callable, Deque, Dict, List, Optional, Union, cast
 
 from . import _objc
 from ._objc import BOOL, NSInteger
@@ -118,8 +118,11 @@ def _image(icon: Image, template: bool) -> int:
 class MenuItem:
     """An entry of an :class:`Item`'s menu, as :meth:`Item.add` returns it. Change its attributes to update it."""
 
-    def __init__(self, native: int, title: str, callback: Optional[Callable[[], object]], enabled: bool, checked: bool):
-        self._native = native
+    def __init__(
+        self, native: int, tag: int, title: str, callback: Optional[Callable[[], object]], enabled: bool, checked: bool
+    ) -> None:
+        self._native: Optional[int] = native  # None once its item is removed: changes then do nothing
+        self._tag = tag
         self._title = title
         self._enabled = enabled
         self._checked = checked
@@ -128,6 +131,13 @@ class MenuItem:
 
     def __repr__(self) -> str:
         return "MenuItem({!r})".format(self._title)
+
+    def _update(self, selector: str, value: object, argtype: object) -> None:
+        def apply() -> None:
+            if self._native is not None:  # checked when applied: a removal may be queued before
+                _objc.send(self._native, selector, value, argtypes=(argtype,), restype=None)
+
+        _on_main(apply)
 
     @property
     def title(self) -> str:
@@ -138,7 +148,12 @@ class MenuItem:
     def title(self, value: str) -> None:
         self._title = str(value)
         text = self._title
-        _on_main(lambda: _objc.send(self._native, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None))
+
+        def apply() -> None:
+            if self._native is not None:
+                _objc.send(self._native, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
+
+        _on_main(apply)
 
     @property
     def enabled(self) -> bool:
@@ -148,7 +163,7 @@ class MenuItem:
     @enabled.setter
     def enabled(self, value: bool) -> None:
         self._enabled = bool(value)
-        _on_main(lambda: _objc.send(self._native, "setEnabled:", self._enabled, argtypes=(BOOL,), restype=None))
+        self._update("setEnabled:", self._enabled, BOOL)
 
     @property
     def checked(self) -> bool:
@@ -158,7 +173,7 @@ class MenuItem:
     @checked.setter
     def checked(self, value: bool) -> None:
         self._checked = bool(value)
-        _on_main(lambda: _objc.send(self._native, "setState:", int(self._checked), argtypes=(NSInteger,), restype=None))
+        self._update("setState:", int(self._checked), NSInteger)
 
 
 class Item:
@@ -188,6 +203,8 @@ class Item:
             raise ValueError("a menu bar item needs a title, an icon, or both")
         _require_main_thread("creating a menu bar item")
         _application()
+        # Load the icon first: a bad one must fail before anything is in the menu bar.
+        image = _image(icon, template) if icon is not None else None
         bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
         native = _objc.send(bar, "statusItemWithLength:", _VARIABLE_LENGTH, argtypes=(ctypes.c_double,))
         self._native = int(_objc.send(native, "retain"))
@@ -197,17 +214,20 @@ class Item:
         _objc.send(self._menu, "setAutoenablesItems:", False, argtypes=(BOOL,), restype=None)
         _objc.send(self._native, "setMenu:", self._menu, argtypes=(_objc.id,), restype=None)
         self._entries: List[MenuItem] = []
+        self._quit_entry: Optional[MenuItem] = None
         self._quit_line: Optional[int] = None  # the separator above Quit: add() inserts before it
+        self._removed = False
         self._title: Optional[str] = None
         self._tooltip: Optional[str] = None
         self.title = title
-        if icon is not None:
-            self.set_icon(icon, template=template)
+        if image is not None:
+            self._show_icon(image)
         if tooltip is not None:
             self.tooltip = tooltip
         if quit is not None:
             line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
-            for native in (line, _native_entry(str(quit), _quit.set, None, True, False)._native):
+            self._quit_entry = _native_entry(str(quit), _quit.set, None, True, False)
+            for native in (line, self._quit_entry._native):
                 _objc.send(self._menu, "addItem:", native, argtypes=(_objc.id,), restype=None)
             self._quit_line = line
         with _lock:
@@ -225,7 +245,12 @@ class Item:
     def title(self, value: Optional[str]) -> None:
         self._title = None if value is None else str(value)
         text = self._title or ""
-        _on_main(lambda: _objc.send(self._button, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None))
+
+        def apply() -> None:
+            if not self._removed:
+                _objc.send(self._button, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
+
+        _on_main(apply)
 
     @property
     def tooltip(self) -> Optional[str]:
@@ -238,6 +263,8 @@ class Item:
         text = self._tooltip
 
         def show() -> None:
+            if self._removed:
+                return
             native = _objc.nsstring(text) if text is not None else None
             _objc.send(self._button, "setToolTip:", native, argtypes=(_objc.id,), restype=None)
 
@@ -245,10 +272,14 @@ class Item:
 
     def set_icon(self, icon: Optional[Image], *, template: bool = True) -> None:
         """Show ``icon`` (a file path or the bytes of an image), or remove it with ``None``."""
-        image = _image(icon, template) if icon is not None else None
+        self._show_icon(_image(icon, template) if icon is not None else None)
+
+    def _show_icon(self, image: Optional[int]) -> None:
+        """Put ``image`` (retained, or ``None``) on the button, and drop our reference to it."""
 
         def show() -> None:
-            _objc.send(self._button, "setImage:", image, argtypes=(_objc.id,), restype=None)
+            if not self._removed:
+                _objc.send(self._button, "setImage:", image, argtypes=(_objc.id,), restype=None)
             if image:
                 _objc.send(image, "release", restype=None)  # the button keeps its own reference
 
@@ -287,7 +318,7 @@ class Item:
         """
         _require_main_thread("adding a menu entry")
         entry = _native_entry(str(title), callback, key, enabled, checked)
-        self._insert(entry._native)
+        self._insert(cast(int, entry._native))  # just made: set until remove()
         self._entries.append(entry)
         return entry
 
@@ -314,15 +345,27 @@ class Item:
         self._insert(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
 
     def remove(self) -> None:
-        """Take the item out of the menu bar for good."""
-
-        def take_out() -> None:
-            bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
-            _objc.send(bar, "removeStatusItem:", self._native, argtypes=(_objc.id,), restype=None)
-
+        """Take the item out of the menu bar for good. Its entries stop calling back; changing them does nothing."""
+        entries = self._entries + ([self._quit_entry] if self._quit_entry else [])
         with _lock:
             if self in _items:
                 _items.remove(self)
+            for entry in entries:
+                _actions.pop(entry._tag, None)
+
+        def take_out() -> None:
+            if self._removed:
+                return
+            self._removed = True
+            bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
+            _objc.send(bar, "removeStatusItem:", self._native, argtypes=(_objc.id,), restype=None)
+            for entry in entries:
+                if entry._native is not None:
+                    _objc.send(entry._native, "release", restype=None)  # ours; the menu drops its own
+                    entry._native = None
+            for native in (self._menu, self._native):
+                _objc.send(native, "release", restype=None)
+
         _on_main(take_out)
 
 
@@ -345,7 +388,7 @@ def _native_entry(
     _objc.send(native, "setTag:", tag, argtypes=(NSInteger,), restype=None)
     _objc.send(native, "setEnabled:", bool(enabled), argtypes=(BOOL,), restype=None)
     _objc.send(native, "setState:", int(bool(checked)), argtypes=(NSInteger,), restype=None)
-    entry = MenuItem(int(native), title, callback, enabled, checked)
+    entry = MenuItem(int(native), tag, title, callback, enabled, checked)
     with _lock:
         _actions[tag] = entry
     return entry
@@ -395,8 +438,10 @@ def _due_timers(now: float) -> List[Timer]:
     with _lock:
         due = [timer for timer in _timers if not timer._cancelled and timer._next <= now]
     for timer in due:
-        # Skip the ticks missed while busy, rather than catching up in a burst.
-        timer._next = max(timer._next + timer.seconds, now)
+        # Skip the ticks missed while busy, rather than catching up in a burst:
+        # the next one is always a full interval after a late call.
+        following = timer._next + timer.seconds
+        timer._next = following if following > now else now + timer.seconds
     return due
 
 
