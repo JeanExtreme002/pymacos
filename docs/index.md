@@ -65,7 +65,7 @@ macos.finder.trash("old.log")                   # moved to the Trash
 
 | Area | Topics |
 |---|---|
-| **Apps & Automation** | [Apps](apps.md), [Browser](browser.md), [Clipboard](clipboard.md), [Events](events.md), [Hotkeys](hotkeys.md), [Keyboard](keyboard.md), [Maps](maps.md), [Mouse](mouse.md), [Music](music.md), [Schedule](schedule.md), [Shortcuts](shortcuts.md), [Windows](windows.md) |
+| **Apps & Automation** | [Apps](apps.md), [Browser](browser.md), [Clipboard](clipboard.md), [Events](events.md), [Hotkeys](hotkeys.md), [Keyboard](keyboard.md), [Maps](maps.md), [Menu Bar](menubar.md), [Mouse](mouse.md), [Music](music.md), [Schedule](schedule.md), [Shortcuts](shortcuts.md), [Windows](windows.md) |
 | **User Interaction** | [Dialogs](dialog.md), [Notifications](notifications.md), [Sound](sound.md), [Speech](speech.md) |
 | **Files & Documents** | [Audio Files](audio-files.md), [Documents](document.md), [Finder](finder.md), [Images](image.md), [PDF](pdf.md), [Spotlight](spotlight.md), [Video](video.md) |
 | **Intelligence** | [Language](language.md), [Vision](vision.md) |
@@ -97,6 +97,7 @@ events
 hotkeys
 keyboard
 maps
+menubar
 mouse
 music
 schedule
