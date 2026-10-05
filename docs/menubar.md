@@ -11,9 +11,9 @@ timer = macos.menubar.Item("☕")
 
 @timer.action("Start 25 minutes")
 def start():
-    timer.title = "25:00"
+    timer.set_title("25:00")
 
-timer.add("Reset", lambda: setattr(timer, "title", "☕"))
+timer.add("Reset", lambda: timer.set_title("☕"))
 macos.menubar.run()   # until Quit, macos.menubar.quit() or Ctrl-C
 ```
 
@@ -25,13 +25,13 @@ or the app switcher; its items show in the menu bar while
 
 An {class}`~macos.menubar.Item` shows as soon as it's created. It can have a
 `title`, an `icon` (a file path or the bytes of an image), or both, and a
-`tooltip` shown when the pointer rests on it. Changing `title` updates the
-menu bar at once:
+`tooltip` shown when the pointer rests on it.
+{meth}`~macos.menubar.Item.set_title` updates the menu bar at once:
 
 ```python
 status = macos.menubar.Item(icon="~/icons/bolt.png", tooltip="Battery")
 battery = macos.power.battery()                     # None on a Mac without one
-status.title = "{}%".format(battery.percent) if battery else None
+status.set_title("{}%".format(battery.percent) if battery else None)
 ```
 
 Icons are drawn at the menu bar's height, as a *template* by default: in the
@@ -52,17 +52,20 @@ clicked, and returns a {class}`~macos.menubar.MenuItem`;
 item = macos.menubar.Item("Backup")
 item.add("Back up now", back_up, key="b")        # ⌘B while the menu is open
 item.separator()
+
 paused = item.add("Pause", checked=False)
 
 def pause():
-    paused.checked = not paused.checked             # an option that turns on and off
+    paused.set_checked(not paused.checked)          # an option that turns on and off
 
 paused.callback = pause
 item.add("Last backup: never", enabled=False)       # greyed out: just information
 ```
 
-A {class}`~macos.menubar.MenuItem`'s `title`, `enabled` and `checked` can be
-changed at any time. The menu ends with a *Quit* entry that makes
+A {class}`~macos.menubar.MenuItem` can be changed at any time with
+{meth}`~macos.menubar.MenuItem.set_title`,
+{meth}`~macos.menubar.MenuItem.set_enabled` and
+{meth}`~macos.menubar.MenuItem.set_checked`. The menu ends with a *Quit* entry that makes
 {func}`~macos.menubar.run` return; `quit=None` leaves it out, and any other
 text renames it.
 
@@ -84,7 +87,8 @@ end = time.monotonic() + 25 * 60
 
 def tick():
     left = max(0, int(end - time.monotonic()))
-    countdown.title = "{:02d}:{:02d}".format(left // 60, left % 60)
+    countdown.set_title("{:02d}:{:02d}".format(left // 60, left % 60))
+
     if not left:
         macos.notify("Time for a break", title="Pomodoro")
         macos.menubar.quit()

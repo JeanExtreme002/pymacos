@@ -72,10 +72,11 @@ def test_entries_and_title_update(item):
     entry = bar.add("Option", checked=True)
     later = bar.add("Later", enabled=False)
 
-    entry.checked = False
-    entry.title = "Renamed"
-    later.enabled = True
-    bar.title = "25:00"
+    entry.set_checked(False)
+    entry.set_title("Renamed")
+    later.set_enabled(True)
+    bar.set_title("25:00")
+    assert (entry.checked, entry.title, later.enabled, bar.title) == (False, "Renamed", True, "25:00")
     assert _objc.send(entry._native, "state", restype=NSInteger) == 0
     assert _objc.pystring(_objc.send(entry._native, "title")) == "Renamed"
     assert _objc.send(later._native, "isEnabled", restype=BOOL)
@@ -84,7 +85,7 @@ def test_entries_and_title_update(item):
 
 def test_changes_from_another_thread_wait_for_run(item):
     bar = item("pymacos")
-    worker = threading.Thread(target=lambda: setattr(bar, "title", "from a thread"))
+    worker = threading.Thread(target=lambda: bar.set_title("from a thread"))
     worker.start()
     worker.join()
     assert _objc.pystring(_objc.send(bar._button, "title")) == "pymacos"  # not yet: queued
@@ -186,8 +187,8 @@ def test_remove_forgets_actions_and_detaches_entries(item):
     bar.remove()
     assert all(tag not in menubar._actions for tag in tags)
     assert entry._native is None and bar._removed
-    entry.title = "gone"  # no crash: changes to a removed item do nothing
-    entry.checked = True
-    bar.title = "gone"
+    entry.set_title("gone")  # no crash: changes to a removed item do nothing
+    entry.set_checked(True)
+    bar.set_title("gone")
     macos.menubar.run(timeout=0.2)
     assert calls == []

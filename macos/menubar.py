@@ -9,9 +9,9 @@ Menu bar icons: put an icon or a short text in the menu bar, with a menu of acti
 
     @timer.action("Start")
     def start():
-        timer.title = "25:00"
+        timer.set_title("25:00")
 
-    timer.add("Reset", lambda: setattr(timer, "title", "☕"))
+    timer.add("Reset", lambda: timer.set_title("☕"))
     macos.menubar.run()                       # until Quit, macos.menubar.quit() or Ctrl-C
 
 :func:`run` keeps the script running and the icons responsive. Menu actions
@@ -116,7 +116,7 @@ def _image(icon: Image, template: bool) -> int:
 
 
 class MenuItem:
-    """An entry of an :class:`Item`'s menu, as :meth:`Item.add` returns it. Change its attributes to update it."""
+    """An entry of an :class:`Item`'s menu, as :meth:`Item.add` returns it; its ``set_*`` methods update it."""
 
     def __init__(
         self, native: int, tag: int, title: str, callback: Optional[Callable[[], object]], enabled: bool, checked: bool
@@ -144,8 +144,8 @@ class MenuItem:
         """The text of the entry."""
         return self._title
 
-    @title.setter
-    def title(self, value: str) -> None:
+    def set_title(self, value: str) -> None:
+        """Change the text of the entry."""
         self._title = str(value)
         text = self._title
 
@@ -160,8 +160,8 @@ class MenuItem:
         """Whether the entry can be clicked; a disabled one is greyed out."""
         return self._enabled
 
-    @enabled.setter
-    def enabled(self, value: bool) -> None:
+    def set_enabled(self, value: bool) -> None:
+        """Let the entry be clicked, or grey it out with ``False``."""
         self._enabled = bool(value)
         self._update("setEnabled:", self._enabled, BOOL)
 
@@ -170,8 +170,8 @@ class MenuItem:
         """Whether the entry shows a checkmark, for an option that's on or off."""
         return self._checked
 
-    @checked.setter
-    def checked(self, value: bool) -> None:
+    def set_checked(self, value: bool) -> None:
+        """Show a checkmark next to the entry, or hide it with ``False``."""
         self._checked = bool(value)
         self._update("setState:", int(self._checked), NSInteger)
 
@@ -219,11 +219,11 @@ class Item:
         self._removed = False
         self._title: Optional[str] = None
         self._tooltip: Optional[str] = None
-        self.title = title
+        self.set_title(title)
         if image is not None:
             self._show_icon(image)
         if tooltip is not None:
-            self.tooltip = tooltip
+            self.set_tooltip(tooltip)
         if quit is not None:
             line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
             self._quit_entry = _native_entry(str(quit), _quit.set, None, True, False)
@@ -241,8 +241,8 @@ class Item:
         """The text shown in the menu bar; ``None`` shows only the icon."""
         return self._title
 
-    @title.setter
-    def title(self, value: Optional[str]) -> None:
+    def set_title(self, value: Optional[str]) -> None:
+        """Change the text shown in the menu bar; ``None`` shows only the icon."""
         self._title = None if value is None else str(value)
         text = self._title or ""
 
@@ -257,8 +257,8 @@ class Item:
         """The text shown when the pointer rests on the item."""
         return self._tooltip
 
-    @tooltip.setter
-    def tooltip(self, value: Optional[str]) -> None:
+    def set_tooltip(self, value: Optional[str]) -> None:
+        """Change the text shown when the pointer rests on the item, or remove it with ``None``."""
         self._tooltip = None if value is None else str(value)
         text = self._tooltip
 
@@ -313,8 +313,8 @@ class Item:
         ``callback`` is called with no arguments when it's clicked. ``key`` is a
         letter that clicks it with ⌘ while the menu is open (an uppercase one
         with ⌘⇧). A ``checked`` entry
-        shows a checkmark; flip :attr:`MenuItem.checked` in its callback for a
-        setting that turns on and off.
+        shows a checkmark; flip it with :meth:`MenuItem.set_checked` in its
+        callback for a setting that turns on and off.
         """
         _require_main_thread("adding a menu entry")
         entry = _native_entry(str(title), callback, key, enabled, checked)

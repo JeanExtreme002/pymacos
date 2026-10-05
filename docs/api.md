@@ -481,9 +481,9 @@ explain how to use each part.
 
 .. autofunction:: macos.menubar.every
 .. autoclass:: macos.menubar.Item
-   :members: action, add, entries, remove, separator, set_icon, title, tooltip
+   :members: action, add, entries, remove, separator, set_icon, set_title, set_tooltip, title, tooltip
 .. autoclass:: macos.menubar.MenuItem
-   :members: callback, checked, enabled, title
+   :members: callback, checked, enabled, set_checked, set_enabled, set_title, title
 .. autofunction:: macos.menubar.quit
 .. autofunction:: macos.menubar.run
 .. autoclass:: macos.menubar.Timer
