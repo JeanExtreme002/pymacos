@@ -192,3 +192,27 @@ def test_remove_forgets_actions_and_detaches_entries(item):
     bar.set_title("gone")
     macos.menubar.run(timeout=0.2)
     assert calls == []
+
+
+def test_nothing_can_be_added_after_remove(item):
+    bar = item("pymacos")
+    bar.remove()
+    with pytest.raises(RuntimeError, match="removed"):
+        bar.add("Late")
+    with pytest.raises(RuntimeError, match="removed"):
+        bar.separator()
+    bar.remove()  # again: nothing happens
+
+
+def test_remove_from_another_thread(item):
+    bar = item("pymacos")
+    entry = bar.add("Act", lambda: None)
+    worker = threading.Thread(target=bar.remove)
+    worker.start()
+    worker.join()
+    # Queued for the main thread, but no entry may be added in the meantime.
+    with pytest.raises(RuntimeError, match="removed"):
+        bar.add("Too late")
+    assert not bar._removed and entry._tag in menubar._actions
+    macos.menubar.run(timeout=0.2)
+    assert bar._removed and entry._native is None and entry._tag not in menubar._actions

@@ -216,7 +216,8 @@ class Item:
         self._entries: List[MenuItem] = []
         self._quit_entry: Optional[MenuItem] = None
         self._quit_line: Optional[int] = None  # the separator above Quit: add() inserts before it
-        self._removed = False
+        self._removing = False  # set by remove() at once, under _lock: no more entries after it
+        self._removed = False  # set once the native objects are released, on the main thread
         self._title: Optional[str] = None
         self._tooltip: Optional[str] = None
         self.set_title(title)
@@ -317,6 +318,7 @@ class Item:
         callback for a setting that turns on and off.
         """
         _require_main_thread("adding a menu entry")
+        self._require_present("adding a menu entry")
         entry = _native_entry(str(title), callback, key, enabled, checked)
         self._insert(cast(int, entry._native))  # just made: set until remove()
         self._entries.append(entry)
@@ -342,21 +344,35 @@ class Item:
     def separator(self) -> None:
         """Add a line between entries, above *Quit*."""
         _require_main_thread("adding a menu separator")
+        self._require_present("adding a menu separator")
         self._insert(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
 
-    def remove(self) -> None:
-        """Take the item out of the menu bar for good. Its entries stop calling back; changing them does nothing."""
-        entries = self._entries + ([self._quit_entry] if self._quit_entry else [])
+    def _require_present(self, what: str) -> None:
         with _lock:
+            if self._removing:
+                raise RuntimeError("{} to a menu bar item that was removed".format(what))
+
+    def remove(self) -> None:
+        """
+        Take the item out of the menu bar for good.
+
+        Its entries stop calling back, and changing them does nothing; adding
+        entries raises :class:`RuntimeError`. It may be called from any thread.
+        """
+        with _lock:
+            if self._removing:
+                return
+            self._removing = True
             if self in _items:
                 _items.remove(self)
-            for entry in entries:
-                _actions.pop(entry._tag, None)
 
         def take_out() -> None:
-            if self._removed:
-                return
+            # On the main thread, like add(): the entries are all known here.
             self._removed = True
+            entries = self._entries + ([self._quit_entry] if self._quit_entry else [])
+            with _lock:
+                for entry in entries:
+                    _actions.pop(entry._tag, None)
             bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
             _objc.send(bar, "removeStatusItem:", self._native, argtypes=(_objc.id,), restype=None)
             for entry in entries:
