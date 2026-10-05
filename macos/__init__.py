@@ -49,7 +49,7 @@ The package imports on any platform (so it can sit in cross-platform code and
 docs builds), but its functions raise :class:`NotSupportedError` outside macOS.
 """
 
-__version__ = "1.19.3"
+__version__ = "1.20.0"
 
 from . import (
     appearance,
