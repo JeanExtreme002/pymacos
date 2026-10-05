@@ -4,7 +4,7 @@
 pymacos (imported as ``macos``) — a Pythonic interface to macOS.
 
 Notifications, clipboard, webcam and microphone, keyboard and mouse, windows,
-hotkeys, appearance, apps, Keychain, speech, screenshots, power, Shortcuts,
+hotkeys, menu bar icons, appearance, apps, Keychain, speech, screenshots, power, Shortcuts,
 Finder, volume, Spotlight, dialogs, system info, Bluetooth, music, browser
 tabs, system events, scheduled scripts, OCR, document scanning, images,
 videos, PDFs and language detection in one import, with no dependencies::
@@ -72,6 +72,7 @@ from . import (
     keychain,
     language,
     maps,
+    menubar,
     mouse,
     music,
     network,
@@ -129,6 +130,7 @@ __all__ = [
     "keychain",
     "language",
     "maps",
+    "menubar",
     "mouse",
     "music",
     "network",
