@@ -978,8 +978,10 @@ explain how to use each part.
 .. autoexception:: macos.MacOSError
 .. autoexception:: macos.NotSupportedError
 .. autoexception:: macos.PermissionDeniedError
+.. autoexception:: macos.PromptTimeoutError
 .. autoexception:: macos.AppNotFoundError
 .. autoexception:: macos.ShortcutNotFoundError
 .. autoexception:: macos.KeychainError
 .. autoexception:: macos.CommandError
+.. autoexception:: macos.CommandTimeoutError
 ```

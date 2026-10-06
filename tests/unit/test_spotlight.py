@@ -18,12 +18,12 @@ class _FakeMdfind:
         self.lines, self.returncode_value, self.stderr_text = lines, returncode, stderr
 
     def __call__(self, args, **kwargs):
-        import io
-
         self.args = list(args)
         self.stdout = iter(line + "\n" for line in self.lines)
         self.stdout = _Stream(self.stdout)
-        self.stderr = io.StringIO(self.stderr_text)
+        self.stderr = kwargs["stderr"]
+        assert self.stderr is not subprocess.PIPE  # read only after stdout's end: a full pipe would hang mdfind
+        self.stderr.write(self.stderr_text)
         self.returncode = None
         self.killed = False
         return self
@@ -136,3 +136,20 @@ def test_spotlight_metadata(monkeypatch, tmp_path):
     assert macos.spotlight.metadata(target) == {"kMDItemNumberOfPages": 3, "kMDItemFSCreationDate": created}
     with pytest.raises(FileNotFoundError):
         macos.spotlight.metadata(tmp_path / "missing")
+
+
+def test_spotlight_query_that_looks_like_an_option_stays_the_query(mdfind, tmp_path):
+    fake = mdfind([])
+
+    macos.spotlight.search("-onlyin", folder=tmp_path)
+    assert fake.args == ["mdfind", "-onlyin", str(tmp_path.resolve()), " -onlyin"]
+    macos.spotlight.search("-s")
+    assert fake.args == ["mdfind", " -s"]
+
+
+def test_spotlight_reads_a_long_stderr_without_a_pipe(mdfind):
+    mdfind([], returncode=1, stderr="warning\n" * 20000)
+
+    with pytest.raises(macos.CommandError) as info:
+        macos.spotlight.search("x")
+    assert len(info.value.stderr) > 64 * 1024

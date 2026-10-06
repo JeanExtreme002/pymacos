@@ -462,3 +462,124 @@ def test_a_connected_udp_socket_over_ipv6():
         )
         listening = [p.port for p in macos.system.ports() if p.pid == os.getpid() and p.protocol == "udp"]
         assert remote in listening and local not in listening  # connected: a client, not a listener
+
+
+def test_kill_refuses_a_pid_another_process_took(monkeypatch):
+    from datetime import datetime
+
+    system = macos.system
+    then, now = datetime(2026, 10, 1, 9, 0), datetime(2026, 10, 5, 14, 30)
+
+    def process(started, path="/usr/bin/sleep", name="sleep"):
+        return system.Process(4242, name, Path(path) if path else None, "me", 1, started, None, None)
+
+    signals = []
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(system.os, "kill", lambda pid, signal: signals.append((pid, signal)))
+    old = process(then)
+
+    for current in (process(now, name="Safari"), process(None, "/Applications/Safari.app/Contents/MacOS/Safari"), None):
+        monkeypatch.setattr(system, "_read_process", lambda pid, current=current: current)
+        with pytest.raises(ProcessLookupError, match="has quit"):
+            old.kill(force=True)  # the pid is another process's now, or nobody's
+    # Another user's process: no start time to compare, but its executable tells.
+    monkeypatch.setattr(system, "_read_process", lambda pid: process(None, "/bin/zsh", "zsh"))
+    with pytest.raises(ProcessLookupError):
+        system.kill(process(None), force=True)
+    assert signals == []
+
+    monkeypatch.setattr(system, "_read_process", lambda pid: process(then))
+    old.kill()
+    system.kill(4242, force=True)  # a bare pid: whatever has it now
+    assert [pid for pid, _ in signals] == [4242, 4242]
+
+
+def test_mount_image_detaches_and_explains_an_answer_it_cannot_read(fake_run, tmp_path):
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = "/dev/disk7          \tGUID_partition_scheme\n/dev/disk7s1        \tApple_HFS\t/Volumes/Tool\n"
+
+    with pytest.raises(macos.MacOSError, match="can't be read.*detached.*GUID_partition_scheme"):
+        macos.system.mount_image(image)
+    assert fake_run.args == ["hdiutil", "detach", "/dev/disk7", "-force"]  # not left attached
+
+    fake_run.stdout = '<?xml version="1.0"?><plist version="1.0"><dict><key>system-entities</key>'  # cut short
+    fake_run.calls.clear()
+    with pytest.raises(macos.MacOSError, match="can't be read"):
+        macos.system.mount_image(image, timeout=30)
+    assert [call["args"][1] for call in fake_run.calls] == ["attach"]  # no device named: nothing to detach
+    assert fake_run.calls[0]["timeout"] == 30
+
+
+def test_mount_image_and_updates_give_up_on_a_stuck_command(monkeypatch, fake_run, tmp_path):
+    def stuck(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    monkeypatch.setattr(macos._system.subprocess, "run", stuck)
+    with pytest.raises(macos.CommandTimeoutError):
+        macos.system.mount_image(image)
+    with pytest.raises(macos.CommandTimeoutError):
+        macos.system.available_updates(timeout=5)
+
+
+def test_updates_whose_title_has_a_comma():
+    output = (
+        "* Label: ProVideoFormats-2.3\n"
+        "\tTitle: Pro Video Formats, 2.3, Version: 2.3, Size: 1024KiB, Recommended: YES,\n"
+        "* Label: Odd-1\n"
+        "\tVersion: 1, Title: Odd: the sequel, Action: restart\n"
+    )
+    formats, odd = macos.system._updates(output)
+    assert (formats.title, formats.version, formats.size, formats.recommended) == (
+        "Pro Video Formats, 2.3", "2.3", 1024 * 1024, True
+    )
+    assert (odd.title, odd.version, odd.size, odd.restart) == ("Odd: the sequel", "1", None, True)
+
+
+def test_model_raises_when_macos_does_not_say(fake_run):
+    import json
+
+    system = macos.system
+    for answer in ("not json", json.dumps({}), json.dumps({"SPHardwareDataType": []}), json.dumps({"SPHardwareDataType": [{}]})):
+        system.model.cache_clear()
+        fake_run.stdout = answer
+        with pytest.raises(macos.MacOSError, match="didn't tell"):
+            system.model()
+    system.model.cache_clear()
+    fake_run.stdout = json.dumps({"SPHardwareDataType": [{"machine_name": "Mac mini"}]})
+    try:
+        assert system.model() == "Mac mini"
+        assert fake_run.calls[-1]["timeout"] > 0
+    finally:
+        system.model.cache_clear()
+
+
+def test_energy_usage_says_when_macos_does_not_report_it(monkeypatch):
+    system = macos.system
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(system, "_libproc", lambda: (None, 1.0))
+    monkeypatch.setattr(system, "_pids", lambda: [1, 10])
+    monkeypatch.setattr(system, "_rusage", lambda lib, pid: None)  # not even this process: unsupported
+    with pytest.raises(macos.NotSupportedError, match="energy"):
+        system.energy_usage(0.01)
+
+
+def test_network_usage_stops_a_stuck_nettop(fake_run, monkeypatch):
+    monkeypatch.setattr(macos.system, "_read_process", lambda pid: None)
+    macos.system.network_usage(interval=2)
+    assert fake_run.args[0] == "nettop" and fake_run.calls[-1]["timeout"] == 2 + macos.system._NETTOP_SLACK
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="loads libSystem")
+def test_libsystem_is_loaded_once_with_its_signatures():
+    import ctypes
+    import os
+
+    from macos import _libc
+
+    lib = _libc.lib()
+    assert lib is _libc.lib() and lib.proc_pidinfo.restype is ctypes.c_int
+    assert os.getpid() in _libc.pids() and _libc.tick() > 0
+    assert macos.system.memory() > 0 and 0.0 <= macos.system.memory_usage().percent <= 1.0

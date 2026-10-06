@@ -13,6 +13,13 @@ the same kind of item Keychain Access shows as "application password"::
 This talks to the Security framework directly (``SecItem*``) rather than the
 ``security`` command, whose ``-w <password>`` flag would expose the secret to
 every user through the process list.
+
+Items get the keychain's default access control, which trusts the app that
+created them: here, the Python interpreter, not the script. Any script or
+package that interpreter runs (a virtual environment's ``python`` is the same
+interpreter) reads them without a prompt, and another interpreter, or the same
+one after an upgrade, makes macOS ask the user first. See the Keychain page of
+the documentation, "Who can read the items".
 """
 
 import ctypes

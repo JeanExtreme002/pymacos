@@ -49,7 +49,8 @@ macos.video.convert("talk.mov", "talk.m4a")                        # the sound o
   high quality or at `height=1080` or `2160`.
 
 It uses the `avconvert` command that ships with macOS, and replaces the output
-if it exists. To record the screen, see {func}`macos.screen.record`.
+if it exists; the output can't be the source itself (it raises `ValueError`).
+To record the screen, see {func}`macos.screen.record`.
 
 ## Animated GIFs
 
@@ -90,7 +91,8 @@ macos.video.reverse("jump.mov", "jump-backwards.mov")
 - {func}`~macos.video.crop` measures the box on the upright picture, in
   pixels from the top-left corner.
 - {func}`~macos.video.reverse` plays the sound backwards too. It reads every
-  frame, so it's best for short clips.
+  frame, so it's best for short clips; it reads them a few at a time (about
+  256 MB of frames at once), so a long or 4K one takes time, not all the memory.
 
 The others re-encode at the highest quality. The output can be a `.mov`,
 `.mp4` or `.m4v`.

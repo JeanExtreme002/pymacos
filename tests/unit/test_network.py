@@ -134,3 +134,39 @@ def test_bandwidth_between_two_samples():
 def test_bandwidth_checks_the_interval(fake_run):
     with pytest.raises(ValueError, match="interval must be positive"):
         macos.network.bandwidth(0)
+
+
+def test_speed_test_and_vpns_give_up_on_a_stuck_command(monkeypatch, fake_run):
+    import subprocess
+
+    from macos import _system
+
+    timeouts = []
+
+    def stuck(args, **kwargs):
+        timeouts.append((args[0], kwargs["timeout"]))
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(_system.subprocess, "run", stuck)
+    with pytest.raises(macos.CommandTimeoutError) as raised:
+        macos.network.speed_test(timeout=90)
+    assert isinstance(raised.value, TimeoutError) and "networkQuality" in str(raised.value)
+    with pytest.raises(macos.CommandTimeoutError):
+        macos.network.vpns()
+    assert timeouts == [("networkQuality", 90), ("scutil", macos.network._SCUTIL_TIMEOUT)]
+
+
+def test_vpn_commands_have_a_timeout(fake_run, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    seen = []
+
+    def run(args, **kwargs):
+        seen.append((args[2], kwargs.get("timeout")))
+        return subprocess.CompletedProcess(args, 0, _VPN_LIST.format(office="Disconnected"), "")
+
+    monkeypatch.setattr(_system.subprocess, "run", run)
+    macos.network.connect_vpn("Office", wait=False)
+    assert seen == [("list", 30.0), ("start", 30.0)]

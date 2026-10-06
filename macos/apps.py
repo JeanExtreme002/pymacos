@@ -29,9 +29,10 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Iterator, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _libc, _objc, finder, spotlight, system
+from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
 from ._objc import BOOL, NSInteger, NSUInteger
-from ._system import framework, require_macos, run as _run
+from ._system import applescript, framework, require_macos, run as _run
 from .errors import AppNotFoundError, CommandError, MacOSError
 
 __all__ = [
@@ -75,29 +76,6 @@ def _running_application_class() -> int:
 def _workspace() -> int:
     framework("AppKit")
     return _objc.send(_objc.cls("NSWorkspace"), "sharedWorkspace")
-
-
-@lru_cache(maxsize=None)
-def _libproc() -> ctypes.CDLL:
-    # libproc is part of libSystem (there is no separate libproc.dylib to load).
-    require_macos()
-    lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-    lib.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
-    lib.proc_listallpids.restype = ctypes.c_int
-    return lib
-
-
-def _pids() -> List[int]:
-    lib = _libproc()
-    # The process count can grow between the sizing call and the real one, so
-    # leave headroom and retry if the buffer came back full.
-    capacity = lib.proc_listallpids(None, 0) + 64
-    while True:
-        buffer = (ctypes.c_int * capacity)()
-        count = lib.proc_listallpids(buffer, ctypes.sizeof(buffer))
-        if count < capacity:
-            return [pid for pid in buffer[: max(count, 0)] if pid > 0]
-        capacity *= 2
 
 
 def _handle(pid: int) -> Optional[int]:
@@ -337,6 +315,16 @@ def _find_launched(path: str, bundle_id: Optional[str]) -> Optional[App]:
     return None
 
 
+# What `open` says when the app itself can't be found (kLSApplicationNotFoundErr is -10814), as
+# opposed to an app that's there but won't open: damaged, quarantined, for another processor...
+_APP_MISSING = ("unable to find application", "-10814")
+
+
+def _app_missing(error: CommandError) -> bool:
+    text = (error.stderr or "").lower()
+    return any(marker in text for marker in _APP_MISSING)
+
+
 def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     """
     Launch an application (or activate it, if it's already running) and return it.
@@ -344,6 +332,10 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     ``name`` may be an app name (``"Safari"``), a bundle identifier
     (``"com.apple.Safari"``) or a path to an ``.app``. ``background=True``
     launches it without bringing it to the front.
+
+    Raises :class:`~macos.errors.AppNotFoundError` when there's no such
+    app, and :class:`~macos.errors.CommandError`, with macOS's reason, when
+    it's there but won't open (damaged, blocked by Gatekeeper...).
     """
     path = _locate(name)
     bundle_id = _bundle_id(path)
@@ -351,7 +343,9 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     try:
         _run(["open", *(["-g"] if background else []), "-a", path])
     except CommandError as error:
-        raise AppNotFoundError("unable to launch {!r}: {}".format(name, error.stderr or error)) from error
+        if _app_missing(error):
+            raise AppNotFoundError("unable to launch {!r}: {}".format(name, error.stderr or error)) from error
+        raise  # found, but it won't open: its reason says why
 
     deadline = time.monotonic() + timeout
     while True:
@@ -377,15 +371,20 @@ def open_with(target: Union[str, "os.PathLike[str]"], app: str, *, background: b
 
         macos.apps.open_with("report.pdf", "Preview")
 
-    Also available as ``macos.open_with``.
+    Raises :class:`~macos.errors.AppNotFoundError` when there's no such app,
+    and :class:`~macos.errors.CommandError`, with macOS's reason, when the
+    app or the file won't open. Also available as ``macos.open_with``.
     """
-    from .launch import _flags, _target  # launch imports this module
+    from .launch import _flags, _resolve  # launch imports this module
 
-    resolved = _target(target)
+    _, arguments = _resolve(target)
+    resolved = arguments[-1]
     try:
-        _run(["open", *_flags(background), "-a", _locate(app), "--", resolved])
+        _run(["open", *_flags(background), "-a", _locate(app), *arguments])
     except CommandError as error:
-        raise AppNotFoundError("{!r} could not open {}: {}".format(app, resolved, error.stderr or error)) from error
+        if _app_missing(error):
+            raise AppNotFoundError("{!r} could not open {}: {}".format(app, resolved, error.stderr or error)) from error
+        raise
 
 
 @lru_cache(maxsize=None)
@@ -401,12 +400,6 @@ def _launch_services() -> ctypes.CDLL:
     services.LSSetDefaultRoleHandlerForContentType.restype = ctypes.c_int32
     services.UTTypeIsDeclared.argtypes = (_cf.CFTypeRef,)
     services.UTTypeIsDeclared.restype = ctypes.c_bool
-
-    cf = _cf.lib()
-    cf.CFURLCopyFileSystemPath.argtypes = (_cf.CFTypeRef, ctypes.c_long)
-    cf.CFURLCopyFileSystemPath.restype = _cf.CFTypeRef
-    cf.CFURLCreateWithString.argtypes = (_cf.CFTypeRef, _cf.CFTypeRef, _cf.CFTypeRef)
-    cf.CFURLCreateWithString.restype = _cf.CFTypeRef
     return services
 
 
@@ -538,12 +531,11 @@ def install_from_dmg(
     :class:`FileExistsError`, unless ``replace=True``. Installers (``.pkg``)
     aren't run.
     """
-    from . import system
-
     target_folder = Path(destination).expanduser()
     if not target_folder.is_dir():
         raise NotADirectoryError(str(target_folder))
     mounted = system.mount_image(image)
+    succeeded = False
     try:
         found = sorted(entry for entry in mounted.iterdir() if entry.suffix == ".app" and entry.is_dir())
         if not found:
@@ -571,8 +563,14 @@ def install_from_dmg(
         finally:
             if staged.exists():
                 shutil.rmtree(str(staged), ignore_errors=True)
+        succeeded = True
     finally:
-        system.unmount_image(mounted, force=True)
+        try:
+            system.unmount_image(mounted, force=True)
+        except MacOSError:
+            if succeeded:
+                raise  # installed, but the image stays mounted: say so
+            # Otherwise the error that stopped the install is the one to see, not this one.
     return str(target)
 
 
@@ -618,8 +616,6 @@ def login_items() -> List[LoginItem]:
     running Python to control it. Apps that register themselves as
     background items (with their own switch in System Settings) aren't listed.
     """
-    from ._system import applescript
-
     found = []
     for record in applescript("System Events", _LOGIN_ITEMS).rstrip("\n").split("\x1e"):
         fields = record.split("\x1f")
@@ -635,14 +631,15 @@ def add_login_item(app: str) -> LoginItem:
 
     An app already there isn't added twice.
     """
-    from ._system import applescript
-
     path = _locate(app)
     for item in login_items():
         if item.path and os.path.realpath(item.path) == path:
             return item
     applescript("System Events", _ADD_LOGIN_ITEM, path)
-    return next(item for item in login_items() if item.path and os.path.realpath(item.path) == path)
+    added = next((item for item in login_items() if item.path and os.path.realpath(item.path) == path), None)
+    if added is None:
+        raise MacOSError("{} wasn't added to the login items: System Events didn't list it afterwards".format(path))
+    return added
 
 
 def remove_login_item(app: str) -> bool:
@@ -652,8 +649,6 @@ def remove_login_item(app: str) -> bool:
     ``app`` is its name as :func:`login_items` shows it, or an app's name,
     bundle ID or path, as for :func:`open`.
     """
-    from ._system import applescript
-
     items = login_items()
     matches = [item for item in items if item.name == app and item.path]
     if not matches:
@@ -678,19 +673,6 @@ def default_browser() -> Optional[str]:
 # --- Quarantine ---------------------------------------------------------------
 
 _QUARANTINE = b"com.apple.quarantine"
-_XATTR_NOFOLLOW = 1  # act on symbolic links themselves, never on what they point to
-_ENOATTR = 93  # errno.ENOATTR, which only macOS's errno module has: the file doesn't have it
-
-
-@lru_cache(maxsize=None)
-def _libc() -> ctypes.CDLL:
-    require_macos()
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.getxattr.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int)
-    libc.getxattr.restype = ctypes.c_ssize_t
-    libc.removexattr.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
-    libc.removexattr.restype = ctypes.c_int
-    return libc
 
 
 def is_quarantined(path: Union[str, "os.PathLike[str]"]) -> bool:
@@ -703,7 +685,7 @@ def is_quarantined(path: Union[str, "os.PathLike[str]"]) -> bool:
     target = Path(os.path.expanduser(os.fspath(path)))
     if not os.path.lexists(target):
         raise FileNotFoundError(str(target))
-    size = _libc().getxattr(os.fsencode(target), _QUARANTINE, None, 0, 0, _XATTR_NOFOLLOW)
+    size = _libc.lib().getxattr(os.fsencode(target), _QUARANTINE, None, 0, 0, _XATTR_NOFOLLOW)
     if size >= 0:
         return True
     error = ctypes.get_errno()
@@ -728,7 +710,7 @@ def unquarantine(path: Union[str, "os.PathLike[str]"]) -> int:
     target = Path(os.path.expanduser(os.fspath(path)))
     if not os.path.lexists(target):
         raise FileNotFoundError(str(target))
-    libc = _libc()
+    libc = _libc.lib()
     paths = [target]
     if target.is_dir() and not target.is_symlink():
         def unreadable(error: OSError) -> None:
@@ -793,8 +775,6 @@ def installed() -> List[InstalledApp]:
     It lists the Applications folders (yours, the Mac's and the system's),
     their subfolders included, and the apps Spotlight knows elsewhere.
     """
-    from . import spotlight
-
     require_macos()
     paths = set()
     for folder in _APP_FOLDERS:
@@ -873,21 +853,39 @@ def _leftovers(library: Path, bundle_id: Optional[str], names: Sequence[str], ot
     return list(dict.fromkeys(path for path in found if path.name))
 
 
+def _vendor(bundle_id: Optional[str]) -> Optional[str]:
+    """The maker's part of a bundle ID: ``'org.mozilla'`` for ``'org.mozilla.firefox'``."""
+    parts = (bundle_id or "").casefold().split(".")
+    return ".".join(parts[:2]) if len(parts) > 2 else None
+
+
 def _claims(app: InstalledApp, everything: Sequence[InstalledApp]) -> Tuple[List[str], List[str]]:
     """
     The names the app's files may go by, and the bundle IDs of the other apps that start with its own.
 
-    A name another installed app also has is left out: its folder may be that app's.
+    A folder named after the app may just as well be a sibling's: Firefox Developer Edition and
+    Firefox Nightly share "Application Support/Firefox" with Firefox. So a name is left out when
+    another installed app's name holds it (or is held in it), or when another app comes from the
+    same maker.
     """
     others = [other for other in everything if other.path != app.path and other.bundle_id != app.bundle_id]
-    taken = {name.casefold() for other in others for name in (other.name, other.path.stem)}
-    names = sorted(name for name in {app.name, app.path.stem} if name.casefold() not in taken)
+    vendor = _vendor(app.bundle_id)
+    if vendor is not None and any(_vendor(other.bundle_id) == vendor for other in others):
+        names: List[str] = []  # a sibling from the same maker may share any of its folders
+    else:
+        taken = {name.casefold() for other in others for name in (other.name, other.path.stem)}
+
+        def shared(name: str) -> bool:
+            wanted = name.casefold()
+            return any(wanted in other or other in wanted for other in taken)
+
+        names = sorted(name for name in {app.name, app.path.stem} if not shared(name))
     prefix = "{}.".format(app.bundle_id)
     ids = sorted({other.bundle_id for other in others if other.bundle_id and other.bundle_id.startswith(prefix)})
     return names, ids
 
 
-def uninstall(name: str, *, dry_run: bool = False) -> List[Path]:
+def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = False) -> List[Path]:
     """
     Uninstall an app: move it to the Trash, with the files it left in your
     Library (settings, caches, logs, saved state, support files), and return
@@ -900,17 +898,23 @@ def uninstall(name: str, *, dry_run: bool = False) -> List[Path]:
 
     ``name`` is an app name, a bundle ID or a path. ``dry_run=True`` only
     returns what would go, without moving anything. The files are found by
-    the app's bundle ID and, in Application Support, Caches and Logs, by its
-    name, unless another installed app has that name too. Everything goes to the Trash, so *Put Back* undoes it; only this
-    user's files are touched, not ``/Library``'s, which need an administrator.
+    the app's bundle ID, which only that app uses.
+
+    Many apps also keep a folder named after themselves in Application
+    Support, Caches or Logs (``Application Support/Slack``). Those are only
+    moved with ``include_name_matches=True``, since a name can be shared:
+    Firefox Developer Edition keeps its profiles in Firefox's. Even then a
+    name is skipped when another installed app's name holds it, or comes
+    from the same maker. They come last in the list: try ``dry_run=True``
+    first, and check them. Everything goes to the Trash, so *Put Back* undoes
+    it; only this user's files are touched, not ``/Library``'s, which need an
+    administrator.
 
     Raises :class:`~macos.MacOSError` for an app that's running (quit it
     first; ``dry_run`` works all the same) or that comes with macOS, and :class:`~macos.AppNotFoundError` for
     one that isn't found. An app installed for every user may need an
     administrator to be moved: then nothing is moved, and the error says so.
     """
-    from . import finder
-
     require_macos()
     path = _locate(name)
     app = _installed_app(path)
@@ -919,6 +923,8 @@ def uninstall(name: str, *, dry_run: bool = False) -> List[Path]:
     if path.startswith(("/System/", "/usr/")):
         raise MacOSError("{} comes with macOS and can't be uninstalled".format(app.name))
     names, others = _claims(app, installed())
+    if not include_name_matches:
+        names = []  # by bundle ID only: a folder named after the app may be another's too
     found = [Path(path), *_leftovers(Path.home() / "Library", app.bundle_id, names, others)]
     if dry_run:
         return found

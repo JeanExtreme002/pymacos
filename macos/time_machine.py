@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 from ._system import require_macos, run as _run
-from .errors import CommandError, MacOSError
+from .errors import CommandError, MacOSError, PermissionDeniedError
 
 __all__ = [
     "destinations",
@@ -95,14 +95,36 @@ def progress() -> Optional[float]:
     return min(1.0, float(found.group(1)))
 
 
+# What tmutil says when the app running Python lacks Full Disk Access: "tmutil:
+# latestbackup requires Full Disk Access privileges", or the system's EPERM text.
+_NO_ACCESS = ("Full Disk Access", "Operation not permitted")
+
+
+def _check_access(text: str) -> None:
+    if any(sign in text for sign in _NO_ACCESS):
+        raise PermissionDeniedError(
+            "Time Machine's backups need Full Disk Access: allow the app running Python (your terminal or IDE) "
+            "in System Settings › Privacy & Security › Full Disk Access"
+        )
+
+
 def last_backup() -> Optional[datetime]:
-    """When the latest backup was made, or ``None`` (no backup yet, or its disk isn't connected)."""
+    """
+    When the latest backup was made, or ``None`` (no backup yet, or its disk isn't connected).
+
+    Without Full Disk Access for the app running Python, raises
+    :class:`~macos.errors.PermissionDeniedError` rather than pass for "no backup".
+    """
     require_macos()
     try:
         output = _run(["tmutil", "latestbackup"])
-    except CommandError:
-        return None
+    except CommandError as error:
+        _check_access(error.stderr)
+        return None  # no backup yet, no backup disk set up, or it isn't connected
     # tmutil prints the backup's path, named after its date; its errors come with a success status.
+    # A path is never one: a volume or a Mac may be named anything, "Full Disk Access" or a newline too.
+    if not output.strip().startswith("/"):
+        _check_access(output)
     found = _BACKUP_NAME.findall(output)
     return datetime.strptime(found[-1], "%Y-%m-%d-%H%M%S") if found else None
 

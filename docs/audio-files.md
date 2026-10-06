@@ -38,7 +38,11 @@ macos.audio.speed("lecture.m4a", "lecture-fast.m4a", 1.5)
   rates and channels: they're all converted to the first one's.
 - {func}`~macos.audio.gain` clips the loudest parts if pushed past the maximum.
 - {func}`~macos.audio.speed` keeps the pitch by default, so voices don't turn
-  into chipmunks; `keep_pitch=False` changes it with the speed.
+  into chipmunks; `keep_pitch=False` changes it with the speed. The sound is
+  compressed once, into the output's format: a `.wav` output loses nothing
+  more than the stretching itself.
+- {func}`~macos.audio.trim` and {func}`~macos.audio.gain` go through the file
+  a piece at a time, so long recordings don't fill the memory.
 
 The output's extension sets the format, and `quality` and `lossless` work as
 for {func}`~macos.audio.convert`. The edits work on 16-bit samples: a 16-bit

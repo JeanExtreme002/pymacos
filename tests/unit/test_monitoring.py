@@ -58,7 +58,7 @@ def test_disk_health(monkeypatch):
     }
     monkeypatch.setattr(system, "require_macos", lambda: None)
 
-    def diskutil(args):
+    def diskutil(args, **kwargs):
         return plistlib.dumps(answers[(args[1],) if args[1] == "list" else (args[1], args[3])]).decode()
 
     monkeypatch.setattr(system, "_run", diskutil)
@@ -123,7 +123,7 @@ def test_energy_usage_skips_a_pid_taken_by_a_new_process(monkeypatch):
     monkeypatch.setattr(system, "require_macos", lambda: None)
     monkeypatch.setattr(system, "_libproc", lambda: (None, 1.0))
     monkeypatch.setattr(system, "_rusage", rusage)
-    monkeypatch.setattr(macos.apps, "_pids", lambda: [10, 11])
+    monkeypatch.setattr(system, "_pids", lambda: [10, 11])
     monkeypatch.setattr(system.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(system.time, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
     monkeypatch.setattr(

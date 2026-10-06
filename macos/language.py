@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
-from . import _objc
+from . import _files, _objc
 from ._objc import NSInteger, NSUInteger
 from ._system import framework
 from .errors import NotSupportedError
@@ -200,10 +200,6 @@ class Entity:
     """Where it begins in the text, as a Python string index."""
 
 
-class _NSRange(ctypes.Structure):
-    _fields_ = [("location", NSUInteger), ("length", NSUInteger)]
-
-
 def _has_scheme(language: str, scheme: str) -> bool:
     """Whether this Mac has the model behind a tag scheme (``"NameType"``, ``"LexicalClass"``...) for ``language``."""
     with _objc.autorelease_pool():
@@ -264,11 +260,11 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
         tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of([scheme]), argtypes=(_objc.id,))
         _objc.send(tagger, "autorelease")
         _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
-        whole = _NSRange(0, len(units) // 2)
-        _objc.send(tagger, "setLanguage:range:", _objc.nsstring(code), whole, argtypes=(_objc.id, _NSRange), restype=None)
+        whole = _files.NSRange(0, len(units) // 2)
+        _objc.send(tagger, "setLanguage:range:", _objc.nsstring(code), whole, argtypes=(_objc.id, _files.NSRange), restype=None)
         index, total = 0, len(units) // 2
         while index < total:
-            found = _NSRange()
+            found = _files.NSRange()
             tag = _objc.send(
                 tagger,
                 "tagAtIndex:unit:scheme:tokenRange:",
@@ -335,11 +331,16 @@ def keywords(text: str, *, language: Optional[str] = None, verbs: bool = False, 
         _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
         total = len(units) // 2
         _objc.send(
-            tagger, "setLanguage:range:", _objc.nsstring(code), _NSRange(0, total), argtypes=(_objc.id, _NSRange), restype=None
+            tagger,
+            "setLanguage:range:",
+            _objc.nsstring(code),
+            _files.NSRange(0, total),
+            argtypes=(_objc.id, _files.NSRange),
+            restype=None,
         )
         index = 0
         while index < total:
-            token = _NSRange()
+            token = _files.NSRange()
             kind = _objc.send(
                 tagger,
                 "tagAtIndex:unit:scheme:tokenRange:",

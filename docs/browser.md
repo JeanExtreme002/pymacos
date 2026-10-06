@@ -54,7 +54,8 @@ macos.browser.open("https://example.com", app="Safari")
 ```
 
 {func}`~macos.browser.open` opens the URL in a new tab, in the default browser
-when none is running.
+when none is running. A URL starting with `-` raises `ValueError`: the `open`
+command would take it as one of its options.
 
 ## Running JavaScript
 
@@ -76,6 +77,9 @@ The browser must allow it, once:
 - Chrome and the others: *View › Developer › Allow JavaScript from Apple Events*.
 
 Otherwise it raises {class}`~macos.PermissionDeniedError`, saying where.
+
+The script reaches `osascript` on its standard input, not as an argument, so
+a token or password in it doesn't show in the process list (`ps`).
 
 ## Reference
 

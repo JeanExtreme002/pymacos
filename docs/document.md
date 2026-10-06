@@ -37,7 +37,14 @@ footers, text boxes), so a converted PDF looks like the document opened in
 TextEdit, not in Word. Tables are lost when writing Word files (`.docx`,
 `.doc`): their cells become lines; they're kept in the other formats.
 
-An HTML page's pictures on the web may be downloaded while it's read.
+HTML is read by WebKit, as a browser reads it: a page's pictures and style
+sheets are fetched while it's read, from the web and from the files of this
+Mac (`file://`) alike. Don't convert HTML you don't trust: it can make the Mac
+fetch addresses of its choosing, or pull local files into the document.
+
+Reading HTML or web archives, and writing PDFs, use AppKit's text views and
+printing, which work only on the main thread: called from another thread, they
+raise {class}`~macos.MacOSError` instead of hanging.
 
 ## Reading the text
 

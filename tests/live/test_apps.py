@@ -158,11 +158,13 @@ def test_uninstall_moves_the_app_and_its_leftovers_to_the_trash(tmp_path):
     (library / "Caches" / bundle_id / "cache.db").write_text("x")
     trash = Path.home() / ".Trash"
     try:
-        planned = macos.apps.uninstall(str(app), dry_run=True)
+        # By default, only what's named after the bundle id: a folder with the app's name may be another app's.
+        assert macos.apps.uninstall(str(app), dry_run=True) == [app.resolve(), leftovers[0]]
+        planned = macos.apps.uninstall(str(app), dry_run=True, include_name_matches=True)
         assert planned[0] == app.resolve() and sorted(planned[1:]) == sorted(leftovers)
         assert app.exists() and all(leftover.exists() for leftover in leftovers)  # a dry run moves nothing
 
-        assert macos.apps.uninstall(str(app)) == planned
+        assert macos.apps.uninstall(str(app), include_name_matches=True) == planned
         assert not app.exists() and not any(leftover.exists() for leftover in leftovers)
         assert (trash / app.name).exists() and (trash / bundle_id / "cache.db").exists()
     finally:

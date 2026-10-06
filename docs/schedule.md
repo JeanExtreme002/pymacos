@@ -40,7 +40,9 @@ macos.schedule.add("scrape", "scrape.py", every=900, args=["--quiet"], python="~
 
 The script runs with the same Python that added it (or `python=`, such as a
 virtual environment's), in its own folder, with `args` as its arguments.
-Adding a name again replaces that job.
+Adding a name again replaces that job. If launchd refuses the new one, `add`
+deletes its plist, puts the old job back (still paused if it was) and raises
+the error.
 
 macOS announces the new job with a *Background Items Added* notification,
 and lists it in System Settings › General › Login Items & Extensions. The

@@ -100,8 +100,9 @@ def _mouse_event(kind: int, x: float, y: float, button: int, clicks: int = 0) ->
         raise MacOSError("could not create a mouse event")
     if clicks:
         cg.CGEventSetIntegerValueField(event, _CLICK_STATE, clicks)
-    if _events.HELD:  # inside macos.keyboard.hold()
-        cg.CGEventSetFlags(event, _events.held_flags())
+    flags = _events.held_flags()
+    if flags:  # inside macos.keyboard.hold(), on this thread
+        cg.CGEventSetFlags(event, flags)
     return event
 
 

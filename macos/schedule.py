@@ -40,8 +40,10 @@ __all__ = ["Job", "add", "remove", "jobs", "get", "run_now", "pause", "resume"]
 PathLike = Union[str, "os.PathLike[str]"]
 
 _PREFIX = "pymacos."
-_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_TIME = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+# Checked with fullmatch: ``$`` alone also matches before a trailing newline,
+# which would let "backup\n" through into a launchd label and a file name.
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_TIME = re.compile(r"([01]?\d|2[0-3]):([0-5]\d)")
 _WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")  # launchd counts from Sunday = 0
 
 
@@ -90,7 +92,7 @@ def _domain() -> str:
 
 
 def _check_name(name: str) -> None:
-    if not _NAME.match(name):
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ValueError("name must be letters, digits, '.', '_' or '-', not {!r}".format(name))
 
 
@@ -106,7 +108,7 @@ def _times(at: Union[Moment, Sequence[Moment], None]) -> List[Tuple[int, int]]:
             found.append((moment.hour, moment.minute))
             continue
         text = moment
-        match = _TIME.match(text.strip())
+        match = _TIME.fullmatch(text.strip())
         if not match:
             raise ValueError("at must be a time such as '09:00' or '18:30', not {!r}".format(text))
         found.append((int(match.group(1)), int(match.group(2))))
@@ -174,7 +176,8 @@ def add(
     It runs with this Python (``python=`` picks another, such as a virtual
     environment's), in the script's folder, with ``args`` as its
     arguments; its output goes to :attr:`Job.log`. Adding a name again
-    replaces that job. macOS shows a "Background Items Added" notification
+    replaces that job; if launchd refuses the new one, the old one is put
+    back and the error raised. macOS shows a "Background Items Added" notification
     the first time, and lists the job in System Settings › General › Login
     Items & Extensions.
 
@@ -221,11 +224,24 @@ def add(
         job["WatchPaths"] = watched
     if at_mount:
         job["StartOnMount"] = True
-    remove(name)  # replacing a job: unload the old one first (and forget it was paused)
     path = _plist(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(plistlib.dumps(job))
-    _run(["launchctl", "bootstrap", _domain(), str(path)])
+    # Replacing a job: keep the old plist's bytes, so a failed bootstrap of
+    # the new one can put the old job back rather than leave neither (and a
+    # half-installed plist launchd would pick up at the next login). One that
+    # can't be read raises here, before the old job is touched.
+    previous: Optional[bytes] = path.read_bytes() if path.exists() else None
+    was_paused = previous is not None and name in _paused()
+    plist = plistlib.dumps(job)  # before anything changes: a value it can't hold raises here
+    try:
+        # Removing the old job can fail after unloading it, and writing the new
+        # plist (a full disk): those also put the old job back.
+        remove(name)  # unload the old one first (and forget it was paused)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(plist)
+        _run(["launchctl", "bootstrap", _domain(), str(path)])
+    except BaseException:
+        _restore(name, path, previous, was_paused)
+        raise
     found = get(name)
     assert found is not None
     return found
@@ -243,6 +259,35 @@ def remove(name: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool) -> None:
+    """
+    Undo a failed :func:`add`: delete the new plist (if it got written), and put back the job it replaced, if any.
+
+    Best effort: the caller re-raises the error that made it fail, which
+    matters more than a failure here.
+    """
+    try:
+        _bootout(name)  # in case launchd half-loaded it
+    except Exception:
+        pass
+    try:
+        if previous is None:
+            path.unlink(missing_ok=True)
+            return
+        try:
+            unchanged = path.read_bytes() == previous  # removing it failed: it's still there, as it was
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            path.write_bytes(previous)  # skipped otherwise: a read-only plist would refuse, and keep it unloaded
+        if was_paused:
+            _run(["launchctl", "disable", _target(name)])  # a paused job stays unloaded
+        else:
+            _run(["launchctl", "bootstrap", _domain(), str(path)])
+    except Exception:
+        pass
 
 
 def _target(name: str) -> str:

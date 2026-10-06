@@ -65,7 +65,7 @@ def test_dialog_choose_rejects_bad_options(options, default):
 
 
 def test_dialog_choose_files(fake_run, tmp_path):
-    fake_run.stdout = "ok\n/a/one.pdf\n/b/two words.pdf\n"
+    fake_run.stdout = "ok\n/a/one.pdf\0/b/two words.pdf\0\n"
 
     assert macos.dialog.choose_files(types=[".pdf", "public.image"], folder=tmp_path) == [
         Path("/a/one.pdf"),
@@ -92,3 +92,46 @@ def test_dialog_timeouts_round_up_to_whole_seconds(fake_run, timeout, seconds):
 def test_dialog_rejects_bad_timeout():
     with pytest.raises(ValueError):
         macos.dialog.confirm("x", timeout=0)
+
+
+def test_dialog_chosen_paths_may_hold_newlines(fake_run):
+    fake_run.stdout = "ok\n/a/first\nline.pdf\0/b/ends with\n\0\n"
+    assert macos.dialog.choose_files() == [Path("/a/first\nline.pdf"), Path("/b/ends with\n")]
+
+    fake_run.stdout = "ok\n/a/odd\nname.pdf\0\n"
+    assert macos.dialog.choose_file() == Path("/a/odd\nname.pdf")
+    fake_run.stdout = "ok\n/Users/me/new\nfolder/\0\n"
+    assert macos.dialog.choose_folder() == Path("/Users/me/new\nfolder")
+
+
+def test_dialog_chosen_paths_keep_carriage_returns(fake_run, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    # Through the capture layer: the output comes back as bytes, decoded without
+    # text mode, which would turn the \r\n and \r of these names into \n.
+    calls = []
+
+    def picker(args, **kwargs):
+        calls.append(kwargs)
+        stdout = "ok\n/a/first\r\nline.pdf\0/b/old\rmac.pdf\0\n".encode("utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout, b"")
+
+    monkeypatch.setattr(_system.subprocess, "run", picker)
+    assert macos.dialog.choose_files() == [Path("/a/first\r\nline.pdf"), Path("/b/old\rmac.pdf")]
+    assert not calls[-1].get("text")
+
+
+def test_run_decodes_exact_output_and_errors(fake_run, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    def tool(args, **kwargs):
+        assert kwargs["input"] == "é\r\n".encode("utf-8") and "text" not in kwargs
+        return subprocess.CompletedProcess(args, 1, b"", "falhou\r\n".encode("utf-8"))
+
+    monkeypatch.setattr(_system.subprocess, "run", tool)
+    with pytest.raises(macos.CommandError, match="falhou"):
+        _system.run(["tool"], input="é\r\n", exact_newlines=True)

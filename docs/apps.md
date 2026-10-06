@@ -119,7 +119,19 @@ macos.open_with("notes.md", "com.microsoft.VSCode")
 
 The app can be a name, a bundle identifier or a path, as for
 {func}`~macos.apps.open`. Pass `background=True` to open without bringing the
-app to the front. A path that doesn't exist raises `FileNotFoundError`.
+app to the front. A path that doesn't exist raises `FileNotFoundError`. An
+app that isn't there raises {class}`~macos.AppNotFoundError`; one that's there
+but won't open (damaged, blocked by Gatekeeper, for another processor) raises
+{class}`~macos.CommandError`, with macOS's reason.
+
+`macos.open` opens any kind of URL with whichever app claims it, and a file
+that is an app or a script runs: don't hand it text from an untrusted source
+as is. `schemes` limits it to some kinds of URL, and raises `ValueError` for
+anything else; a file or folder counts as `"file"`:
+
+```python
+macos.open(link_from_a_web_page, schemes={"https", "http"})   # not a file, nor zoommtg://...
+```
 
 `macos.open` is not included in `from macos import *`, so it never replaces
 Python's built-in `open()`.
@@ -174,7 +186,8 @@ macos.apps.install_from_dmg("~/Downloads/Rectangle.dmg")   # '/Applications/Rect
 
 It mounts the image, copies the `.app` into `destination` (`/Applications` by
 default), and unmounts it. An app already installed raises `FileExistsError`,
-unless `replace=True`. To mount an image
+unless `replace=True`. When the install fails and the image then won't
+unmount either, the error raised is the install's. To mount an image
 yourself, see {func}`macos.system.mount_image`.
 
 ## Downloaded apps
@@ -215,7 +228,6 @@ moved, the app first. `dry_run=True` only returns what would go:
 ```python
 macos.apps.uninstall("Slack", dry_run=True)
 # [PosixPath('/Applications/Slack.app'),
-#  PosixPath('/Users/me/Library/Application Support/Slack'),
 #  PosixPath('/Users/me/Library/Caches/com.tinyspeck.slackmacgap'),
 #  PosixPath('/Users/me/Library/Preferences/com.tinyspeck.slackmacgap.plist'), ...]
 
@@ -223,13 +235,26 @@ macos.apps.uninstall("Slack")
 ```
 
 The files are found by the app's bundle ID (in Application Support, Caches,
-Containers, Preferences, Saved Application State, Logs, and the like) and,
-in Application Support, Caches and Logs, by its name, unless another installed
-app has that name too: its folder may be that app's. Files named after the ID
-of another installed app are left alone as well, such as Chrome Canary's
-(`com.google.Chrome.canary`) when uninstalling Chrome. Everything goes to the
-Trash, so *Put Back* undoes it. Only your own files are touched: `/Library`'s
-need an administrator.
+Containers, Preferences, Saved Application State, Logs, and the like), which
+only that app uses. Files named after the ID of another installed app are
+left alone, such as Chrome Canary's (`com.google.Chrome.canary`) when
+uninstalling Chrome.
+
+Many apps also keep a folder named after themselves, such as
+`Application Support/Slack`. A name can be shared, though: Firefox Developer
+Edition and Firefox Nightly keep their profiles in `Application Support/Firefox`
+too. So those folders only go with `include_name_matches=True`, and even then a
+name is skipped when another installed app's name holds it (or is held in it),
+or when another app comes from the same maker. They come last in the list:
+look at a dry run first.
+
+```python
+macos.apps.uninstall("Slack", dry_run=True, include_name_matches=True)[-1]
+# PosixPath('/Users/me/Library/Application Support/Slack')
+```
+
+Everything goes to the Trash, so *Put Back* undoes it. Only your own files are
+touched: `/Library`'s need an administrator.
 
 It raises {class}`~macos.MacOSError` for an app that's running (quit it first;
 a dry run works all the same) or that comes with macOS, like Safari, and

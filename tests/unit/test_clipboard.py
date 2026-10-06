@@ -78,3 +78,61 @@ def test_clipboard_watch_yields_each_copy(monkeypatch):
     watched.close()
     with pytest.raises(ValueError, match="interval"):
         next(clipboard.watch(interval=0))
+
+
+@pytest.fixture
+def pasteboard(monkeypatch):
+    """A fake general pasteboard: the types written, in order, after the last clear."""
+    from contextlib import nullcontext
+
+    from macos import _objc, clipboard
+
+    written = []
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "clearContents":
+            del written[:]
+        elif selector in ("setData:forType:", "setString:forType:"):
+            written.append((args[1], args[0]))
+            return True
+
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: "pasteboard")
+    monkeypatch.setattr(_objc, "send", send)
+    monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(_objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(_objc, "nsdata", lambda payload: payload)
+    return written
+
+
+def test_copy_sensitive_marks_it_for_clipboard_managers(pasteboard):
+    macos.clipboard.copy("s3cret", sensitive=True)
+    assert pasteboard == [
+        ("org.nspasteboard.ConcealedType", b""),
+        ("org.nspasteboard.TransientType", b""),
+        ("public.utf8-plain-text", "s3cret"),
+    ]
+
+    macos.clipboard.copy("hello")
+    assert pasteboard == [("public.utf8-plain-text", "hello")]
+
+
+def test_copy_image_closes_its_file(monkeypatch, tmp_path):
+    import builtins
+
+    from macos import clipboard
+
+    opened = []
+    real_open = builtins.open
+
+    def tracking_open(*args, **kwargs):
+        opened.append(real_open(*args, **kwargs))
+        return opened[-1]
+
+    image = tmp_path / "a.png"
+    image.write_bytes(b"not really a png")
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    monkeypatch.setattr(clipboard, "framework", lambda name: (_ for _ in ()).throw(RuntimeError("stop here")))
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        clipboard.copy_image(image)
+    assert opened and opened[0].closed

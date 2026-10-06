@@ -98,7 +98,7 @@ def test_hold_keeps_modifiers_down_for_clicks_and_keys(fake_events):
         ("key", 55, False, shift),
         ("key", 56, False, 0),
     ]
-    assert macos._events.HELD == []
+    assert macos._events.held() == []
 
 
 def test_hold_releases_the_keys_when_the_block_fails(fake_events):
@@ -108,7 +108,7 @@ def test_hold_releases_the_keys_when_the_block_fails(fake_events):
 
     released = [(event["code"], event["flags"]) for event in fake_events.posted if not event["down"]]
     assert released == [(56, 1 << 20), (55, 0)]
-    assert macos._events.HELD == []
+    assert macos._events.held() == []
 
 
 def test_shortcuts_off_the_main_thread_use_a_us_keyboard():
@@ -154,3 +154,101 @@ def test_key_press_shortcut():
     assert key.shortcut == "cmd+shift+k"
     assert macos.keyboard.KeyPress("enter", (), "", 36, False).shortcut == "enter"
     assert macos.keyboard._KEY_NAMES[36] == "enter" and macos.keyboard._KEY_NAMES[51] == "delete"
+
+
+def test_type_ignores_the_keys_held(fake_events):
+    with macos.keyboard.hold("cmd"):
+        macos.keyboard.type("x\n")
+
+    typed = [(event["code"], event["text"], event["flags"]) for event in fake_events.posted if event["code"] != 55]
+    # Without Cmd: the text rides on the "a" key, which a held Cmd would make Cmd+A.
+    assert typed == [(0, "x", 0), (0, "x", 0), (36, None, 0), (36, None, 0)]
+
+
+def test_hold_releases_every_key_even_when_one_fails(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+
+    def post(event):
+        details = fake_events.events[event]
+        if details["code"] == 56 and not details["down"]:
+            raise macos.MacOSError("Shift is stuck")
+        posted.append(details)
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(macos.MacOSError, match="Shift is stuck"):
+        with macos.keyboard.hold("cmd+shift+option"):
+            pass
+
+    assert [event["code"] for event in posted if not event["down"]] == [58, 55]  # Option and Cmd still came up
+    assert _events.held() == []
+
+
+def test_keys_held_on_one_thread_do_not_reach_another(fake_events):
+    import threading
+
+    clicked = threading.Event()
+    with macos.keyboard.hold("shift"):
+        worker = threading.Thread(target=lambda: (macos.mouse.click(1, 1), clicked.set()))
+        worker.start()
+        worker.join()
+    assert clicked.is_set()
+    clicks = [event for event in fake_events.posted if event["kind"] != "key"]
+    assert clicks and all(event["flags"] == 0 for event in clicks)
+
+
+def test_layouts_only_on_the_main_thread():
+    import threading
+
+    errors = []
+
+    def call():
+        for function in (macos.keyboard.layout, macos.keyboard.layouts, lambda: macos.keyboard.set_layout("ABC")):
+            try:
+                function()
+            except macos.MacOSError as error:
+                errors.append(str(error))
+
+    worker = threading.Thread(target=call)
+    worker.start()
+    worker.join()
+    assert len(errors) == 3 and all("main thread" in error for error in errors)
+
+
+def test_backlight_ids_are_released(monkeypatch):
+    from macos import keyboard
+
+    sent = []
+
+    class FakeObjC:
+        BOOL = bool
+
+        def cls(self, name):
+            return name
+
+        def new(self, name):
+            return "client"
+
+        def nsarray(self, array):
+            return [7] if array else []
+
+        def send(self, receiver, selector, *args, **kwargs):
+            sent.append((receiver, selector))
+            if selector == "copyKeyboardBacklightIDs":
+                return "ids"
+            if selector == "unsignedLongLongValue":
+                return 7
+            return True
+
+    monkeypatch.setattr(keyboard, "private_framework", lambda name: None)
+    monkeypatch.setattr(keyboard, "framework", lambda name: None)
+    monkeypatch.setattr(keyboard, "_objc", FakeObjC())
+
+    assert keyboard._backlight() == ("client", 7)
+    assert ("ids", "release") in sent  # copy… returns an array we own
+
+
+def test_shortcut_keys_are_appkit_function_keys():
+    keys = macos.keyboard._SHORTCUT_KEYS
+    assert (keys["up"], keys["page_down"], keys["f1"]) == ("", "", "")

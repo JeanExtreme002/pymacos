@@ -10,7 +10,7 @@ import macos
 
 def test_open_passes_urls_through_and_checks_paths(fake_run, tmp_path):
     macos.open("https://python.org", background=True)
-    assert fake_run.args == ["open", "-g", "--", "https://python.org"]
+    assert fake_run.args == ["open", "-g", "-u", "https://python.org"]
 
     macos.open(tmp_path)
     assert fake_run.args == ["open", "--", str(tmp_path)]
@@ -29,12 +29,39 @@ def test_open_with_resolves_the_app(fake_run, monkeypatch, tmp_path):
     assert macos.open_with is macos.apps.open_with  # the short name
 
 
-def test_open_with_reports_failures_as_app_not_found(fake_run, monkeypatch, tmp_path):
+def test_open_with_reports_a_missing_app_as_app_not_found(fake_run, monkeypatch, tmp_path):
     monkeypatch.setattr(macos.apps, "_locate", lambda app: "/Applications/Nope.app")
-    fake_run.returncode, fake_run.stderr = 1, "LSOpenURLsWithRole() failed"
+    fake_run.returncode, fake_run.stderr = 1, "LSOpenURLsWithRole() failed with error -10814 for the file /tmp."
 
     with pytest.raises(macos.AppNotFoundError, match="could not open"):
         macos.open_with(tmp_path, "Nope")
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "The application cannot be opened for an unexpected reason, error=Error Domain=NSOSStatusErrorDomain Code=-10827",
+        '"Tool" is damaged and can\'t be opened. You should move it to the Trash.',
+    ],
+)
+def test_open_keeps_the_reason_of_an_app_that_is_there_but_wont_open(fake_run, monkeypatch, tmp_path, stderr):
+    monkeypatch.setattr(macos.apps, "_locate", lambda app: "/Applications/Tool.app")
+    monkeypatch.setattr(macos.apps, "_bundle_id", lambda path: "com.example.tool")
+    fake_run.returncode, fake_run.stderr = 1, stderr
+
+    for attempt in (lambda: macos.open_with(tmp_path, "Tool"), lambda: macos.apps.open("Tool")):
+        with pytest.raises(macos.CommandError) as raised:
+            attempt()
+        assert not isinstance(raised.value, macos.AppNotFoundError) and stderr in str(raised.value)
+
+
+def test_open_reports_a_missing_app_as_app_not_found(fake_run, monkeypatch):
+    monkeypatch.setattr(macos.apps, "_locate", lambda app: "/Applications/Gone.app")
+    monkeypatch.setattr(macos.apps, "_bundle_id", lambda path: None)
+    fake_run.returncode, fake_run.stderr = 1, "Unable to find application named '/Applications/Gone.app'"
+
+    with pytest.raises(macos.AppNotFoundError, match="unable to launch"):
+        macos.apps.open("Gone")
 
 
 def test_login_items(fake_run, monkeypatch):
@@ -51,6 +78,17 @@ def test_login_items(fake_run, monkeypatch):
     assert "make login item" not in fake_run.args[2]
     assert apps.remove_login_item("Rectangle") is True
     assert fake_run.args[3:] == ["--", "/Applications/Rectangle.app"]  # removed by path
+
+
+def test_add_login_item_fails_cleanly_when_it_does_not_show_up(fake_run, monkeypatch):
+    from macos import apps
+
+    monkeypatch.setattr(apps, "_locate", lambda name: "/Applications/Tool.app")
+    monkeypatch.setattr(apps.os.path, "realpath", lambda path: path)
+    fake_run.stdout = "Rectangle\x1f/Applications/Rectangle.app\x1e\n"  # before and after: never added
+
+    with pytest.raises(macos.MacOSError, match="wasn't added"):
+        apps.add_login_item("Tool")  # a MacOSError, not a StopIteration
 
 
 def test_install_from_dmg_checks_the_destination(tmp_path):
@@ -78,6 +116,32 @@ def test_install_from_dmg_keeps_the_old_app_when_the_copy_fails(monkeypatch, tmp
         apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", replace=True)
     assert (installed / "Contents" / "old").read_text() == "old version"  # still installed
     assert sorted(path.name for path in (tmp_path / "Applications").iterdir()) == ["Tool.app"]  # no leftovers
+
+
+def test_install_from_dmg_keeps_the_first_error_when_unmounting_fails_too(monkeypatch, tmp_path):
+    from macos import apps, system
+
+    volume = tmp_path / "Volume"
+    (volume / "Tool.app" / "Contents").mkdir(parents=True)
+    (tmp_path / "Applications").mkdir()
+
+    def stuck(mounted, force=False):
+        raise macos.CommandError(["hdiutil", "detach"], 16, "resource busy")
+
+    def failing_copy(args):
+        raise macos.CommandError(args, 1, "No space left on device")
+
+    monkeypatch.setattr(system, "mount_image", lambda image: volume)
+    monkeypatch.setattr(system, "unmount_image", stuck)
+    monkeypatch.setattr(apps, "_run", failing_copy)
+    with pytest.raises(macos.CommandError, match="No space left"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications")
+
+    # Installed, but the image stays mounted: that is worth an error of its own.
+    monkeypatch.setattr(apps, "_run", lambda args: Path(args[-1]).mkdir())
+    with pytest.raises(macos.CommandError, match="resource busy"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications")
+    assert (tmp_path / "Applications" / "Tool.app").is_dir()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="extended attributes as macOS keeps them")
@@ -112,7 +176,7 @@ def test_is_quarantined_reports_errors_other_than_a_missing_mark(tmp_path, monke
             ctypes.set_errno(errno.EACCES)
             return -1
 
-    monkeypatch.setattr(macos.apps, "_libc", lambda: Failing())
+    monkeypatch.setattr(macos._libc, "lib", lambda: Failing())
     with pytest.raises(PermissionError):
         macos.apps.is_quarantined(file)
 
@@ -130,7 +194,7 @@ def test_unquarantine_keeps_the_error_and_stops_at_unreadable_folders(tmp_path, 
             ctypes.set_errno(errno.EIO)
             return -1
 
-    monkeypatch.setattr(macos.apps, "_libc", lambda: Failing())
+    monkeypatch.setattr(macos._libc, "lib", lambda: Failing())
     with pytest.raises(OSError) as raised:
         macos.apps.unquarantine(app)
     assert raised.value.errno == errno.EIO and not isinstance(raised.value, PermissionError)
@@ -199,3 +263,43 @@ def test_uninstall_leaves_the_names_and_ids_of_other_apps_alone():
     assert names == []  # another app is called "chat": its Application Support folder may be that one's
     assert others == ["com.example.Chat.helper"]  # an old copy of the same app isn't another app
     assert _claims(chat, [chat]) == (["Chat"], [])
+
+
+def test_uninstall_skips_names_a_sibling_app_may_share():
+    from macos.apps import InstalledApp, _claims
+
+    def app(name, bundle_id, path):
+        return InstalledApp(name=name, bundle_id=bundle_id, version="1", path=Path(path))
+
+    firefox = app("Firefox", "org.mozilla.firefox", "/Applications/Firefox.app")
+    developer = app("Firefox Developer Edition", "org.mozilla.firefoxdeveloperedition", "/Applications/FD.app")
+    nightly = app("Firefox Nightly", "com.other.nightly", "/Applications/Firefox Nightly.app")
+    slack = app("Slack", "com.tinyspeck.slackmacgap", "/Applications/Slack.app")
+
+    assert _claims(firefox, [firefox, developer])[0] == []  # the same maker: Application Support/Firefox is shared
+    assert _claims(firefox, [firefox, nightly])[0] == []  # another app's name holds "Firefox"
+    assert _claims(slack, [slack, firefox, developer, nightly])[0] == ["Slack"]
+
+
+def test_uninstall_moves_name_matches_only_when_asked(tmp_path, monkeypatch):
+    import plistlib
+
+    from macos import apps
+
+    bundle = tmp_path / "Applications" / "Chat.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleName": "Chat", "CFBundleIdentifier": "com.example.Chat"})
+    )
+    home = tmp_path / "home"
+    for entry in ("Application Support/Chat", "Caches/com.example.Chat"):
+        (home / "Library" / entry).mkdir(parents=True)
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "installed", lambda: [apps._installed_app(str(bundle))])
+    monkeypatch.setattr(apps.Path, "home", lambda: home)
+
+    assert apps.uninstall("Chat", dry_run=True) == [bundle, home / "Library/Caches/com.example.Chat"]
+    assert apps.uninstall("Chat", dry_run=True, include_name_matches=True) == [
+        bundle, home / "Library/Caches/com.example.Chat", home / "Library/Application Support/Chat",  # the names last
+    ]

@@ -64,3 +64,17 @@ Then open `docs/_build/html/index.html`.
   a period. A check enforces it.
 - Add a test for every bug fix and new feature.
 - Keep the package dependency-free.
+
+## Compatibility
+
+pymacos follows [Semantic Versioning](https://semver.org): a minor release
+never breaks code that works with the previous one.
+
+- To rename or remove a public function, keep the old one for at least one
+  minor release, decorated with `macos._system.deprecated`, which warns
+  (`DeprecationWarning`) and says what to use instead. It's removed only in
+  the next major release.
+- New arguments are keyword-only and have a default, so existing calls keep
+  their meaning.
+- Changing what a function returns or raises counts as breaking, unless the
+  old behaviour contradicted its documentation (that's a bug fix).

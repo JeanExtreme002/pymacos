@@ -36,6 +36,22 @@ exception in a callback stops it and propagates. Holding the keys down doesn't
 repeat the call, and registering a shortcut again replaces its callback.
 {func}`~macos.hotkeys.unregister` removes a shortcut.
 
+Function keys, arrows, Home, End, Page Up and Down and Forward Delete match
+whether or not macOS flags them with Fn, as it does on its own: `"f5"` is
+F5 however it's pressed.
+
+macOS flags these keys with Fn whether or not the Fn key is held, so a
+shortcut can't tell a press with the physical Fn key from one without it.
+`"fn+f5"` matches every F5 press, and when both are registered it takes
+precedence: `"f5"` then never fires. Register one or the other, not both.
+
+{func}`~macos.hotkeys.stop` stops every {func}`~macos.hotkeys.run` and
+{func}`~macos.hotkeys.wait` in progress, on any thread, including one still
+starting. Several may listen at once: each {func}`~macos.hotkeys.wait` gets
+its shortcut, and a callback is called once. An error inside the listener
+itself doesn't swallow the keystroke: the key goes on to the app, and the
+error comes out of {func}`~macos.hotkeys.run`.
+
 ## Waiting for a shortcut
 
 {func}`~macos.hotkeys.wait` blocks until a shortcut is pressed, to start or

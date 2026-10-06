@@ -16,9 +16,11 @@ screenshots, sounds and system settings this package reads and changes;
 the file is plain JSON, to keep in a repository and edit by hand.
 """
 
+import inspect
+import math
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import appearance, dock, finder, keyboard, mouse, screen, sound, system, trackpad, windows
 from ._system import batched_restarts, require_macos
@@ -27,9 +29,195 @@ from .errors import NotSupportedError
 __all__ = ["export", "apply", "names"]
 
 
+def _anything(value: Any) -> None:
+    """No check of its own: the setter's is enough (the tests' fake settings)."""
+
+
 class _Setting(NamedTuple):
     read: Callable[[], Any]
     change: Callable[[Any], None]
+    check: Callable[[Any], None] = _anything
+    """Raises :class:`ValueError` for a value ``change`` would refuse, without changing anything."""
+
+
+# --- Checking values before anything changes ----------------------------------
+#
+# apply() runs every check before the first change, so a typo in the tenth
+# setting of a file doesn't leave the first nine changed and the rest not.
+# Each check mirrors what its setter refuses (a range, a set of names, a
+# shape); a setter that still fails midway (a permission, a missing sound
+# file) is caught by apply()'s rollback instead.
+
+
+def _flag(value: Any) -> None:
+    # The setters take any truthy value; a hand-edited file may say 1 or 0.
+    if not isinstance(value, bool) and value not in (0, 1):
+        raise ValueError("must be true or false, not {!r}".format(value))
+
+
+def _number(
+    low: Optional[float] = None,
+    high: Optional[float] = None,
+    *,
+    above: Optional[float] = None,
+    optional: bool = False,
+    whole: bool = False,
+) -> Callable[[Any], None]:
+    """A number from ``low`` to ``high``, or greater than ``above``; ``None`` too when ``optional``."""
+
+    def check(value: Any) -> None:
+        if value is None and optional:
+            return
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        if not valid or (whole and not isinstance(value, int)):
+            kind = "a whole number" if whole else "a number"
+            raise ValueError("must be {}{}, not {!r}".format(kind, " or null" if optional else "", value))
+        number = float(value)
+        if (low is not None and number < low) or (high is not None and number > high) or (above is not None and number <= above):
+            if above is not None:
+                limits = "greater than {}".format(above)
+            elif high is None:
+                limits = "at least {}".format(low)
+            else:
+                limits = "from {} to {}".format(low, high)
+            raise ValueError("must be {}, not {!r}".format(limits, value))
+
+    return check
+
+
+def _choice(options: Iterable[Optional[str]], *, optional: bool = False) -> Callable[[Any], None]:
+    allowed = [option for option in options if option is not None]
+
+    def check(value: Any) -> None:
+        if value is None and optional:
+            return
+        if value not in allowed:
+            names = ", ".join(repr(option) for option in allowed)
+            raise ValueError("must be {}{}, not {!r}".format(names, " or null" if optional else "", value))
+
+    return check
+
+
+def _text(*, optional: bool = False) -> Callable[[Any], None]:
+    def check(value: Any) -> None:
+        if value is None and optional:
+            return
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("must be {}text, not {!r}".format("null or " if optional else "", value))
+
+    return check
+
+
+def _entries(
+    keys: Optional[Iterable[str]], check_value: Callable[[str, Any], None], *, at_least_one: bool = False
+) -> Callable[[Any], None]:
+    """A dict whose keys are among ``keys`` (any text when ``None``), each value checked by ``check_value(key, value)``."""
+    allowed = None if keys is None else list(keys)
+
+    def check(value: Any) -> None:
+        if not isinstance(value, Mapping):
+            raise ValueError("must be an object of names and values, not {!r}".format(value))
+        if at_least_one and not value:
+            raise ValueError("must name at least one entry")
+        for key, item in value.items():
+            if not isinstance(key, str) or (allowed is not None and key not in allowed):
+                raise ValueError("{!r} isn't one of {}".format(key, ", ".join(allowed or [])))
+            try:
+                check_value(key, item)
+            except ValueError as error:
+                raise ValueError("{}: {}".format(key, error)) from None
+
+    return check
+
+
+def _options(setter: Callable[..., None], **checks: Callable[[Any], None]) -> Callable[[Any], None]:
+    """A dict of a keyword-only setter's options, such as ``finder.set_desktop_view``'s, checked one by one."""
+    parameters = inspect.signature(setter).parameters.items()
+    names = [name for name, parameter in parameters if parameter.kind is inspect.Parameter.KEYWORD_ONLY]
+    return _entries(names, lambda name, value: checks.get(name, _anything)(value), at_least_one=True)
+
+
+def _key_repeat(value: Any) -> None:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("must be [interval, delay], not {!r}".format(value))
+    for part in value:
+        _number(above=0, optional=True)(part)
+    if value[0] is None and value[1] is None:
+        raise ValueError("needs an interval, a delay, or both")
+
+
+def _remap_code(key: Any) -> int:
+    """A key named for :func:`keyboard.remap`, or one :func:`keyboard.remappings` could only give as hex (``'0x7000000e0'``)."""
+    if isinstance(key, str) and key.lower().startswith("0x"):
+        try:
+            return int(key, 16)
+        except ValueError:
+            pass
+    if not isinstance(key, str):
+        raise ValueError("keys are named, such as 'caps_lock', not {!r}".format(key))
+    return keyboard._hid_code(key)
+
+
+def _remappings(remappings: Mapping[str, Optional[str]]) -> Dict[int, int]:
+    """The remappings as hidutil codes; raises before any is changed when one key is unknown."""
+    if not isinstance(remappings, Mapping):
+        raise ValueError("must be an object such as {{\"caps_lock\": \"escape\"}}, not {!r}".format(remappings))
+    codes = {}
+    for key, target in remappings.items():
+        source = _remap_code(key)
+        if target is not None:  # None: the key acts as itself
+            codes[source] = _remap_code(target)
+    return codes
+
+
+def _check_remappings(remappings: Any) -> None:
+    _remappings(remappings)  # converting them all is the check
+
+
+def _gesture(name: str, value: Any) -> None:
+    if name in trackpad._SWIPES:
+        if not isinstance(value, bool) and value not in (0, 3, 4):
+            raise ValueError("takes 3 or 4 fingers, true or false, not {!r}".format(value))
+    elif not isinstance(value, bool):
+        raise ValueError("must be true or false, not {!r}".format(value))
+
+
+def _hot_corner(corner: str, wanted: Any) -> None:
+    if not isinstance(wanted, Mapping):
+        raise ValueError("must be {{\"action\": ..., \"modifier\": ...}}, not {!r}".format(wanted))
+    _choice(dock.HOT_CORNER_ACTIONS, optional=True)(wanted.get("action"))
+    modifier = wanted.get("modifier")
+    if modifier is not None and not isinstance(modifier, str):
+        raise ValueError("modifier must be text such as 'cmd+shift', not {!r}".format(modifier))
+    dock._corner_flags(modifier)
+
+
+def _night_shift(schedule: Any) -> None:
+    if schedule is None or schedule == "sunset":
+        return
+    if isinstance(schedule, str) or not isinstance(schedule, (list, tuple)) or len(schedule) != 2:
+        raise ValueError("must be null, 'sunset' or [start, end], not {!r}".format(schedule))
+    for moment in schedule:
+        screen._clock_time(moment)
+
+
+def _screenshot_format(value: Any) -> None:
+    if not isinstance(value, str):
+        raise ValueError("must be text such as 'png', not {!r}".format(value))
+    wanted = value.lower().lstrip(".")
+    _choice(screen._SETTING_FORMATS)("jpg" if wanted == "jpeg" else wanted)
+
+
+def _screenshot_name(name: Any) -> None:
+    _text(optional=True)(name)
+    if name is not None and ("/" in name or ":" in name):
+        raise ValueError("must be a file name, without / or :, not {!r}".format(name))
+
+
+def _alert_sound(name: Any) -> None:
+    _text(optional=True)(name)
+    if name is not None and name not in sound.names():
+        raise ValueError("no alert sound is named {!r}; see macos.sound.names()".format(name))
 
 
 def _each(change: Callable[..., None]) -> Callable[[Mapping[str, Any]], None]:
@@ -52,10 +240,11 @@ def _set_hot_corners(corners: Mapping[str, Mapping[str, Optional[str]]]) -> None
         dock.set_hot_corner(corner, wanted.get("action"), modifier=wanted.get("modifier"))
 
 
-def _set_remappings(remappings: Mapping[str, str]) -> None:
-    keyboard.clear_remappings()
-    for key, target in remappings.items():
-        keyboard.remap(key, target)
+def _set_remappings(remappings: Mapping[str, Optional[str]]) -> None:
+    # Build the whole new list first, then swap it in with one hidutil call:
+    # clearing and re-adding one by one would leave the keyboard with no
+    # remapping at all if a key further down the list were unknown.
+    keyboard._set_mappings(_remappings(remappings))
 
 
 def _night_shift_schedule() -> Any:
@@ -200,6 +389,89 @@ _SETTINGS: Dict[str, Dict[str, _Setting]] = {
 }
 
 
+# The check of each setting that isn't a plain on/off flag.
+_CHECKS: Dict[str, Dict[str, Callable[[Any], None]]] = {
+    "keyboard": {
+        "key_repeat": _key_repeat,
+        "fn_key_action": _choice(("emoji", "input_source", "dictation"), optional=True),
+        "system_shortcuts": _entries(keyboard.SYSTEM_SHORTCUTS, lambda name, on: _flag(on)),
+        "remappings": _check_remappings,
+        "backlight_timeout": _number(above=0, optional=True),
+    },
+    "trackpad": {
+        "tracking_speed": _number(0, 1),
+        "click_pressure": _choice(("light", "medium", "firm")),
+        "secondary_click": _choice(("two_fingers", "bottom_right", "bottom_left"), optional=True),
+        "gestures": _entries(trackpad.GESTURES, _gesture),
+    },
+    "mouse": {
+        "tracking_speed": _number(0, 1),
+        "scroll_speed": _number(0),
+        "double_click_speed": _number(above=0),
+    },
+    "dock": {
+        "autohide_delay": _number(0),
+        "autohide_duration": _number(0, optional=True),
+        "size": _number(16, 128),
+        "position": _choice(("left", "bottom", "right")),
+        "magnification": _number(16, 128, optional=True),
+        "minimize_effect": _choice(("genie", "scale")),
+        "hot_corners": _entries(dock._CORNERS, _hot_corner),
+    },
+    "finder": {
+        "default_view": _choice(finder._VIEWS),
+        "new_window_folder": _text(),
+        "search_scope": _choice(finder._SCOPES),
+        "drives_on_desktop": _options(
+            finder.set_show_drives_on_desktop, internal=_flag, external=_flag, removable=_flag, servers=_flag
+        ),
+        "desktop_view": _options(
+            finder.set_desktop_view,
+            icon_size=_number(16, 128, optional=True),
+            grid_spacing=_number(1, 100, optional=True),
+            text_size=_number(10, 16, optional=True),
+            sort=_choice(finder._DESKTOP_SORTS, optional=True),
+            show_item_info=_flag,
+            labels_on_bottom=_flag,
+        ),
+    },
+    "windows": {
+        "double_click_title_bar": _choice(("zoom", "fill", "minimize"), optional=True),
+    },
+    "appearance": {
+        "scroll_bars": _choice(appearance._SCROLL_BARS),
+    },
+    "screen": {
+        "screenshot_folder": _text(),
+        "screenshot_format": _screenshot_format,
+        "screenshot_name": _screenshot_name,
+        "screenshot_target": _choice(screen._SCREENSHOT_TARGETS),
+        "screensaver_delay": _number(above=0, optional=True),
+        "night_shift_schedule": _night_shift,
+        "night_shift_strength": _number(0, 1),
+    },
+    "sound": {
+        "alert_sound": _alert_sound,
+        "alert_volume": _number(0, 1),
+    },
+    "system": {
+        "clock_format": _options(
+            system.set_clock_format,
+            seconds=_flag, day_of_week=_flag, am_pm=_flag, analog=_flag,
+            date=_choice(("auto", "always", "never"), optional=True),
+        ),
+        "menu_bar_items": _entries(system.MENU_BAR_ITEMS, lambda name, on: _flag(on), at_least_one=True),
+        "menu_bar_spacing": _number(0, 30, optional=True, whole=True),
+        "measurement_units": _choice(("metric", "us")),
+        "temperature_unit": _choice(("celsius", "fahrenheit")),
+    },
+}
+for _section, _table in _SETTINGS.items():
+    for _name, _setting in _table.items():
+        _SETTINGS[_section][_name] = _setting._replace(check=_CHECKS.get(_section, {}).get(_name, _flag))
+del _section, _table, _name, _setting
+
+
 def names() -> List[str]:
     """Every setting :func:`export` saves, as ``"section.name"``: ``["keyboard.key_repeat", ...]``."""
     return ["{}.{}".format(section, name) for section, settings in _SETTINGS.items() for name in settings]
@@ -241,9 +513,12 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
 
     Any part of an export works: settings left out stay as they are. Those
     already as wanted aren't touched, and the Dock and Finder restart once
-    at the end. Unknown names raise :class:`ValueError` before anything
-    changes, and settings this Mac lacks (a keyboard backlight, Night Shift...)
-    are skipped. Returns ``["dock.autohide", ...]``.
+    at the end. Unknown names and invalid values (a size out of range, an
+    unknown hot corner action, a key that can't be remapped) raise
+    :class:`ValueError` before anything changes; if a change still fails
+    midway (a permission...), the settings already changed are put back
+    before the error is raised. Settings this Mac lacks (a keyboard
+    backlight, Night Shift...) are skipped. Returns ``["dock.autohide", ...]``.
     """
     require_macos()
     unknown = []
@@ -254,20 +529,46 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
             unknown.extend("{}.{}".format(section, name) for name in values if name not in _SETTINGS[section])
     if unknown:
         raise ValueError("unknown settings: {}; see macos.settings.names()".format(", ".join(sorted(set(unknown)))))
-    changed = []
+    # Every value is checked before the first change: a bad one in the middle
+    # of a file mustn't leave the settings before it changed and those after not.
+    bad = []
+    for section, values in settings.items():
+        for name, value in values.items():
+            try:
+                _SETTINGS[section][name].check(value)
+            except ValueError as error:
+                bad.append("{}.{} {}".format(section, name, error))
+    if bad:
+        raise ValueError("invalid settings: {}".format("; ".join(bad)))
+    changed: List[str] = []
+    undo: List[Tuple[_Setting, Any]] = []  # (setting, its value before), to put back if a later change fails
     with batched_restarts():
-        for section, values in settings.items():
-            for name, value in values.items():
-                setting = _SETTINGS[section][name]
+        try:
+            for section, values in settings.items():
+                for name, value in values.items():
+                    setting = _SETTINGS[section][name]
+                    try:
+                        current = _normalized(setting.read())
+                    except NotSupportedError:
+                        continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
+                    if current == _normalized(value):
+                        continue
+                    # Noted before the change: one that fails half-way (two preferences, the
+                    # second refused) is put back too.
+                    undo.append((setting, current))
+                    try:
+                        setting.change(value)
+                    except NotSupportedError:
+                        undo.pop()  # nothing changed: this Mac lacks it (a keyboard backlight, Night Shift...)
+                        continue
+                    changed.append("{}.{}".format(section, name))
+        except BaseException:
+            # What the checks can't foresee (a permission, a file gone): put
+            # back the settings already changed, newest first, then raise.
+            for setting, before in reversed(undo):
                 try:
-                    current = _normalized(setting.read())
-                except NotSupportedError:
-                    continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
-                if current == _normalized(value):
-                    continue
-                try:
-                    setting.change(value)
-                except NotSupportedError:
-                    continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
-                changed.append("{}.{}".format(section, name))
+                    setting.change(before)
+                except Exception:
+                    pass  # best effort: the original error matters more
+            raise
     return changed

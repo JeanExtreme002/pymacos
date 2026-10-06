@@ -6,7 +6,7 @@ import threading
 import time
 
 import macos
-from macos import _objc
+from macos import _events, _objc
 
 
 def _post_wake(delay):
@@ -72,15 +72,14 @@ def test_events_power_changes_only_between_charger_and_battery(monkeypatch):
 
     states = iter([True, True, False, False, True])  # the first is read when listening starts
     monkeypatch.setattr(events, "_on_charger", lambda: next(states))
-    events._received.clear()
-    watch = events._PowerWatch()
+    listener = _events.Listener()
+    watch = events._PowerWatch(listener)
     try:
         for _ in range(4):  # IOKit calls back as the battery drains too
             watch.changed(0)
     finally:
         watch.close()
-    assert list(events._received) == [events.Event("power_disconnected"), events.Event("power_connected")]
-    events._received.clear()
+    assert list(listener.pending) == [events.Event("power_disconnected"), events.Event("power_connected")]
 
 
 def test_events_space_changed():
@@ -104,21 +103,20 @@ def test_events_space_changed():
 def test_events_system_sources_start_and_stop():
     from macos import events
 
-    events._received.clear()
+    listener = _events.Listener()
     for watch in (events._NetworkWatch, events._USBWatch, events._DisplayWatch, events._PowerWatch):
-        watcher = watch()
+        watcher = watch(listener)
         watcher.close()
-    network = events._NetworkWatch()
+    network = events._NetworkWatch(listener)
     try:
         network.changed(0, 0, 0)  # nothing actually changed
     finally:
         network.close()
-    displays = events._DisplayWatch()
+    displays = events._DisplayWatch(listener)
     try:
         for display, flags in ((1, 1), (1, 16), (2, 16)):  # "about to change", then two displays
             displays.changed(display, flags, None)
     finally:
         displays.close()
-    assert list(events._received) == [events.Event("displays_changed")]
-    events._received.clear()
+    assert list(listener.pending) == [events.Event("displays_changed")]
     assert macos.events.wait("network_changed", timeout=0.3) is None

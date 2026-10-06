@@ -18,14 +18,14 @@ opened in TextEdit, not in Word. Tables are lost when writing Word files
 (``.docx``, ``.doc``): their cells become lines.
 """
 
+import codecs
 import ctypes
 import os
 import re
-import tempfile
 from pathlib import Path
-from typing import Callable, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
-from . import _objc
+from . import _files, _objc
 from ._system import framework, require_macos
 from .errors import MacOSError
 
@@ -47,10 +47,9 @@ _TYPES = {
 _PAPERS = {"a4": (595.28, 841.89), "letter": (612.0, 792.0), "legal": (612.0, 1008.0)}
 _UTF8 = 4  # NSUTF8StringEncoding
 _CHARSET = re.compile(rb"charset\s*=", re.I)
-
-
-class _NSRange(ctypes.Structure):
-    _fields_ = [("location", ctypes.c_ulong), ("length", ctypes.c_ulong)]
+_CHUNK = 1 << 20  # bytes read at a time to check a file is UTF-8
+# Read through WebKit, which AppKit only runs on the main thread.
+_WEB_FORMATS = (".html", ".htm", ".webarchive")
 
 
 def _existing(path: PathLike) -> Path:
@@ -63,16 +62,28 @@ def _existing(path: PathLike) -> Path:
     return found
 
 
+def _is_utf8(source: Path) -> bool:
+    """Whether a file is valid UTF-8, read a piece at a time: a big text file isn't held in memory whole."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        with open(str(source), "rb") as handle:
+            for piece in iter(lambda: handle.read(_CHUNK), b""):
+                decoder.decode(piece)
+        decoder.decode(b"", final=True)  # a character cut off at the end
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _options(source: Path) -> Optional[int]:
     """Read text and HTML as UTF-8, unless it isn't or an HTML page names its own encoding."""
     if source.suffix.lower() not in (".txt", ".text", ".html", ".htm"):
         return None  # the other formats say their encoding themselves
-    raw = source.read_bytes()
-    try:
-        raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    if source.suffix.lower() in (".html", ".htm") and _CHARSET.search(raw[:4096]):
+    if source.suffix.lower() in (".html", ".htm"):
+        with open(str(source), "rb") as handle:
+            if _CHARSET.search(handle.read(4096)):
+                return None
+    if not _is_utf8(source):
         return None
     number = _objc.send(_objc.cls("NSNumber"), "numberWithUnsignedInteger:", _UTF8, argtypes=(ctypes.c_ulong,))
     return _objc.send(
@@ -86,6 +97,8 @@ def _options(source: Path) -> Optional[int]:
 
 def _load(source: Path) -> int:
     """The document as an ``NSAttributedString`` (autoreleased)."""
+    if source.suffix.lower() in _WEB_FORMATS:
+        _files.require_main_thread("reading an HTML page or a web archive")
     framework("AppKit")
     error = ctypes.c_void_p()
     loaded = _objc.send(
@@ -111,25 +124,12 @@ def text(path: PathLike) -> str:
 
         macos.document.text("minutes.docx")   # 'Meeting minutes\\n...'
 
-    For a PDF, see :func:`macos.pdf.text`.
+    For a PDF, see :func:`macos.pdf.text`. HTML is read as in :func:`convert`:
+    its pictures and style sheets are fetched, and it needs the main thread.
     """
     source = _existing(path)
     with _objc.autorelease_pool():
         return _objc.pystring(_objc.send(_load(source), "string")) or ""
-
-
-def _write_atomically(target: Path, write: Callable[[str], object]) -> Path:
-    """Call ``write`` with a temporary path next to ``target``, then move the file in place."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix)
-    os.close(handle)
-    try:
-        write(name)
-        os.replace(name, str(target))
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-    return target
 
 
 def _save(document: int, target: Path, kind: str) -> None:
@@ -145,15 +145,15 @@ def _save(document: int, target: Path, kind: str) -> None:
     data = _objc.send(
         document,
         "dataFromRange:documentAttributes:error:",
-        _NSRange(0, length),
+        _files.NSRange(0, length),
         attributes,
         ctypes.byref(error),
-        argtypes=(_NSRange, _objc.id, ctypes.c_void_p),
+        argtypes=(_files.NSRange, _objc.id, ctypes.c_void_p),
     )
     if not data:
         raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error) or "unknown error"))
     payload = _objc.pybytes(data) or b""
-    _write_atomically(target, lambda name: Path(name).write_bytes(payload))
+    _files.write_atomically(target, lambda name: Path(name).write_bytes(payload))
 
 
 def _paper(paper: Optional[str], info: int) -> Tuple[float, float]:
@@ -203,10 +203,12 @@ def _print_pdf(document: int, target: Path, paper: Optional[str], margin: float)
         )
         _objc.send(operation, "setShowsPrintPanel:", False, argtypes=(ctypes.c_bool,), restype=None)
         _objc.send(operation, "setShowsProgressPanel:", False, argtypes=(ctypes.c_bool,), restype=None)
-        if not _objc.send(operation, "runOperation", restype=ctypes.c_bool) or not os.path.getsize(name):
+        if not _objc.send(operation, "runOperation", restype=ctypes.c_bool):
+            raise MacOSError("could not write {}".format(target))
+        if not os.path.isfile(name) or not os.path.getsize(name):
             raise MacOSError("could not write {}".format(target))
 
-    _write_atomically(target, write)
+    _files.write_atomically(target, write)
 
 
 def convert(source: PathLike, output: PathLike, *, paper: Optional[str] = None, margin: float = 72.0) -> Path:
@@ -227,8 +229,15 @@ def convert(source: PathLike, output: PathLike, *, paper: Optional[str] = None, 
     from each edge (72 is an inch).
 
     It converts as TextEdit would: see the module's notes for what a Word
-    document's layout keeps. An HTML page's pictures on the web may be
-    downloaded while it's read.
+    document's layout keeps.
+
+    HTML is read by WebKit, as a browser would: the page's pictures and
+    style sheets are fetched while it's read, from the web and from files on
+    this Mac (``file://``) alike. Don't convert HTML you don't trust: it can
+    make this Mac fetch addresses of its choosing, or pull local files into
+    the document. HTML pages, web archives and PDF output need the main
+    thread (AppKit lays out and prints only there): from another thread
+    they raise :class:`~macos.MacOSError`.
     """
     origin = _existing(source)
     target = Path(output).expanduser().absolute()
@@ -236,6 +245,8 @@ def convert(source: PathLike, output: PathLike, *, paper: Optional[str] = None, 
     if kind != ".pdf" and kind not in _TYPES:
         known = ", ".join(sorted({".pdf", *_TYPES}))
         raise ValueError("can't write {!r} files; the formats are {}".format(kind or target.name, known))
+    if kind == ".pdf":
+        _files.require_main_thread("converting to PDF (it lays the text out in a text view, and prints it)")
     with _objc.autorelease_pool():
         document = _load(origin)
         if kind == ".pdf":

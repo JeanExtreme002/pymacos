@@ -149,15 +149,26 @@ on run argv
 end run
 """
 
-_RUN_JS = {
-    _SAFARI: """
+# The JavaScript comes on stdin, not as an argument like the other scripts'
+# values: arguments show in `ps` to the user's other processes for as long as
+# the script runs, and page scripts may carry tokens. Nor is it pasted into
+# the source: AppleScriptObjC reads it from stdin as UTF-8 text.
+_READ_STDIN = """use framework "Foundation"
+use scripting additions
+
 on run argv
-    tell application "{app}" to return do JavaScript (item 1 of argv) in current tab of front window
+    set stdin to current application's NSFileHandle's fileHandleWithStandardInput()
+    set pymacosScript to (current application's NSString's alloc()'s initWithData:(stdin's readDataToEndOfFile()) ¬
+        encoding:(current application's NSUTF8StringEncoding)) as text
+"""
+
+_RUN_JS = {
+    _SAFARI: _READ_STDIN
+    + """    tell application "{app}" to return do JavaScript pymacosScript in current tab of front window
 end run
 """,
-    _CHROMIUM: """
-on run argv
-    tell application "{app}" to return execute active tab of front window javascript (item 1 of argv)
+    _CHROMIUM: _READ_STDIN
+    + """    tell application "{app}" to return execute active tab of front window javascript pymacosScript
 end run
 """,
 }
@@ -256,7 +267,11 @@ def open(url: str, app: Optional[str] = None) -> None:
 
     ``app`` works as in :func:`tabs`; with no browser running, it opens
     the default browser. To open a URL in whatever handles it, see :func:`macos.open`.
+    A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option.
     """
+    if url.startswith("-"):
+        # `open` has no "--": "-g" or "-F" would be one of its options, not a URL.
+        raise ValueError("url must not start with '-', not {!r}".format(url))
     browser = _browser(app)
     if browser is None:
         default = apps.default_browser()
@@ -280,13 +295,14 @@ def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     JavaScript from Apple Events*. Otherwise it raises
     :class:`~macos.errors.PermissionDeniedError`. Return ``JSON.stringify(...)``
     to get structured data back. With no browser running, it raises
-    :class:`~macos.errors.MacOSError`.
+    :class:`~macos.errors.MacOSError`. The script reaches ``osascript`` on its
+    standard input, so it doesn't show in the process list.
     """
     browser = _browser(app)
     if browser is None or not _is_running(browser):
         raise MacOSError("no browser is running")
     try:
-        output = _script(browser, _RUN_JS[_KINDS[browser]], script)
+        output = applescript(browser, _RUN_JS[_KINDS[browser]].replace("{app}", browser), input=script)
     except CommandError as error:
         if "Allow JavaScript from Apple Events" in error.stderr or "JavaScript through AppleScript" in error.stderr:
             where = "Develop" if _KINDS[browser] == _SAFARI else "View › Developer"

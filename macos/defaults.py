@@ -21,12 +21,14 @@ most apps only read them when they start, so restart them to see a change.
 """
 
 import ctypes
+import functools
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 from . import _cf
 from ._system import framework
+from .errors import PermissionDeniedError
 
 __all__ = ["read", "write", "delete", "keys", "restored", "GLOBAL"]
 
@@ -77,10 +79,21 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
             # SetAppValue is for app domains, on any host.
             user, host = _user(), _host(current_host)
             cf.CFPreferencesSetValue(wanted, value, name, user, host)
-            cf.CFPreferencesSynchronize(name, user, host)
+            saved = cf.CFPreferencesSynchronize(name, user, host)
         else:
             cf.CFPreferencesSetAppValue(wanted, value, name)
-            cf.CFPreferencesAppSynchronize(name)
+            saved = cf.CFPreferencesAppSynchronize(name)
+    if not saved:
+        # CFPreferences takes the change in memory either way; only the
+        # synchronize says whether cfprefsd wrote it out. It refuses a domain
+        # this process can't write: one managed by a configuration profile,
+        # one in another user's or the system's folder, or a sandboxed app's
+        # container. Without this check write() would look like it worked.
+        raise PermissionDeniedError(
+            "couldn't save {!r} in the {!r} preferences: the domain isn't writable by this process "
+            "(managed by a configuration profile, owned by another user or the system, or in a sandboxed "
+            "app's container)".format(key, domain)
+        )
 
 
 def _check(domain: str) -> None:
@@ -150,6 +163,9 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
     ``True`` is written as a boolean, ``3`` as an integer, lists as arrays and
     dicts as dictionaries: no ``-bool`` or ``-int`` flags to get right.
     ``current_host=True`` writes it for this Mac only, like ``defaults -currentHost``.
+    A domain this process can't write (managed by a configuration profile,
+    another user's, the system's, a sandboxed app's container) raises
+    :class:`~macos.errors.PermissionDeniedError`.
     """
     _check(domain)
     if value is None:
@@ -159,7 +175,11 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
 
 
 def delete(domain: str, key: str, *, current_host: bool = False) -> bool:
-    """Remove ``key`` from ``domain``; return whether it was set."""
+    """
+    Remove ``key`` from ``domain``; return whether it was set.
+
+    Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable.
+    """
     _check(domain)
     existed = _own(domain, key, _MISSING, current_host) is not _MISSING
     _store(domain, key, None, current_host)
@@ -197,16 +217,29 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     try:
         yield
     finally:
+        # One key that can't be written back mustn't keep the others from
+        # being restored, in its domain or another: each change is tried on
+        # its own, and the first failure raised once they all were.
+        failure: List[PermissionDeniedError] = []
+
+        def attempt(change: Callable[[], object]) -> None:
+            try:
+                change()
+            except PermissionDeniedError as error:
+                failure.append(error)
+
         for domain, name_or_all, value in saved:
             if name_or_all is None:
                 for name in keys(domain, current_host=current_host):
                     if name not in value:
-                        delete(domain, name, current_host=current_host)
+                        attempt(functools.partial(delete, domain, name, current_host=current_host))
                 for name, old in value.items():
                     # The domain's own value: one equal to the global fallback still has to be written back.
                     if _own(domain, name, missing, current_host) != old:
-                        write(domain, name, old, current_host=current_host)
+                        attempt(functools.partial(write, domain, name, old, current_host=current_host))
             elif value is missing:
-                delete(domain, name_or_all, current_host=current_host)
+                attempt(functools.partial(delete, domain, name_or_all, current_host=current_host))
             else:
-                write(domain, name_or_all, value, current_host=current_host)
+                attempt(functools.partial(write, domain, name_or_all, value, current_host=current_host))
+        if failure:
+            raise failure[0]

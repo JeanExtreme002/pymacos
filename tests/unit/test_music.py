@@ -124,5 +124,8 @@ def test_music_argument_checks():
         macos.music.now_playing(app="Winamp")
     with pytest.raises(ValueError, match="0 to 100"):
         macos.music.set_volume(101)
-    with pytest.raises(ValueError, match="negative"):
-        macos.music.seek(-1)
+    for seconds in (-1, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="zero or more"):
+            macos.music.seek(seconds)
+    with pytest.raises(ValueError, match="0 to 100"):
+        macos.music.set_volume(float("nan"))

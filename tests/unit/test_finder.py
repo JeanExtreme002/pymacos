@@ -163,7 +163,49 @@ def test_custom_icon_errors_are_not_hidden(tmp_path, monkeypatch):
             ctypes.set_errno(errno.EIO)
             return -1
 
-    monkeypatch.setattr(macos.apps, "_libc", lambda: Failing())
+    monkeypatch.setattr(macos._libc, "lib", lambda: Failing())
     with pytest.raises(OSError) as raised:
         finder.has_custom_icon(file)
     assert raised.value.errno == errno.EIO
+
+
+def test_custom_icon_is_read_from_a_symbolic_link_itself(tmp_path, monkeypatch):
+    import ctypes
+
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "anywhere")
+    calls = []
+
+    class Recording:
+        def getxattr(self, path, name, buffer, size, position, options):
+            calls.append((path, options))
+            ctypes.set_errno(macos._libc.ENOATTR)
+            return -1
+
+    monkeypatch.setattr(macos._libc, "lib", lambda: Recording())
+    assert finder.has_custom_icon(link) is False
+    assert calls == [(bytes(link), macos._libc.XATTR_NOFOLLOW)]  # not the target's flags, like the quarantine's
+
+
+def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
+    for index in range(3):
+        folder = tmp_path / "folder{}".format(index)
+        folder.mkdir()
+        (folder / "big.bin").write_bytes(b"x" * 2048)
+    clock = {"now": 0.0}
+
+    def tick():
+        clock["now"] += 10  # each folder walked takes 10 seconds
+        return clock["now"]
+
+    monkeypatch.setattr(finder, "require_macos", lambda: None)
+    monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [])  # nothing indexed: walked
+    monkeypatch.setattr(finder.time, "monotonic", tick)
+    with pytest.raises(TimeoutError, match="took more than 25 seconds"):
+        finder.largest(tmp_path, at_least=1024, timeout=25)
+
+    clock["now"] = 0.0
+    found = finder.largest(tmp_path, at_least=1024, timeout=None)  # for as long as it takes
+    assert sorted(path.parent.name for path, size in found) == ["folder0", "folder1", "folder2"]
+    with pytest.raises(ValueError, match="timeout"):
+        finder.largest(tmp_path, timeout=0)

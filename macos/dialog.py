@@ -30,6 +30,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 _CANCEL = "cancel"
 _TIMEOUT = "timeout"
+_END = "\0"  # ends each chosen path: a file name can hold a newline, never a NUL
 
 
 def _show(body: List[str], args: Sequence[str]) -> List[str]:
@@ -53,7 +54,8 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     command = ["osascript"]
     for line in script:
         command += ["-e", line]
-    return _run([*command, "--", *args]).rstrip("\n").split("\n")
+    # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
+    return _run([*command, "--", *args], exact_newlines=True).rstrip("\n").split("\n")
 
 
 def _giving_up(timeout: Optional[float]) -> str:
@@ -118,6 +120,9 @@ def prompt(
     Ask for a line of text and return it, or ``None`` if the user cancelled (or ``timeout`` passed).
 
     ``hidden=True`` shows dots instead of the typed characters, for passwords.
+    The answer comes back on ``osascript``'s output, but ``default`` reaches
+    it as an argument, which other processes of the same user can see in
+    the process list while the dialog is open: don't pre-fill a secret.
     """
     statement = "set r to display dialog (item 1 of argv) default answer (item 2 of argv)"
     args = [message, default]
@@ -185,12 +190,19 @@ def _choose_file_body(
 def _paths_body() -> List[str]:
     return [
         "if class of r is not list then set r to {r}",
-        'set out to "ok"',
+        'set out to "ok" & linefeed',
         "repeat with f in r",
-        "set out to out & linefeed & (POSIX path of f)",
+        "set out to out & (POSIX path of f) & (character id 0)",
         "end repeat",
         "return out",
     ]
+
+
+def _paths(result: List[str]) -> List[Path]:
+    """The paths :func:`_paths_body` returned, each ended by a NUL; ``[]`` if cancelled."""
+    if result[0] != "ok":
+        return []
+    return [Path(path) for path in "\n".join(result[1:]).split(_END)[:-1] if path]
 
 
 def choose_file(
@@ -206,8 +218,8 @@ def choose_file(
     identifier (``["public.image"]``). ``folder`` is where the picker opens.
     """
     body, args = _choose_file_body(prompt, types, folder, multiple=False)
-    result = _show(body + _paths_body(), args)
-    return Path(result[1]) if result[0] == "ok" and len(result) > 1 else None
+    found = _paths(_show(body + _paths_body(), args))
+    return found[0] if found else None
 
 
 def choose_files(
@@ -218,8 +230,7 @@ def choose_files(
 ) -> List[Path]:
     """Like :func:`choose_file`, but lets the user pick several files. Returns ``[]`` if cancelled."""
     body, args = _choose_file_body(prompt, types, folder, multiple=True)
-    result = _show(body + _paths_body(), args)
-    return [Path(line) for line in result[1:] if line] if result[0] == "ok" else []
+    return _paths(_show(body + _paths_body(), args))
 
 
 def choose_folder(prompt: Optional[str] = None, *, folder: Optional[PathLike] = None) -> Optional[Path]:
@@ -228,5 +239,5 @@ def choose_folder(prompt: Optional[str] = None, *, folder: Optional[PathLike] = 
     if folder is not None:
         statement += " default location (POSIX file (item 2 of argv))"
     args = [prompt or "Choose a folder:", str(Path(folder).expanduser().resolve()) if folder else ""]
-    result = _show([statement, *_paths_body()], args)
-    return Path(result[1]) if result[0] == "ok" and len(result) > 1 else None
+    found = _paths(_show([statement, *_paths_body()], args))
+    return found[0] if found else None

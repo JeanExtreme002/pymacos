@@ -16,6 +16,7 @@ IDE) to control the player; if that's denied,
 :class:`~macos.errors.PermissionDeniedError` is raised.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -205,8 +206,9 @@ def seek(seconds: float, app: Optional[str] = None) -> None:
 
     ``app`` works as in :func:`volume`. Past the end, the player moves on to the next song.
     """
-    if seconds < 0:
-        raise ValueError("seconds must not be negative, not {}".format(seconds))
+    # NaN passes "< 0", and inf or nan would reach the script as the words "inf"/"nan".
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("seconds must be a number, zero or more, not {}".format(seconds))
     player = _running_player(app)
     # A plain decimal point, whatever the user's locale: AppleScript reads numbers in code that way.
     _osascript(player, 'tell application "{}" to set player position to {}'.format(player, float(seconds)))

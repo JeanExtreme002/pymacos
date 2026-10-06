@@ -22,6 +22,21 @@ macos.clipboard.copy("café 🍎")
 macos.clipboard.paste()        # 'café 🍎'
 ```
 
+## Passwords and tokens
+
+`sensitive=True` marks the text as concealed and transient, the
+[nspasteboard.org](http://nspasteboard.org) markers that clipboard managers
+(Alfred, Raycast, Maccy, Paste...) follow: they neither show it nor keep it in
+their history. Apps pasting it get the text as usual:
+
+```python
+macos.clipboard.copy(macos.keychain.get("deploy", "prod"), sensitive=True)
+```
+
+It's a request to the clipboard managers, not a protection: any app can still
+read the clipboard while it holds the secret, so clear it once it's pasted
+({func}`~macos.clipboard.clear`).
+
 ## Images
 
 {func}`~macos.clipboard.copy_image` puts an image on the clipboard, from a file

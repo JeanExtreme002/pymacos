@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _objc
+from . import _files, _objc
 from ._objc import BOOL, NSInteger, NSUInteger
 from ._system import framework
 from .errors import MacOSError, NotSupportedError
@@ -241,10 +241,6 @@ def lines(image: Image, *, languages: Optional[Sequence[str]] = None, fast: bool
     return sorted(found, key=lambda line: (round(line.box[1], 2), line.box[0]))
 
 
-class _Range(ctypes.Structure):
-    _fields_ = [("location", NSUInteger), ("length", NSUInteger)]
-
-
 def _utf16(text: str, index: int) -> int:
     """The UTF-16 offset of ``text[index]``: NSString counts UTF-16 units, Python code points."""
     return len(text[:index].encode("utf-16-le")) // 2
@@ -273,24 +269,46 @@ def _spans(line: str, needle: str) -> List[Tuple[int, int]]:
 def _words(image: Image, languages: Optional[Sequence[str]] = None) -> List[Tuple[str, Tuple[float, float, float, float]]]:
     """Every word of the image's text, with its own box (fractions of the image from its top-left)."""
     _load()
-    found = []
     with _objc.autorelease_pool():
-        for observation in _perform(image, _request(languages, False)):
-            candidates = _objc.send(observation, "topCandidates:", 1, argtypes=(NSUInteger,))
-            for candidate in _objc.nsarray(candidates):
-                line = _objc.pystring(_objc.send(candidate, "string")) or ""
-                for match in re.finditer(r"\S+", line):
-                    first, last = _utf16(line, match.start()), _utf16(line, match.end())
-                    error = ctypes.c_void_p()
-                    part = _objc.send(
-                        candidate,
-                        "boundingBoxForRange:error:",
-                        _Range(first, last - first),
-                        ctypes.byref(error),
-                        argtypes=(_Range, ctypes.c_void_p),
-                    )
-                    if part:
-                        found.append((match.group(0), _box(part)))
+        return _words_of(_perform(image, _request(languages, False)))
+
+
+def _picture_words(
+    picture: int, languages: Optional[Sequence[str]] = None
+) -> List[Tuple[str, Tuple[float, float, float, float]]]:
+    """
+    :func:`_words` for a ``CGImage`` already drawn (a page of a PDF), handed to Vision as it is.
+
+    No image file in between: encoding a page as PNG for Vision to decode it
+    again is most of the work for a large page.
+    """
+    _load()
+    framework("CoreImage")
+    with _objc.autorelease_pool():
+        wrapped = _objc.send(_objc.cls("CIImage"), "imageWithCGImage:", picture, argtypes=(ctypes.c_void_p,))
+        if not wrapped:
+            raise MacOSError("the picture could not be read")
+        return _words_of(_perform_on(wrapped, _request(languages, False)))
+
+
+def _words_of(observations: List[int]) -> List[Tuple[str, Tuple[float, float, float, float]]]:
+    found = []
+    for observation in observations:
+        candidates = _objc.send(observation, "topCandidates:", 1, argtypes=(NSUInteger,))
+        for candidate in _objc.nsarray(candidates):
+            line = _objc.pystring(_objc.send(candidate, "string")) or ""
+            for match in re.finditer(r"\S+", line):
+                first, last = _utf16(line, match.start()), _utf16(line, match.end())
+                error = ctypes.c_void_p()
+                part = _objc.send(
+                    candidate,
+                    "boundingBoxForRange:error:",
+                    _files.NSRange(first, last - first),
+                    ctypes.byref(error),
+                    argtypes=(_files.NSRange, ctypes.c_void_p),
+                )
+                if part:
+                    found.append((match.group(0), _box(part)))
     return found
 
 
@@ -316,9 +334,9 @@ def _occurrences(
                     part = _objc.send(
                         candidate,
                         "boundingBoxForRange:error:",
-                        _Range(first, last - first),
+                        _files.NSRange(first, last - first),
                         ctypes.byref(error),
-                        argtypes=(_Range, ctypes.c_void_p),
+                        argtypes=(_files.NSRange, ctypes.c_void_p),
                     )
                     found.append((line, _box(part) if part else _box(observation)))
     return sorted(found, key=lambda match: (round(match[1][1], 2), match[1][0]))
@@ -493,10 +511,8 @@ def scan_document(image: Image) -> Optional[bytes]:
         extent = _objc.send(picture, "extent", restype=_objc.CGRect)
         width, height = extent.size.width, extent.size.height
 
-        # Detect on the upright pixels, so the corners match `picture`.
-        png = _objc.ciimage_png(picture)
-        request = _objc.new("VNDetectDocumentSegmentationRequest")
-        observations = _perform(png, request)
+        # Detect on the upright pixels, so the corners match `picture`: the CIImage itself, not a PNG of it.
+        observations = _perform_on(picture, _objc.new("VNDetectDocumentSegmentationRequest"))
         # The detector always returns a quadrilateral; on anything but a
         # document its confidence is 0 (measured: 0.99 for a photographed page).
         if not observations or _objc.send(observations[0], "confidence", restype=ctypes.c_float) < 0.5:
@@ -700,7 +716,7 @@ def smart_crop(image: Image, width: int, height: int) -> bytes:
         # Where to centre the crop: the salient objects' bounding box, or the
         # middle of the picture when nothing stands out.
         center_x, center_y = 0.5, 0.5
-        observations = _perform(_objc.ciimage_png(picture), _objc.new("VNGenerateAttentionBasedSaliencyImageRequest"))
+        observations = _perform_on(picture, _objc.new("VNGenerateAttentionBasedSaliencyImageRequest"))
         if observations:
             boxes = [
                 _objc.send(item, "boundingBox", restype=_objc.CGRect)

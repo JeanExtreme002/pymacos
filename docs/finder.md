@@ -158,7 +158,8 @@ macos.finder.remove_icon("~/Projects")                                 # its usu
 ```
 
 Finder and the Dock may take a moment to show it. An app in `/Applications`
-may need an administrator's rights.
+may need an administrator's rights. {func}`~macos.finder.has_custom_icon` asks
+a symbolic link about itself, not about what it points to.
 
 ## The largest files
 
@@ -173,7 +174,13 @@ for path, size in macos.finder.largest("~", count=10):
 Files under `at_least` bytes (1 MB) are left out. Folders Spotlight doesn't
 index, hidden ones and `~/Library`, are walked instead, which is slower, when
 they're the folder or right under it; hidden folders deeper in (a project's
-`.git`) aren't searched.
+`.git`) aren't searched. When Spotlight finds nothing there (it's off, or
+hasn't indexed that disk), the whole folder is walked file by file.
+
+Walking a big folder, a whole disk or a network share, can take very long:
+after `timeout` seconds of it (60 by default) {func}`~macos.finder.largest`
+raises `TimeoutError` rather than return an answer missing files. Pass
+`timeout=None` to walk for as long as it takes.
 
 ## Finder settings
 

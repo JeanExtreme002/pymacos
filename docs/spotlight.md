@@ -47,7 +47,8 @@ macos.spotlight.search('kMDItemContentType == "com.adobe.pdf"')
 macos.spotlight.search("kMDItemFSSize > 1000000000", folder="~")     # files over 1 GB
 ```
 
-A malformed query raises `ValueError`.
+A malformed query raises `ValueError`. A query starting with `-` is searched
+for as a query, never taken as one of `mdfind`'s options.
 
 ## Reading metadata
 

@@ -20,8 +20,7 @@ import time
 from typing import Optional
 
 from . import _cf, _objc
-from ._system import framework, run as _run
-from .errors import CommandError, PermissionDeniedError
+from ._system import applescript, framework
 
 __all__ = [
     "is_dark",
@@ -76,15 +75,7 @@ def set_mode(mode: str) -> None:
     script = 'tell application "System Events" to tell appearance preferences to set dark mode to {}'.format(
         "true" if mode == "dark" else "false"
     )
-    try:
-        _run(["osascript", "-e", script])
-    except CommandError as error:
-        if "-1743" in error.stderr:  # errAEEventNotPermitted
-            raise PermissionDeniedError(
-                "Automation permission is missing: allow the app running Python (your terminal or IDE) to control "
-                "System Events in System Settings › Privacy & Security › Automation"
-            ) from None
-        raise
+    applescript("System Events", script)  # turns -1743 into PermissionDeniedError
 
 
 def is_auto() -> bool:

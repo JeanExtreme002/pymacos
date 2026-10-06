@@ -37,6 +37,11 @@ macos.screenshot("pointer.png", cursor=True)             # include the mouse poi
 The format follows the file extension: `.png`, `.jpg` (or `.jpeg`), `.heic`,
 `.tiff`, `.gif` or `.pdf`. Anything else raises `ValueError`.
 
+When `screencapture` saves nothing (it can end without an error and without
+an image, when a display goes away), {class}`~macos.MacOSError` is raised
+rather than an empty file returned; one that doesn't finish within a minute
+raises {class}`~macos.CommandTimeoutError`.
+
 ### Permission
 
 Capturing other apps' windows requires the *Screen Recording* permission.

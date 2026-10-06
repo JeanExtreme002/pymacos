@@ -3,6 +3,7 @@
 import json
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -67,6 +68,39 @@ def test_crash_reports(tmp_path, monkeypatch):
     ]
     assert [crash.app for crash in system.crash_reports("safari")] == ["Safari"]
     assert [crash.app for crash in system.crash_reports(since=datetime(2026, 9, 25))] == ["Safari"]
+
+
+def test_crash_reports_read_only_the_header_of_other_apps_reports(tmp_path, monkeypatch):
+    import builtins
+
+    header = {"app_name": "Notes", "bug_type": "309", "timestamp": "2026-09-20 08:00:00.00 -0300"}
+    _report(tmp_path, "Notes-1.ips", header, {"exception": {"type": "EXC_CRASH"}})
+    _report(tmp_path, "Safari-1.ips", dict(header, app_name="Safari"), {"exception": {"type": "EXC_BAD_ACCESS"}})
+    monkeypatch.setattr(system, "_REPORT_FOLDERS", (str(tmp_path),))
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    bodies = []
+    real_open = builtins.open
+
+    class Counting:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.file.close()
+
+        def readline(self):
+            return self.file.readline()
+
+        def read(self):
+            bodies.append(self.file.name)
+            return self.file.read()
+
+    monkeypatch.setattr(builtins, "open", lambda path, *args, **kwargs: Counting(real_open(path, *args, **kwargs)))
+    assert [crash.reason for crash in system.crash_reports("notes")] == ["EXC_CRASH"]
+    assert [Path(name).name for name in bodies] == ["Notes-1.ips"]  # Safari's body was never read
 
 
 def test_log_entries_and_predicates():
@@ -141,12 +175,14 @@ def test_logs_report_log_shows_failures(monkeypatch):
 
     class Failed:
         def __init__(self, args, **kwargs):
-            self.stdout, self.stderr, self.returncode = io.StringIO(""), io.StringIO("log: bad predicate"), None
+            # A chatty failure: far more than a pipe holds (64 KB), which must not block it.
+            kwargs["stderr"].write(b"log: bad predicate\n" + b"x" * 200_000)
+            self.stdout, self.returncode = io.StringIO(""), None
 
         def kill(self):
             raise AssertionError("it ended by itself: nothing to kill")
 
-        def wait(self):
+        def wait(self, timeout=None):
             self.returncode = 64
 
     monkeypatch.setattr(system, "require_macos", lambda: None)
@@ -154,3 +190,39 @@ def test_logs_report_log_shows_failures(monkeypatch):
     with pytest.raises(macos.CommandError) as raised:
         system.logs(process="Safari")
     assert "bad predicate" in str(raised.value)
+
+
+def test_logs_stop_a_log_show_that_takes_too_long(monkeypatch):
+    import subprocess
+    import threading
+
+    class Endless:
+        """A log show still reading: its output only ends when it's killed."""
+
+        def __init__(self, args, **kwargs):
+            self.killed, self.returncode = threading.Event(), None
+
+        @property
+        def stdout(self):
+            return self
+
+        def __iter__(self):
+            self.killed.wait(5)
+            return iter([])
+
+        def close(self):
+            pass
+
+        def kill(self):
+            self.killed.set()
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(subprocess, "Popen", Endless)
+    with pytest.raises(macos.CommandTimeoutError) as raised:
+        system.logs(timeout=0.05)
+    assert isinstance(raised.value, TimeoutError) and raised.value.cmd[:2] == ["/usr/bin/log", "show"]
+    with pytest.raises(ValueError, match="timeout"):
+        system.logs(timeout=0)

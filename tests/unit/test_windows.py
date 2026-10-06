@@ -112,3 +112,86 @@ def test_tile_all_ignores_an_app_that_quits(monkeypatch):
     monkeypatch.setattr(windows, "tile", lambda chosen, **options: tiled.append(chosen))
 
     assert windows.tile_all() == [] and tiled == [[]]
+
+
+def test_tile_with_too_large_a_gap_moves_nothing(monkeypatch):
+    import pytest
+
+    from macos import windows
+
+    with pytest.raises(ValueError, match="gap of 400 points leaves no room"):
+        windows._grid(2, (0, 0, 1000, 800), None, 400)
+    monkeypatch.setattr(windows, "_usable_areas", lambda: [(0, 25, 1000, 800), (1000, 0, 400, 300)])
+    first, second = _FakeWindow(10, 100), _FakeWindow(1100, 50)
+    with pytest.raises(ValueError, match="no room"):
+        windows.tile([first, second], gap=160)  # fits the first display, not the second
+    assert first.frame == (10, 100, 300, 200) and second.frame == (1100, 50, 300, 200)  # neither moved
+
+
+def test_center_keeps_clear_of_the_menu_bar_and_the_dock(monkeypatch):
+    from macos import windows
+
+    class Window(windows.Window):
+        def __init__(self, frame):
+            self._element, self.app, self.pid = 0, "Test", 1
+            self._frame = frame
+
+        @property
+        def frame(self):
+            return self._frame
+
+        def move(self, x, y):
+            self._frame = (x, y) + self._frame[2:]
+
+    # A display 1000 x 800 whose menu bar takes 25 points at the top and the Dock 75 at the bottom.
+    monkeypatch.setattr(windows, "_usable_areas", lambda: [(0, 25, 1000, 700), (1000, 0, 800, 600)])
+    window = Window((0, 0, 400, 300))
+    window.center()
+    assert window.frame == (300, 225, 400, 300)
+    tall = Window((1100, 0, 400, 900))
+    tall.center()
+    assert tall.frame == (1200, 0, 400, 900)  # on its own display, its top edge kept on it
+
+
+def test_set_fullscreen_tells_a_window_that_cannot_go_full_screen(monkeypatch):
+    import pytest
+
+    from macos import windows
+
+    class Window(windows.Window):
+        def __init__(self, status):
+            self._element, self.app, self.pid = 0, "Test", 1
+            self.status = status
+
+        def _set_flag(self, attribute, on, what):
+            windows._check(self.status, what)
+
+    with pytest.raises(macos.MacOSError, match="can't go full screen: its app doesn't allow it"):
+        Window(-25200).set_fullscreen()  # kAXErrorFailure
+    with pytest.raises(macos.MacOSError, match="the window is gone"):
+        Window(-25202).set_fullscreen()
+
+
+def test_restarting_the_window_manager_only_ignores_it_not_running(commands):
+    import pytest
+
+    from macos import windows
+
+    commands.answers["WindowManager"] = (1, "", "No matching processes belonging to you were found")
+    windows._restart_window_manager()  # not running: it reads the settings when it starts
+    commands.answers["WindowManager"] = (2, "", "killall: unknown signal")
+    with pytest.raises(macos.CommandError, match="unknown signal"):
+        windows._restart_window_manager()
+
+
+def test_request_permission_needs_the_prompt_option(monkeypatch):
+    import ctypes
+
+    import pytest
+
+    from macos import windows
+
+    monkeypatch.setattr(windows, "_accessibility", lambda: object())
+    monkeypatch.setattr(ctypes.c_void_p, "in_dll", lambda library, name: ctypes.c_void_p(None), raising=False)
+    with pytest.raises(macos.MacOSError, match="prompt option"):
+        windows.request_permission()

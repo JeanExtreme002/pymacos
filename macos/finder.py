@@ -30,9 +30,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, framework, restart_later, run as _run
+from ._system import applescript, framework, require_macos, restart_later, run as _run
 from .errors import MacOSError
 
 __all__ = [
@@ -471,7 +471,7 @@ class Event:
 
 
 # FSEventStreamEventFlags
-_CREATED, _REMOVED, _RENAMED, _IS_DIR = 0x100, 0x200, 0x800, 0x20000
+_CREATED, _RENAMED, _IS_DIR = 0x100, 0x800, 0x20000
 _FILE_EVENTS, _NO_DEFER = 0x10, 0x2  # FSEventStreamCreateFlags: one event per file, the first one right away
 _SINCE_NOW = 0xFFFFFFFFFFFFFFFF  # kFSEventStreamEventIdSinceNow
 _LATENCY = 0.1  # seconds FSEvents gathers events for before calling back
@@ -506,11 +506,6 @@ def _core_services() -> ctypes.CDLL:
         function = getattr(services, name)
         function.argtypes = argtypes
         function.restype = restype
-    run_loop = framework("CoreFoundation")
-    run_loop.CFRunLoopGetCurrent.argtypes = ()
-    run_loop.CFRunLoopGetCurrent.restype = pointer
-    run_loop.CFRunLoopRunInMode.argtypes = (pointer, ctypes.c_double, ctypes.c_bool)
-    run_loop.CFRunLoopRunInMode.restype = ctypes.c_int32
     return services
 
 
@@ -574,7 +569,7 @@ def watch(
     folder = Path(os.path.realpath(os.path.expanduser(str(path))))
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
-    services, run_loop = _core_services(), framework("CoreFoundation")
+    services, run_loop = _core_services(), _cf.lib()  # the run loop's functions are declared there
     pending: "collections.deque[Event]" = collections.deque()
     seen: Set[Path] = set()
 
@@ -593,7 +588,7 @@ def watch(
         stream = services.FSEventStreamCreate(None, callback, None, paths, _SINCE_NOW, _LATENCY, _FILE_EVENTS | _NO_DEFER)
     if not stream:
         raise MacOSError("could not watch {}".format(folder))
-    mode = ctypes.c_void_p.in_dll(run_loop, "kCFRunLoopDefaultMode")
+    mode = _cf.default_mode()
     services.FSEventStreamScheduleWithRunLoop(stream, run_loop.CFRunLoopGetCurrent(), mode)
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
@@ -696,14 +691,10 @@ def restart() -> None:
 
 
 def _setting(domain: str, key: str) -> bool:
-    from . import defaults
-
     return bool(defaults.read(domain, key, default=False))
 
 
 def _set(domain: str, key: str, on: bool) -> None:
-    from . import defaults
-
     defaults.write(domain, key, bool(on))
     restart()
 
@@ -785,8 +776,6 @@ def quick_look(path: PathLike) -> None:
     """
     import subprocess
 
-    from ._system import require_macos
-
     source = _existing(path)
     require_macos()
     subprocess.Popen(
@@ -812,8 +801,6 @@ def set_show_desktop_icons(on: bool = True) -> None:
 
 
 def _setting_default(domain: str, key: str, default: bool) -> bool:
-    from . import defaults
-
     return bool(defaults.read(domain, key, default=default))
 
 
@@ -822,8 +809,6 @@ _VIEWS = {"icons": "icnv", "list": "Nlsv", "columns": "clmv", "gallery": "glyv"}
 
 def default_view() -> str:
     """How Finder shows folders that have no view of their own: ``'icons'``, ``'list'``, ``'columns'`` or ``'gallery'``."""
-    from . import defaults
-
     code = defaults.read(_FINDER, "FXPreferredViewStyle", default="icnv")
     return next((view for view, found in _VIEWS.items() if found == code), "icons")
 
@@ -834,8 +819,6 @@ def set_default_view(view: str) -> None:
 
     Folders already shown another way keep their own view.
     """
-    from . import defaults
-
     if view not in _VIEWS:
         raise ValueError("view must be one of {}, not {!r}".format(", ".join(_VIEWS), view))
     defaults.write(_FINDER, "FXPreferredViewStyle", _VIEWS[view])
@@ -847,8 +830,6 @@ _UF_HIDDEN = 0x8000  # stat.UF_HIDDEN: the flag chflags hidden sets
 
 def show_library_folder() -> bool:
     """Whether your Library folder (``~/Library``) shows in Finder; macOS hides it."""
-    from ._system import require_macos
-
     require_macos()
     flags = getattr(os.stat(str(Path.home() / "Library")), "st_flags", 0)  # only BSD systems have file flags
     return not flags & _UF_HIDDEN
@@ -864,8 +845,6 @@ _NEW_WINDOW_TARGETS = {"PfHm": "~", "PfDe": "~/Desktop", "PfDo": "~/Documents"}
 
 def new_window_folder() -> Path:
     """The folder a new Finder window (⌘N) opens."""
-    from . import defaults
-
     target = defaults.read(_FINDER, "NewWindowTarget", default="PfHm")
     if target in _NEW_WINDOW_TARGETS:
         return Path(os.path.expanduser(_NEW_WINDOW_TARGETS[target]))
@@ -878,8 +857,6 @@ def new_window_folder() -> Path:
 def set_new_window_folder(folder: PathLike) -> None:
     """Open new Finder windows (⌘N) in ``folder``, such as ``"~/Downloads"``. Relaunches Finder."""
     from urllib.parse import quote
-
-    from . import defaults
 
     target = _existing(folder)
     if not target.is_dir():
@@ -894,8 +871,6 @@ _SCOPES = {"this_mac": "SCev", "current_folder": "SCcf", "previous": "SCsp"}
 
 def search_scope() -> str:
     """Where a Finder search looks first: ``'this_mac'``, ``'current_folder'`` or ``'previous'`` (the last scope used)."""
-    from . import defaults
-
     code = defaults.read(_FINDER, "FXDefaultSearchScope", default="SCev")
     return next((scope for scope, found in _SCOPES.items() if found == code), "this_mac")
 
@@ -906,8 +881,6 @@ def set_search_scope(scope: str) -> None:
 
     Relaunches Finder.
     """
-    from . import defaults
-
     if scope not in _SCOPES:
         raise ValueError("scope must be one of {}, not {!r}".format(", ".join(_SCOPES), scope))
     defaults.write(_FINDER, "FXDefaultSearchScope", _SCOPES[scope])
@@ -931,8 +904,6 @@ def folders_first() -> bool:
 
 def set_folders_first(on: bool = True) -> None:
     """Keep folders before files when sorting by name, in windows and on the desktop, or mix them."""
-    from . import defaults
-
     defaults.write(_FINDER, "_FXSortFoldersFirstOnDesktop", bool(on))
     _set(_FINDER, "_FXSortFoldersFirst", on)
 
@@ -989,8 +960,6 @@ def set_show_drives_on_desktop(
     ``internal`` is the Mac's own disk, ``external`` the USB and Thunderbolt
     ones, ``removable`` CDs and the like, ``servers`` the network shares.
     """
-    from . import defaults
-
     wanted = {"internal": internal, "external": external, "removable": removable, "servers": servers}
     if all(on is None for on in wanted.values()):
         raise ValueError("say which disks to show or hide: internal=, external=, removable= or servers=")
@@ -1026,8 +995,6 @@ _DESKTOP_SORTS = {
 
 
 def _desktop_icons() -> Dict[str, Any]:
-    from . import defaults
-
     view = defaults.read(_FINDER, "DesktopViewSettings", default={}) or {}
     return dict(view.get("IconViewSettings", {}))
 
@@ -1078,8 +1045,6 @@ def set_desktop_view(
     folder's item count, an image's size), and ``labels_on_bottom=False``
     puts the names to the right of the icons instead of below. Relaunches Finder.
     """
-    from . import defaults
-
     changes: Dict[str, object] = {}
     for name, value, low, high, key in (
         ("icon_size", icon_size, 16, 128, "iconSize"),
@@ -1166,21 +1131,27 @@ def remove_icon(path: PathLike) -> None:
 
 
 def has_custom_icon(path: PathLike) -> bool:
-    """Whether ``path`` has a custom icon, set with :func:`set_icon` or in Finder's Get Info."""
-    from .apps import _ENOATTR, _libc
+    """
+    Whether ``path`` has a custom icon, set with :func:`set_icon` or in Finder's Get Info.
 
+    A symbolic link is asked about itself, not about what it points to, like
+    :func:`macos.apps.is_quarantined`.
+    """
     target = _existing(path)
     info = ctypes.create_string_buffer(32)  # FinderInfo's size
-    size = _libc().getxattr(os.fsencode(target), b"com.apple.FinderInfo", info, 32, 0, 0)
+    # A symbolic link's own flags, as for the quarantine: not those of what it points to, which may be anywhere.
+    size = _libc.lib().getxattr(os.fsencode(target), b"com.apple.FinderInfo", info, 32, 0, _libc.XATTR_NOFOLLOW)
     if size < 0:
         error = ctypes.get_errno()
-        if error == _ENOATTR:
+        if error == _libc.ENOATTR:
             return False  # no Finder flags at all
         raise OSError(error, "can't read the Finder flags of {}: {}".format(target, os.strerror(error)))
     return size >= 10 and bool(int.from_bytes(info.raw[8:10], "big") & _HAS_CUSTOM_ICON)
 
 
-def largest(folder: PathLike, count: int = 20, *, at_least: int = 1_000_000) -> List[Tuple[Path, int]]:
+def largest(
+    folder: PathLike, count: int = 20, *, at_least: int = 1_000_000, timeout: Optional[float] = 60.0
+) -> List[Tuple[Path, int]]:
     """
     The largest files in ``folder`` and its subfolders, the biggest first, with their size in bytes.
 
@@ -1194,20 +1165,31 @@ def largest(folder: PathLike, count: int = 20, *, at_least: int = 1_000_000) -> 
     files. The folders Spotlight leaves out, hidden ones and ``~/Library``,
     are walked instead when they're the folder or right under it, which is
     slower; hidden folders deeper in (a project's ``.git``) aren't searched.
-    """
-    from . import spotlight
-    from ._system import require_macos
+    When Spotlight finds nothing there (it's off, or hasn't indexed that
+    disk), the whole folder is walked file by file.
 
+    Walking a big folder, a whole disk or a network share, can take very
+    long: past ``timeout`` seconds of it, :class:`TimeoutError` is raised
+    rather than an answer missing files. ``None`` walks for as long as it takes.
+    """
     if count < 1:
         raise ValueError("count must be 1 or more, not {}".format(count))
+    if timeout is not None and timeout <= 0:
+        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     require_macos()  # before Spotlight: its "not supported" mustn't pass for "nothing indexed"
     root = _existing(folder)
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     sizes: Dict[Path, int] = {}
+    deadline = None if timeout is None else time.monotonic() + timeout
 
     def walk(top: Path) -> None:
         for current, _, files in os.walk(top):
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError(
+                    "looking through {} file by file took more than {:g} seconds (Spotlight hasn't indexed it); "
+                    "pass a longer timeout, or None".format(top, timeout or 0)
+                )
             for name in files:
                 path = Path(current, name)
                 try:

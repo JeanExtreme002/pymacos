@@ -67,8 +67,10 @@ result.responsiveness            # 53.3: the same as a score, in round trips per
 
 It takes 15 to 60 seconds and moves a few hundred megabytes: mind a
 metered connection. `sequential=True` measures download and upload one
-after the other, which reads each more exactly. It goes through
-`networkQuality`, which comes with macOS.
+after the other, which reads each more exactly (and takes about twice as
+long). It goes through `networkQuality`, which comes with macOS; past
+`timeout` seconds (3 minutes by default) it's stopped and
+{class}`~macos.CommandTimeoutError` raised.
 
 ## Wi-Fi signal
 
@@ -148,7 +150,8 @@ with their `status`: `'connected'`, `'connecting'`, `'disconnecting'` or
 default), raising {class}`~macos.MacOSError` if it fails; `wait=False`
 returns at once. It uses the password saved with the VPN: one that asks each
 time may show its prompt. {func}`~macos.network.disconnect_vpn` disconnects it,
-waiting the same way.
+waiting the same way. A `scutil` that doesn't answer within 30 seconds raises
+{class}`~macos.CommandTimeoutError`.
 
 A script that needs the office network can connect only while it runs:
 

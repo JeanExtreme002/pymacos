@@ -19,7 +19,6 @@ library to install.
 import ctypes
 import math
 import os
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc
+from . import _cf, _files, _objc
 from ._system import framework
 from .errors import MacOSError, NotSupportedError
 
@@ -120,6 +119,7 @@ def _io() -> ctypes.CDLL:
         "CGImageSourceCreateThumbnailAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageSourceCreateImageAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageDestinationCreateWithURL": ((pointer, pointer, ctypes.c_size_t, pointer), pointer),
+        "CGImageDestinationCreateWithData": ((pointer, pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageDestinationAddImageFromSource": ((pointer, pointer, ctypes.c_size_t, pointer), None),
         "CGImageDestinationAddImage": ((pointer, pointer, pointer), None),
         "CGImageDestinationFinalize": ((pointer,), ctypes.c_bool),
@@ -181,19 +181,30 @@ def _options(values: Dict[str, Union[bool, float]]) -> int:
             _cf.release(ref)
 
 
-def _write(target: Path, kind: str, add: Callable[[int], None], frames: int = 1) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
+def _write_to(path: Path, kind: str, add: Callable[[int], None], frames: int = 1) -> None:
+    """Write an image file of type ``kind`` at ``path`` (as it is: see :func:`_write`), ``add`` giving its frames."""
     io = _io()
-    with _cf.owned(_cf.file_url(str(target))) as url, _cf.owned(_cf.string(kind)) as type_ref:
+    with _cf.owned(_cf.file_url(str(path))) as url, _cf.owned(_cf.string(kind)) as type_ref:
         destination = io.CGImageDestinationCreateWithURL(url, type_ref, frames, None)
     if not destination:
-        raise MacOSError("could not create {}".format(target))
+        raise MacOSError("could not create {}".format(path))
     try:
         add(destination)
         if not io.CGImageDestinationFinalize(destination):
-            raise MacOSError("could not write {}".format(target))
+            raise MacOSError("could not write {}".format(path))
     finally:
         _cf.release(destination)
+
+
+def _write(target: Path, kind: str, add: Callable[[int], None], frames: int = 1) -> Path:
+    """
+    Write the image ``target``, of type ``kind``, ``add`` giving its frames, and return ``target``.
+
+    Through a file beside it, moved in place once complete: the output may
+    be the source itself, and a failure leaves no half-written image behind.
+    """
+    with _files.replacing(target) as temporary:
+        _write_to(temporary, kind, add, frames)
     return target
 
 
@@ -368,59 +379,60 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
     Write ``changes`` (``{"{Exif}": {"DateTimeOriginal": ...}}``) into a copy of an image, or into the image itself.
 
     The metadata is rewritten without touching the pixels when the format
-    allows it (JPEG, PNG, TIFF...). Otherwise, the image is saved again.
+    allows it (JPEG, PNG, TIFF...). Otherwise, the image is saved again. A
+    copy takes the format of its extension, as :func:`convert` does (a
+    ``.png`` copy of a JPEG is a PNG), and an extension it can't write is
+    refused (``ValueError``) unless the copy's is the original's own; the
+    image itself keeps its own format.
     """
     original = Path(path).expanduser().absolute()
     target = Path(output).expanduser().absolute() if output is not None else original
+    if output is not None and target.suffix.lower() != original.suffix.lower():
+        _output(target)  # a ".webp" copy of a JPEG would be JPEG bytes under a WebP name
     io = _io()
     cf = _cf.lib()
     with _cf.owned(_source(original)) as image_source:
-        kind = _cf.to_str(io.CGImageSourceGetType(image_source)) or "public.jpeg"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Write next to the target and move it in place at the end, so a
+        own_kind = _cf.to_str(io.CGImageSourceGetType(image_source)) or "public.jpeg"
+        kind = _WRITE_TYPES.get(target.suffix.lower(), own_kind) if output is not None else own_kind
+        # Written beside the target and moved in place at the end, so a
         # failure never leaves a half-written photo behind.
-        handle, name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix or original.suffix)
-        os.close(handle)
-        temporary = Path(name)
-        try:
-            current = io.CGImageSourceCopyMetadataAtIndex(image_source, 0, None)
-            tags = io.CGImageMetadataCreateMutableCopy(current) if current else io.CGImageMetadataCreateMutable()
-            _cf.release(current)
-            with _cf.owned(tags):
-                for group, values in changes.items():
-                    with _cf.owned(_cf.string(group)) as group_ref:
-                        for key, value in values.items():
-                            with _cf.owned(_cf.string(key)) as key_ref, _cf.owned(_cf.from_python(value)) as value_ref:
-                                io.CGImageMetadataSetValueMatchingImageProperty(tags, group_ref, key_ref, value_ref)
-                options = _cf.dictionary(
-                    {
-                        _cf.constant(io, "kCGImageDestinationMetadata"): tags,
-                        _cf.constant(io, "kCGImageDestinationMergeMetadata"): _cf.constant(cf, "kCFBooleanTrue"),
-                    }
-                )
-                with _cf.owned(options), _cf.owned(_cf.file_url(str(temporary))) as url, _cf.owned(
-                    _cf.string(kind)
-                ) as type_ref:
-                    destination = io.CGImageDestinationCreateWithURL(url, type_ref, 1, None)
-                    if not destination:
-                        raise MacOSError("could not create {}".format(temporary))
-                    with _cf.owned(destination):
-                        copied = io.CGImageDestinationCopyImageSource(destination, image_source, options, None)
-            # Some formats (HEIC) drop part of the changes when copied that
-            # way: save the image again with them instead.
+        with _files.replacing(target) as temporary:
+            copied = False
+            if kind == own_kind:
+                current = io.CGImageSourceCopyMetadataAtIndex(image_source, 0, None)
+                tags = io.CGImageMetadataCreateMutableCopy(current) if current else io.CGImageMetadataCreateMutable()
+                _cf.release(current)
+                with _cf.owned(tags):
+                    for group, values in changes.items():
+                        with _cf.owned(_cf.string(group)) as group_ref:
+                            for key, value in values.items():
+                                with _cf.owned(_cf.string(key)) as key_ref, _cf.owned(_cf.from_python(value)) as value_ref:
+                                    io.CGImageMetadataSetValueMatchingImageProperty(tags, group_ref, key_ref, value_ref)
+                    options = _cf.dictionary(
+                        {
+                            _cf.constant(io, "kCGImageDestinationMetadata"): tags,
+                            _cf.constant(io, "kCGImageDestinationMergeMetadata"): _cf.constant(cf, "kCFBooleanTrue"),
+                        }
+                    )
+                    with _cf.owned(options), _cf.owned(_cf.file_url(str(temporary))) as url, _cf.owned(
+                        _cf.string(kind)
+                    ) as type_ref:
+                        destination = io.CGImageDestinationCreateWithURL(url, type_ref, 1, None)
+                        if not destination:
+                            raise MacOSError("could not create {}".format(temporary))
+                        with _cf.owned(destination):
+                            copied = io.CGImageDestinationCopyImageSource(destination, image_source, options, None)
+            # Another format, or one (HEIC) that drops part of the changes when
+            # copied that way: save the image again with them instead.
             if not copied or not _matches(metadata(temporary), changes):
                 with _cf.owned(_cf.from_python(changes)) as properties:
-                    _write(
+                    _write_to(
                         temporary,
                         kind,
                         lambda destination: io.CGImageDestinationAddImageFromSource(
                             destination, image_source, 0, properties
                         ),
                     )
-            os.replace(str(temporary), str(target))
-        finally:
-            if temporary.exists():
-                temporary.unlink()
     return target
 
 

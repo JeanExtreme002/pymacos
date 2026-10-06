@@ -19,73 +19,37 @@ shortcut doesn't reach the app in front. Listening to the keyboard needs the
 IDE), and keeping the shortcut from the app in front needs *Accessibility*.
 """
 
-import ctypes
 import threading
-import time
-from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from . import keyboard
-from ._system import framework
-from .errors import PermissionDeniedError
+from . import _events, keyboard
 
 __all__ = ["Hotkey", "register", "unregister", "run", "stop", "wait", "has_permission", "request_permission"]
 
 _KEY_DOWN, _KEY_UP = 10, 11  # kCGEventKeyDown, kCGEventKeyUp
-_TAP_DISABLED = (0xFFFFFFFE, 0xFFFFFFFF)  # by timeout, by user input: turn the tap back on
 _KEY_CODE = 9  # kCGKeyboardEventKeycode
 _AUTOREPEAT = 8  # kCGKeyboardEventAutorepeat: the key is held, repeating
-_SESSION_TAP = 1  # kCGSessionEventTap
-_HEAD = 0  # kCGHeadInsertEventTap
+_FN = 1 << 23  # kCGEventFlagMaskSecondaryFn
 # The modifiers that tell shortcuts apart; Caps Lock and the keypad flag don't.
-_MODIFIERS = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 23)
+_MODIFIERS = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | _FN
+# The keys macOS flags with Fn whether or not Fn is held: the F-keys, the
+# arrows, and home, end, page up, page down, forward delete and help.
+_FN_FLAGGED = frozenset(
+    code
+    for name, code in keyboard._KEYS.items()
+    if (name.startswith("f") and name[1:].isdigit())
+    or name in ("left", "right", "up", "down", "home", "end", "page_up", "page_down", "forward_delete", "help")
+)
 
-_Callback = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p)
-
-
-@lru_cache(maxsize=None)
-def _graphics() -> ctypes.CDLL:
-    cg = framework("CoreGraphics")
-    pointer = ctypes.c_void_p
-    signatures = {
-        "CGPreflightListenEventAccess": ((), ctypes.c_bool),
-        "CGRequestListenEventAccess": ((), ctypes.c_bool),
-        "CGEventTapCreate": ((ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint64, _Callback, pointer), pointer),
-        "CGEventTapEnable": ((pointer, ctypes.c_bool), None),
-        "CGEventGetIntegerValueField": ((pointer, ctypes.c_uint32), ctypes.c_int64),
-        "CGEventGetFlags": ((pointer,), ctypes.c_uint64),
-    }
-    for name, (argtypes, restype) in signatures.items():
-        function = getattr(cg, name)
-        function.argtypes = argtypes
-        function.restype = restype
-    return cg
-
-
-@lru_cache(maxsize=None)
-def _run_loop() -> ctypes.CDLL:
-    cf = framework("CoreFoundation")
-    pointer = ctypes.c_void_p
-    cf.CFMachPortCreateRunLoopSource.argtypes = (pointer, pointer, ctypes.c_long)
-    cf.CFMachPortCreateRunLoopSource.restype = pointer
-    cf.CFMachPortInvalidate.argtypes = (pointer,)
-    cf.CFMachPortInvalidate.restype = None
-    cf.CFRunLoopGetCurrent.argtypes = ()
-    cf.CFRunLoopGetCurrent.restype = pointer
-    cf.CFRunLoopAddSource.argtypes = (pointer, pointer, pointer)
-    cf.CFRunLoopAddSource.restype = None
-    cf.CFRunLoopRemoveSource.argtypes = (pointer, pointer, pointer)
-    cf.CFRunLoopRemoveSource.restype = None
-    cf.CFRunLoopRunInMode.argtypes = (pointer, ctypes.c_double, ctypes.c_bool)
-    cf.CFRunLoopRunInMode.restype = ctypes.c_int32
-    cf.CFRelease.argtypes = (pointer,)
-    cf.CFRelease.restype = None
-    return cf
+_DENIED = (
+    "listening to the keyboard needs the Input Monitoring and Accessibility permissions: allow the app "
+    "running Python (your terminal or IDE) in System Settings › Privacy & Security, then restart it"
+)
 
 
 def has_permission() -> bool:
     """Whether this process may listen to the keyboard (Input Monitoring), without prompting the user."""
-    return bool(_graphics().CGPreflightListenEventAccess())
+    return bool(_events.graphics().CGPreflightListenEventAccess())
 
 
 def request_permission() -> bool:
@@ -95,7 +59,7 @@ def request_permission() -> bool:
     After the user allows the app running Python in System Settings ›
     Privacy & Security › Input Monitoring, that app must be restarted.
     """
-    return bool(_graphics().CGRequestListenEventAccess())
+    return bool(_events.graphics().CGRequestListenEventAccess())
 
 
 class Hotkey:
@@ -117,7 +81,17 @@ class Hotkey:
 
 _lock = threading.Lock()
 _registered: Dict[Tuple[int, int], Hotkey] = {}
-_stop = threading.Event()
+
+
+class _Listener(_events.Listener):
+    """A :func:`run` (``wanted`` is ``None``) or a :func:`wait` for the ``wanted`` combination, in progress."""
+
+    def __init__(self, wanted: Optional[Tuple[int, int]]) -> None:
+        super().__init__()
+        self.wanted = wanted
+
+
+_listeners = _events.Listeners()
 
 
 def _combination(keys: str) -> Tuple[int, int]:
@@ -155,72 +129,89 @@ def unregister(hotkey: Union[Hotkey, str]) -> None:
 
 
 def stop() -> None:
-    """Make :func:`run` return, from a callback or from another thread."""
-    _stop.set()
+    """Make :func:`run` and :func:`wait` return, from a callback or from another thread; all of them, if several run."""
+    _listeners.stop()
 
 
-def _listen(on_press: Callable[[Tuple[int, int]], bool], timeout: Optional[float]) -> None:
+def _match(code: int, flags: int) -> Optional[Tuple[int, int]]:
+    """The registered combination a key pressed with ``flags`` makes, if any."""
+    flags &= _MODIFIERS
+    with _lock:
+        if (code, flags) in _registered:
+            return (code, flags)
+        # macOS adds Fn to these keys by itself: "f5" is meant, unless "fn+f5" was registered.
+        if code in _FN_FLAGGED and flags & _FN and (code, flags & ~_FN) in _registered:
+            return (code, flags & ~_FN)
+    return None
+
+
+def _dispatch(combination: Tuple[int, int], caught: _Listener) -> None:
+    """
+    Queue a pressed shortcut for the listeners in progress: every :func:`wait` for it, and one to call its callback.
+
+    Only the first tap sees the keys it keeps from the apps, so the one that
+    caught them shares them out: a :func:`wait` on one thread isn't robbed by
+    a :func:`run` on another, and a callback isn't called twice.
+    """
+    active = [listener for listener in _listeners.active() if isinstance(listener, _Listener)]
+    waiting = [listener for listener in active if listener.wanted == combination]
+    runners = [listener for listener in active if listener.wanted is None]
+    for listener in waiting:
+        listener.pending.append(combination)
+    if runners:
+        runners[0].pending.append(combination)  # the oldest run() calls the callback
+    elif not waiting:
+        caught.pending.append(combination)  # no run(): the wait() that caught it calls it
+
+
+def _handler(listener: _Listener) -> Callable[[int, int], Optional[int]]:
+    """What the tap does with each key event: keep the registered shortcuts (and their key up) from the apps."""
+    cg = _events.graphics()
+    swallowing = set()
+
+    def handle(kind: int, event: int) -> Optional[int]:
+        if kind not in (_KEY_DOWN, _KEY_UP):
+            return event
+        code = int(cg.CGEventGetIntegerValueField(event, _KEY_CODE))
+        if kind == _KEY_UP:
+            if code in swallowing:
+                swallowing.discard(code)
+                return None
+            return event
+        combination = _match(code, int(cg.CGEventGetFlags(event)))
+        if combination is None:
+            return event
+        if not cg.CGEventGetIntegerValueField(event, _AUTOREPEAT):
+            _dispatch(combination, listener)
+        swallowing.add(code)
+        return None  # the app in front never sees it
+
+    return handle
+
+
+def _listen(on_press: Callable[[Tuple[int, int]], bool], wanted: Optional[Tuple[int, int]], timeout: Optional[float]) -> None:
     """
     Run an event tap on this thread until ``stop()``, the timeout, or ``on_press`` returning ``True``.
 
     ``on_press`` gets the pressed combinations that match a shortcut; it runs
     outside the tap, so a slow callback can't make macOS switch the tap off.
     """
-    cg, cf = _graphics(), _run_loop()
-    pending: List[Tuple[int, int]] = []
-    swallowing = set()
-    port_holder: List[int] = []
-
-    def tap(proxy: int, kind: int, event: int, refcon: int) -> Optional[int]:
-        if kind in _TAP_DISABLED:  # macOS switched the tap off: switch it back on
-            if port_holder:
-                cg.CGEventTapEnable(port_holder[0], True)
-            return event
-        if kind not in (_KEY_DOWN, _KEY_UP):
-            return event
-        code = cg.CGEventGetIntegerValueField(event, _KEY_CODE)
-        combination = (code, cg.CGEventGetFlags(event) & _MODIFIERS)
-        with _lock:
-            matches = combination in _registered
-        if kind == _KEY_DOWN and matches:
-            if not cg.CGEventGetIntegerValueField(event, _AUTOREPEAT):
-                pending.append(combination)
-            swallowing.add(code)
-            return None  # the app in front never sees it
-        if kind == _KEY_UP and code in swallowing:
-            swallowing.discard(code)
-            return None
-        return event
-
-    callback = _Callback(tap)  # kept alive for as long as the tap runs
-    mask = (1 << _KEY_DOWN) | (1 << _KEY_UP)
-    port = cg.CGEventTapCreate(_SESSION_TAP, _HEAD, 0, mask, callback, None)
-    if not port:
-        raise PermissionDeniedError(
-            "listening to the keyboard needs the Input Monitoring and Accessibility permissions: allow the app "
-            "running Python (your terminal or IDE) in System Settings › Privacy & Security, then restart it"
-        )
-    port_holder.append(port)
-    source = cf.CFMachPortCreateRunLoopSource(None, port, 0)
-    loop = cf.CFRunLoopGetCurrent()
-    mode = ctypes.c_void_p.in_dll(cf, "kCFRunLoopDefaultMode")
-    cf.CFRunLoopAddSource(loop, source, mode)
-    _stop.clear()
-    deadline = None if timeout is None else time.monotonic() + timeout
-    try:
-        while not _stop.is_set():
-            remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
-            if remaining <= 0:
-                break
-            cf.CFRunLoopRunInMode(mode, remaining, True)
-            while pending:
-                if on_press(pending.pop(0)):
+    listener = _Listener(wanted)
+    with _listeners.listening(listener):
+        tap = _events.Tap([_KEY_DOWN, _KEY_UP], _handler(listener), listener, listen_only=False, denied=_DENIED)
+        try:
+            for combination in listener.drain(timeout):
+                if on_press(combination):
                     return
-    finally:
-        cf.CFRunLoopRemoveSource(loop, source, mode)
-        cf.CFMachPortInvalidate(port)
-        cf.CFRelease(source)
-        cf.CFRelease(port)
+        finally:
+            tap.close()
+
+
+def _call(combination: Tuple[int, int]) -> None:
+    with _lock:
+        hotkey = _registered.get(combination)
+    if hotkey is not None:
+        hotkey.callback()
 
 
 def run(*, timeout: Optional[float] = None) -> None:
@@ -232,13 +223,10 @@ def run(*, timeout: Optional[float] = None) -> None:
     """
 
     def call(combination: Tuple[int, int]) -> bool:
-        with _lock:
-            hotkey = _registered.get(combination)
-        if hotkey is not None:
-            hotkey.callback()
+        _call(combination)
         return False
 
-    _listen(call, timeout)
+    _listen(call, None, timeout)
 
 
 def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
@@ -251,9 +239,9 @@ def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
         macos.hotkeys.wait("ctrl+option+s")
     """
     combination = _combination(keys)
-    temporary = combination not in _registered
-    if temporary:
-        with _lock:
+    with _lock:
+        temporary = combination not in _registered
+        if temporary:
             _registered[combination] = Hotkey(keys, combination[0], combination[1], lambda: None)
     pressed: List[bool] = []
 
@@ -261,14 +249,11 @@ def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
         if hit == combination:
             pressed.append(True)
             return True
-        with _lock:
-            hotkey = _registered.get(hit)
-        if hotkey is not None:  # another shortcut: still serve it
-            hotkey.callback()
+        _call(hit)  # another shortcut, and no run() to serve it: still serve it
         return False
 
     try:
-        _listen(check, timeout)
+        _listen(check, combination, timeout)
     finally:
         if temporary:
             with _lock:

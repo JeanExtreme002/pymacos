@@ -147,3 +147,20 @@ def test_video_editing(speech, tmp_path):
         groups = {_objc.send(track, "alternateGroupID", restype=ctypes.c_int32) for track in sounds}
     assert (languages, enabled, len(groups)) == (["por", "eng"], [True, False], 1)
     assert video.info(dual).duration == 1.0
+
+
+def test_reverse_reads_the_frames_a_few_at_a_time(tmp_path, monkeypatch):
+    clip = _brightening_clip(tmp_path)
+    monkeypatch.setattr(macos.video, "_FRAME_BUDGET", 320 * 160 * 4 * 5)  # five frames a batch
+    backwards = macos.video.reverse(clip, tmp_path / "backwards.mov")  # no sound: written straight to it
+    assert not macos.video.info(backwards).has_audio
+
+    def square(at):
+        shot = tmp_path / "square.png"
+        shot.write_bytes(macos.video.frame(backwards, at=at))
+        crop = macos.image.crop(shot, tmp_path / "s.png", (150, 15, 20, 15))
+        return int(macos.image.dominant_colors(crop, 1)[0][1:3], 16)
+
+    levels = [square(at) for at in (0.05, 0.3, 0.55, 0.8, 0.95)]
+    assert levels == sorted(levels, reverse=True) and levels[0] - levels[-1] > 150  # darker and darker, across batches
+    assert len(macos.video.frames(clip, every=0.125)) == 8  # across batches too

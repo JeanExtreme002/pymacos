@@ -44,10 +44,16 @@ macos.settings.apply({"dock": {"autohide": True, "size": 48}, "finder": {"show_e
 ```
 
 It only changes the settings that differ, restarts the Dock and Finder once
-at the end, and returns the names of those it changed. An unknown name
-raises `ValueError` before anything changes; settings this Mac doesn't have are
-skipped. Some settings wait for the
-next login, as their own pages say.
+at the end, and returns the names of those it changed. An unknown name or an
+invalid value (a size out of range, an unknown hot corner action, a key that
+can't be remapped) raises `ValueError` before anything changes, naming every
+bad entry. If a change still fails midway (a missing permission, say), the
+settings already changed are put back before the error is raised. Settings
+this Mac doesn't have are skipped. Some settings wait for the next login, as
+their own pages say.
+
+Key remappings are swapped in as a whole: the new list replaces the old one in
+one step, so a bad entry never leaves the keyboard without its remappings.
 
 ## Reference
 

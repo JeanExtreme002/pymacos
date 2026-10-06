@@ -194,11 +194,7 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
     if threading.current_thread() is not threading.main_thread():
         return fallback
     carbon = _text_input()
-    cf = framework("CoreFoundation")
-    cf.CFDataGetBytePtr.argtypes = (ctypes.c_void_p,)
-    cf.CFDataGetBytePtr.restype = ctypes.c_void_p
-    cf.CFRelease.argtypes = (ctypes.c_void_p,)
-    cf.CFRelease.restype = None
+    cf = _cf.lib()
     source = carbon.TISCopyCurrentKeyboardLayoutInputSource()
     if not source:
         return fallback
@@ -227,7 +223,7 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
                         found[char] = (code, shifted)
         return found or fallback
     finally:
-        cf.CFRelease(source)
+        _cf.release(source)
 
 
 def _parse(keys: str) -> Tuple[List[Tuple[int, int]], int, bool]:
@@ -268,11 +264,12 @@ def _parse(keys: str) -> Tuple[List[Tuple[int, int]], int, bool]:
     raise ValueError("unknown key {!r}; use a character or a name such as 'enter', 'tab', 'left' or 'f5'".format(key))
 
 
-def _key_event(code: int, down: bool, flags: int) -> int:
+def _key_event(code: int, down: bool, flags: int, *, held: bool = True) -> int:
+    """An owned keyboard event; ``held`` adds the modifiers :func:`hold` keeps down on this thread."""
     event = _events.graphics().CGEventCreateKeyboardEvent(None, code, down)
     if not event:
         raise MacOSError("could not create a keyboard event")
-    _events.graphics().CGEventSetFlags(event, flags | _events.held_flags())
+    _events.graphics().CGEventSetFlags(event, flags | (_events.held_flags() if held else 0))
     return event
 
 
@@ -324,7 +321,9 @@ def hold(*keys: str) -> Iterator[None]:
             macos.mouse.drag(600, 300)
 
     Each key is written as for :func:`press` (``"cmd+shift"`` holds both).
-    The keys are released even when the block raises. Needs the
+    The keys are released even when the block raises. They modify what this
+    thread posts only: clicks and keys sent from other threads meanwhile
+    don't carry them, nor does text :func:`type` types. Needs the
     Accessibility permission.
     """
     if not keys:
@@ -338,17 +337,25 @@ def hold(*keys: str) -> Iterator[None]:
             if entry not in presses:
                 presses.append(entry)
     _events.require_permission()
+    held = _events.held()
     pressed: List[Tuple[int, int]] = []
     try:
         for flag, code in presses:
-            _events.HELD.append(flag)
+            held.append(flag)
             pressed.append((flag, code))
             _events.post(_key_event(code, True, 0))
         yield
     finally:
+        # Each key on its own: one that fails to come up must not leave the others down.
+        failure: Optional[BaseException] = None
         for flag, code in reversed(pressed):
-            _events.HELD.remove(flag)
-            _events.post(_key_event(code, False, 0))
+            held.remove(flag)
+            try:
+                _events.post(_key_event(code, False, 0))
+            except Exception as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
 
 
 _ALPHA_SHIFT = 1 << 16  # kCGEventFlagMaskAlphaShift: Caps Lock is on
@@ -382,8 +389,9 @@ def type(text: str, *, interval: float = 0.0) -> None:
 
     Any character works (accents, emoji...), whatever the keyboard layout.
     New lines press Enter and tabs press Tab. ``interval`` is the pause
-    between characters, in seconds, for apps that can't keep up. Needs the
-    Accessibility permission.
+    between characters, in seconds, for apps that can't keep up. The keys
+    :func:`hold` holds down don't apply: the text comes out as written. Needs
+    the Accessibility permission.
     """
     if interval < 0:
         raise ValueError("interval must not be negative, not {}".format(interval))
@@ -401,13 +409,14 @@ def type(text: str, *, interval: float = 0.0) -> None:
     for piece in pieces:
         if piece in ("\n", "\t"):
             code = _KEYS["enter" if piece == "\n" else "tab"]
-            _events.post(_key_event(code, True, 0))
-            _events.post(_key_event(code, False, 0))
+            _events.post(_key_event(code, True, 0, held=False))
+            _events.post(_key_event(code, False, 0, held=False))
         else:
             encoded = piece.encode("utf-16-le")
             units = (ctypes.c_uint16 * (len(encoded) // 2)).from_buffer_copy(encoded)
+            # The text rides on the "a" key: with a held Cmd, it would be Cmd+A.
             for down in (True, False):
-                event = _key_event(0, down, 0)
+                event = _key_event(0, down, 0, held=False)
                 cg.CGEventKeyboardSetUnicodeString(event, len(units), units)
                 _events.post(event)
         if interval:
@@ -415,6 +424,13 @@ def type(text: str, *, interval: float = 0.0) -> None:
 
 
 # Keyboard layouts (input sources), through Text Input Sources.
+
+
+def _require_main_thread(what: str) -> None:
+    # Text Input Sources only work on the main thread: elsewhere macOS may
+    # answer wrong, or stop the process.
+    if threading.current_thread() is not threading.main_thread():
+        raise MacOSError("{} only works on the main thread, as macOS requires for keyboard layouts".format(what))
 
 
 def _tis_constant(name: str) -> int:
@@ -452,14 +468,16 @@ def layouts() -> List[str]:
     """
     Return the keyboard layouts and input methods enabled in the menu bar's input menu: ``['ABC', 'French']``.
 
-    Add more in System Settings › Keyboard › Text Input.
+    Add more in System Settings › Keyboard › Text Input. Call it from the main thread.
     """
+    _require_main_thread("macos.keyboard.layouts()")
     with _input_sources() as sources:
         return [name for _, name, _ in sources]
 
 
 def layout() -> str:
-    """Return the keyboard layout (input source) in use, such as ``'ABC'`` or ``'French'``."""
+    """Return the keyboard layout (input source) in use, such as ``'ABC'`` or ``'French'``. Call it from the main thread."""
+    _require_main_thread("macos.keyboard.layout()")
     carbon = _text_input()
     with _cf.owned(carbon.TISCopyCurrentKeyboardInputSource()) as source:
         if not source:
@@ -473,8 +491,9 @@ def set_layout(name: str) -> str:
 
     ``name`` is as :func:`layouts` returns it, its identifier (such as
     ``'com.apple.keylayout.ABC'``) or part of its name when that matches only
-    one layout.
+    one layout. Call it from the main thread.
     """
+    _require_main_thread("macos.keyboard.set_layout()")
     with _input_sources() as sources:
         exact = [entry for entry in sources if name in (entry[1], entry[2])]
         loose = [entry for entry in sources if name.casefold() in entry[1].casefold()]
@@ -503,10 +522,12 @@ def _backlight() -> Tuple[int, int]:
     except LookupError:
         raise NotSupportedError("this version of macOS doesn't expose the keyboard backlight") from None
     client = _objc.new("KeyboardBrightnessClient")
-    ids = [
-        int(_objc.send(number, "unsignedLongLongValue", restype=ctypes.c_uint64))
-        for number in _objc.nsarray(_objc.send(client, "copyKeyboardBacklightIDs"))
-    ]
+    found = _objc.send(client, "copyKeyboardBacklightIDs")  # a copy: ours to release
+    try:
+        ids = [int(_objc.send(number, "unsignedLongLongValue", restype=ctypes.c_uint64)) for number in _objc.nsarray(found)]
+    finally:
+        if found:
+            _objc.send(found, "release", restype=None)
     if not ids:
         raise NotSupportedError("this Mac has no keyboard backlight")
     built_in = [
@@ -973,15 +994,15 @@ _SHORTCUT_MODIFIERS = (("cmd", "@"), ("shift", "$"), ("option", "~"), ("ctrl", "
 _SHORTCUT_MODIFIER_ALIASES = {"command": "cmd", "control": "ctrl", "opt": "option", "alt": "option"}
 # Keys that aren't a character, as AppKit's code points for them (NSUpArrowFunctionKey...).
 _SHORTCUT_KEYS = {
-    "up": "",
-    "down": "",
-    "left": "",
-    "right": "",
-    "forward_delete": "",
-    "home": "",
-    "end": "",
-    "page_up": "",
-    "page_down": "",
+    "up": "\uf700",
+    "down": "\uf701",
+    "left": "\uf702",
+    "right": "\uf703",
+    "forward_delete": "\uf728",
+    "home": "\uf729",
+    "end": "\uf72b",
+    "page_up": "\uf72c",
+    "page_down": "\uf72d",
     "delete": "\x7f",
     "backspace": "\x7f",
     "tab": "\t",

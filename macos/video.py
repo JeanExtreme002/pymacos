@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _media, _objc
+from . import _cf, _files, _media, _objc
 from ._system import framework, run as _run
 from .errors import MacOSError
 
@@ -102,11 +102,7 @@ def _load() -> None:
     framework("AppKit")
 
 
-def _existing(path: PathLike) -> Path:
-    resolved = Path(path).expanduser().absolute()
-    if not resolved.exists():
-        raise FileNotFoundError(str(resolved))
-    return resolved
+_existing = _files.existing
 
 
 def _asset(path: Path) -> int:
@@ -133,6 +129,51 @@ def _core_media() -> ctypes.CDLL:
     media.CMFormatDescriptionGetMediaSubType.argtypes = (ctypes.c_void_p,)
     media.CMFormatDescriptionGetMediaSubType.restype = ctypes.c_uint32
     return media
+
+
+@lru_cache(maxsize=None)
+def _core_video() -> ctypes.CDLL:
+    video_library = framework("CoreVideo")
+    pointer = ctypes.c_void_p
+    signatures = {
+        "CVPixelBufferCreate": (
+            (pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint32, pointer, ctypes.POINTER(pointer)),
+            ctypes.c_int32,
+        ),
+        "CVPixelBufferLockBaseAddress": ((pointer, ctypes.c_uint64), ctypes.c_int32),
+        "CVPixelBufferUnlockBaseAddress": ((pointer, ctypes.c_uint64), ctypes.c_int32),
+        "CVPixelBufferGetBaseAddress": ((pointer,), pointer),
+        "CVPixelBufferGetBytesPerRow": ((pointer,), ctypes.c_size_t),
+    }
+    for name, (argtypes, restype) in signatures.items():
+        function = getattr(video_library, name)
+        function.argtypes = argtypes
+        function.restype = restype
+    return video_library
+
+
+@lru_cache(maxsize=None)
+def _graphics() -> ctypes.CDLL:
+    graphics = framework("CoreGraphics")
+    pointer = ctypes.c_void_p
+    signatures = {
+        "CGBitmapContextCreate": (
+            (pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32),
+            pointer,
+        ),
+        "CGContextSetRGBFillColor": ((pointer, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double), None),
+        "CGContextFillRect": ((pointer, _objc.CGRect), None),
+        "CGContextDrawImage": ((pointer, _objc.CGRect, pointer), None),
+        "CGContextRelease": ((pointer,), None),
+        "CGImageGetWidth": ((pointer,), ctypes.c_size_t),
+        "CGImageGetHeight": ((pointer,), ctypes.c_size_t),
+        "CGAffineTransformConcat": ((_objc.CGAffineTransform, _objc.CGAffineTransform), _objc.CGAffineTransform),
+    }
+    for name, (argtypes, restype) in signatures.items():
+        function = getattr(graphics, name)
+        function.argtypes = argtypes
+        function.restype = restype
+    return graphics
 
 
 def _upright_size(track: int) -> Tuple[int, int]:
@@ -277,6 +318,9 @@ def convert(
         preset = "PresetHEVCHighestQuality" if hevc and quality == "high" else _QUALITY[quality]
         if hevc and quality != "high":
             raise ValueError("hevc=True only has the 'high' quality; pass height= to make it smaller")
+    if _same_file(original, target):
+        # avconvert --replace would delete the source before reading it.
+        raise ValueError("convert() can't write over its source; pick another output")
     target.parent.mkdir(parents=True, exist_ok=True)
     args = ["avconvert", "--source", str(original), "--output", str(target), "--preset", preset, "--replace"]
     if start is not None:
@@ -285,6 +329,14 @@ def convert(
         args += ["--duration", str(duration)]
     _run(args)
     return target
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    """Whether two paths are the same file (through a link or another spelling, too)."""
+    try:
+        return first == second or os.path.samefile(str(first), str(second))
+    except OSError:  # one of them doesn't exist
+        return False
 
 
 def _frames_at(
@@ -335,6 +387,39 @@ def _frames_at(
     return pictures
 
 
+_FRAME_BUDGET = 256 * 1024 * 1024  # bytes of decoded frames held at once while streaming them
+
+
+def _batch(width: int, height: int) -> int:
+    """How many frames of ``width`` x ``height`` pixels to read at once: about 256 MB of them, 1 to 64."""
+    return max(1, min(64, _FRAME_BUDGET // max(1, width * height * 4)))
+
+
+def _frame_stream(
+    source: Path, times: Sequence[float], *, batch: int, width: Optional[int] = None, tolerance: float = 0.0
+) -> Generator[int, None, None]:
+    """
+    The frames shown at ``times``, in that order, like :func:`_frames_at`, but ``batch`` at a time.
+
+    Each ``CGImage`` is lent: it's released once the batch it came in is
+    done, so at most ``batch`` frames are in memory, however long the video.
+    Within a batch the frames are read in the video's order, which is how the
+    decoder goes fast, then handed out in the order asked: a batch of
+    ``times`` going backwards is read forwards and given reversed.
+    """
+    for begin in range(0, len(times), batch):
+        wanted = list(times[begin : begin + batch])
+        order = sorted(range(len(wanted)), key=wanted.__getitem__)
+        pictures = _frames_at(source, [wanted[index] for index in order], width=width, tolerance=tolerance)
+        try:
+            by_index = dict(zip(order, pictures))
+            for index in range(len(wanted)):
+                yield by_index[index]
+        finally:
+            for picture in pictures:
+                _cf.release(picture)
+
+
 def to_gif(
     source: PathLike,
     output: PathLike,
@@ -381,29 +466,29 @@ def to_gif(
 
     original = _existing(source)
     io = image._io()
-    pictures: List[int] = []
-    try:
-        # Half a frame either way: close enough, and much faster than exact frames.
-        pictures = _frames_at(original, times, width=width if width < details.width else None, tolerance=step / 2)
+    scaled = width if width < details.width else None
+    high = round(details.height * scaled / details.width) if scaled and details.width else details.height
+    # Half a frame either way: close enough, and much faster than exact frames. A batch at a time: the GIF
+    # encoder keeps what it needs of each frame, so every frame needn't be held decoded at once.
+    pictures = _frame_stream(original, times, batch=_batch(scaled or details.width, high), width=scaled, tolerance=step / 2)
 
-        delay = round(step, 2)  # GIF delays are in hundredths of a second
-        # LoopCount 0 loops forever. Without it, ImageIO writes no loop block
-        # at all, and viewers play the GIF once.
-        repeat = _cf.from_python({"{GIF}": {"LoopCount": 0}}) if loop else None
-        timing = _cf.from_python({"{GIF}": {"DelayTime": delay, "UnclampedDelayTime": delay}})
+    delay = round(step, 2)  # GIF delays are in hundredths of a second
+    # LoopCount 0 loops forever. Without it, ImageIO writes no loop block
+    # at all, and viewers play the GIF once.
+    repeat = _cf.from_python({"{GIF}": {"LoopCount": 0}}) if loop else None
+    timing = _cf.from_python({"{GIF}": {"DelayTime": delay, "UnclampedDelayTime": delay}})
 
-        def add(destination: int) -> None:
-            if repeat:
-                io.CGImageDestinationSetProperties(destination, repeat)
-            for picture in pictures:
-                io.CGImageDestinationAddImage(destination, picture, timing)
-
-        with _cf.owned(repeat), _cf.owned(timing):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            return image._write(target, "com.compuserve.gif", add, len(pictures))
-    finally:
+    def add(destination: int) -> None:
+        if repeat:
+            io.CGImageDestinationSetProperties(destination, repeat)
         for picture in pictures:
-            _cf.release(picture)
+            io.CGImageDestinationAddImage(destination, picture, timing)
+
+    try:
+        with _cf.owned(repeat), _cf.owned(timing):
+            return image._write(target, "com.compuserve.gif", add, len(times))
+    finally:
+        pictures.close()  # releases the batch being read if writing failed
 
 
 def frames(path: PathLike, every: float = 1.0, *, size: Optional[int] = None) -> List[bytes]:
@@ -427,13 +512,15 @@ def frames(path: PathLike, every: float = 1.0, *, size: Optional[int] = None) ->
     if size is not None and details.width and details.height:
         width = size if details.width >= details.height else max(1, round(size * details.width / details.height))
     _load()
-    pictures = _frames_at(_existing(path), times, width=width, tolerance=min(every / 2, 0.5))
+    high = round(details.height * width / details.width) if width and details.width else details.height
+    pictures = _frame_stream(
+        _existing(path), times, batch=_batch(width or details.width, high), width=width, tolerance=min(every / 2, 0.5)
+    )
     try:
-        framework("AppKit")
-        return [_objc.cgimage_png(pictures.pop(0)) for _ in range(len(pictures))]
+        # Encoded as they come, a batch of frames at a time: only the PNGs pile up.
+        return [_objc.cgimage_png(_cf.retain(picture)) for picture in pictures]
     finally:
-        for picture in pictures:
-            _cf.release(picture)
+        pictures.close()
 
 
 def _target(output: PathLike, allowed: Sequence[str] = (".mov", ".mp4", ".m4v")) -> Path:
@@ -539,10 +626,7 @@ def speed(source: PathLike, output: PathLike, factor: float) -> Path:
 
 
 def _concat_transforms(first: _objc.CGAffineTransform, second: _objc.CGAffineTransform) -> _objc.CGAffineTransform:
-    graphics = framework("CoreGraphics")
-    graphics.CGAffineTransformConcat.argtypes = (_objc.CGAffineTransform, _objc.CGAffineTransform)
-    graphics.CGAffineTransformConcat.restype = _objc.CGAffineTransform
-    return graphics.CGAffineTransformConcat(first, second)
+    return _graphics().CGAffineTransformConcat(first, second)
 
 
 def rotate(source: PathLike, output: PathLike, degrees: int) -> Path:
@@ -731,61 +815,45 @@ def _copy_picture(source: int, target: int, length: float) -> None:
 
 def _pixel_buffer(picture: int, width: int, height: int) -> int:
     """An owned ``CVPixelBuffer`` of ``width`` x ``height``: ``picture`` fitted in, on black."""
-    video_library = framework("CoreVideo")
-    graphics = framework("CoreGraphics")
-    pointer = ctypes.c_void_p
-    video_library.CVPixelBufferCreate.argtypes = (
-        pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint32, pointer, ctypes.POINTER(pointer)
-    )
-    video_library.CVPixelBufferCreate.restype = ctypes.c_int32
-    for name in ("CVPixelBufferLockBaseAddress", "CVPixelBufferUnlockBaseAddress"):
-        getattr(video_library, name).argtypes = (pointer, ctypes.c_uint64)
-        getattr(video_library, name).restype = ctypes.c_int32
-    video_library.CVPixelBufferGetBaseAddress.argtypes = (pointer,)
-    video_library.CVPixelBufferGetBaseAddress.restype = pointer
-    video_library.CVPixelBufferGetBytesPerRow.argtypes = (pointer,)
-    video_library.CVPixelBufferGetBytesPerRow.restype = ctypes.c_size_t
-    graphics.CGBitmapContextCreate.argtypes = (
-        pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32
-    )
-    graphics.CGBitmapContextCreate.restype = pointer
-    graphics.CGContextSetRGBFillColor.argtypes = (pointer, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double)
-    graphics.CGContextFillRect.argtypes = (pointer, _objc.CGRect)
-    graphics.CGContextDrawImage.argtypes = (pointer, _objc.CGRect, pointer)
-    graphics.CGContextRelease.argtypes = (pointer,)
-    graphics.CGImageGetWidth.argtypes = graphics.CGImageGetHeight.argtypes = (pointer,)
-    graphics.CGImageGetWidth.restype = graphics.CGImageGetHeight.restype = ctypes.c_size_t
     from .image import _srgb
 
-    buffer = pointer()
+    video_library, graphics = _core_video(), _graphics()
+    buffer = ctypes.c_void_p()
     status = video_library.CVPixelBufferCreate(None, width, height, _BGRA, None, ctypes.byref(buffer))
     if status != 0 or not buffer:
         raise MacOSError("could not make a video frame (CVReturn {})".format(status))
-    video_library.CVPixelBufferLockBaseAddress(buffer, 0)
     try:
-        context = graphics.CGBitmapContextCreate(
-            video_library.CVPixelBufferGetBaseAddress(buffer),
-            width,
-            height,
-            8,
-            video_library.CVPixelBufferGetBytesPerRow(buffer),
-            _srgb(),
-            2 | (2 << 12),  # kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little: BGRA
-        )
+        video_library.CVPixelBufferLockBaseAddress(buffer, 0)
         try:
-            graphics.CGContextSetRGBFillColor(context, 0, 0, 0, 1)
-            graphics.CGContextFillRect(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)))
-            source_width, source_height = graphics.CGImageGetWidth(picture), graphics.CGImageGetHeight(picture)
-            scale = min(width / source_width, height / source_height)
-            drawn_width, drawn_height = source_width * scale, source_height * scale
-            area = _objc.CGRect(
-                _objc.CGPoint((width - drawn_width) / 2, (height - drawn_height) / 2), _objc.CGSize(drawn_width, drawn_height)
+            context = graphics.CGBitmapContextCreate(
+                video_library.CVPixelBufferGetBaseAddress(buffer),
+                width,
+                height,
+                8,
+                video_library.CVPixelBufferGetBytesPerRow(buffer),
+                _srgb(),
+                2 | (2 << 12),  # kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little: BGRA
             )
-            graphics.CGContextDrawImage(context, area, picture)
+            if not context:
+                raise MacOSError("could not draw a video frame of {} x {} pixels".format(width, height))
+            try:
+                graphics.CGContextSetRGBFillColor(context, 0, 0, 0, 1)
+                graphics.CGContextFillRect(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)))
+                source_width, source_height = graphics.CGImageGetWidth(picture), graphics.CGImageGetHeight(picture)
+                scale = min(width / max(source_width, 1), height / max(source_height, 1))
+                drawn_width, drawn_height = source_width * scale, source_height * scale
+                area = _objc.CGRect(
+                    _objc.CGPoint((width - drawn_width) / 2, (height - drawn_height) / 2),
+                    _objc.CGSize(drawn_width, drawn_height),
+                )
+                graphics.CGContextDrawImage(context, area, picture)
+            finally:
+                graphics.CGContextRelease(context)
         finally:
-            graphics.CGContextRelease(context)
-    finally:
-        video_library.CVPixelBufferUnlockBaseAddress(buffer, 0)
+            video_library.CVPixelBufferUnlockBaseAddress(buffer, 0)
+    except BaseException:
+        _cf.release(buffer.value)
+        raise
     return int(buffer.value or 0)
 
 
@@ -808,13 +876,10 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
     ``pictures`` is read one at a time, so a generator keeps only one image in memory.
     """
     _load()
-    framework("CoreVideo")
     width, height = width - width % 2, height - height % 2  # encoders need even sizes
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle, name = tempfile.mkstemp(dir=str(target.parent), suffix=target.suffix)
-    os.close(handle)
-    os.unlink(name)  # the writer refuses to replace a file
-    try:
+    # Beside the target, at a path where nothing is yet: the writer refuses to replace a file.
+    with _files.replacing(target) as temporary:
+        name = str(temporary)
         with _objc.autorelease_pool():
             error = ctypes.c_void_p()
             writer = _objc.send(
@@ -893,10 +958,6 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
                 raise MacOSError("the video didn't finish writing")
             if status() != _WRITTEN:
                 raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
-        os.replace(name, str(target))
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
     return target
 
 
@@ -982,19 +1043,23 @@ def reverse(source: PathLike, output: PathLike) -> Path:
     rate = min(details.fps or 30.0, 60.0)
     count = max(1, int(details.duration * rate))
     times = [max(0.0, details.duration - (index + 0.5) / rate) for index in range(count)]
-    pictures = _frames_at(original, times, tolerance=0.5 / rate)
+    # From the end, a batch at a time, each read forwards and handed out backwards: never more than about
+    # 256 MB of frames decoded at once, where reading them all first would hold the whole video (some 20 GB
+    # for ten seconds of 4K at 60 fps).
+    pictures = _frame_stream(original, times, batch=_batch(details.width, details.height), tolerance=0.5 / rate)
+    if not details.has_audio:
+        try:
+            return _write_frames(pictures, target, rate, details.width, details.height)
+        finally:
+            pictures.close()  # releases the batch being encoded if writing failed
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Beside the output, so the silent video can be moved into place, and cleaned up whatever fails.
-    with tempfile.TemporaryDirectory(dir=str(target.parent)) as folder:
+    # Beside the output, and cleaned up whatever fails.
+    with tempfile.TemporaryDirectory(dir=str(target.parent), prefix=".reverse-") as folder:
         silent = Path(folder) / ("frames" + target.suffix)
         try:
             _write_frames(pictures, silent, rate, details.width, details.height)
         finally:
-            for picture in pictures:
-                _cf.release(picture)
-        if not details.has_audio:
-            os.replace(str(silent), str(target))
-            return target
+            pictures.close()
         backwards = audio.reverse(original, Path(folder) / "backwards.m4a")
         return add_audio(silent, backwards, target, replace=True)
 

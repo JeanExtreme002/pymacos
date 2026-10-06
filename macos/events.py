@@ -15,18 +15,18 @@ The events come from ``NSWorkspace`` and the system's distributed
 notifications, the same ones apps listen to. No permission is needed.
 """
 
-import collections
 import ctypes
 import inspect
 import threading
-import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import _cf, _objc, apps
+from . import _cf, _events, _objc, apps
 from ._system import framework
+from .errors import MacOSError
 
 __all__ = ["Event", "Handler", "NAMES", "on", "off", "run", "stop", "wait"]
 
@@ -96,7 +96,7 @@ class Handler:
 
 _lock = threading.Lock()
 _handlers: List[Handler] = []
-_stop = threading.Event()
+_listeners = _events.Listeners()  # the run() and wait() calls in progress, each with its own events
 
 
 def _check(name: str) -> None:
@@ -152,8 +152,8 @@ def off(handler: "Handler | str") -> None:
 
 
 def stop() -> None:
-    """Make :func:`run` return, from a callback or from another thread."""
-    _stop.set()
+    """Make :func:`run` and :func:`wait` return, from a callback or from another thread; all of them, if several run."""
+    _listeners.stop()
 
 
 @lru_cache(maxsize=None)
@@ -179,8 +179,10 @@ def _center(kind: str) -> int:
 
 _DELIVER_IMMEDIATELY = 4  # NSNotificationSuspensionBehaviorDeliverImmediately
 
-_received: "collections.deque[Event]" = collections.deque()
 _Handle = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+
+# Each observer, to the listener it feeds: one class serves them all.
+_observers: Dict[int, _events.Listener] = {}
 
 
 def _event(notification: int) -> Optional[Event]:
@@ -201,12 +203,17 @@ def _event(notification: int) -> Optional[Event]:
 
 def _handle(self: int, selector: int, notification: int) -> None:
     # Only records the event: the callbacks run outside AppKit's call, where an exception can propagate.
+    with _lock:
+        listener = _observers.get(self)
+    if listener is None:
+        return
     try:
         event = _event(notification)
-    except Exception:  # an exception must not cross back into Objective-C
+    except Exception as error:  # an exception must not cross back into Objective-C: run() raises it
+        listener.errors.append(error)
         return
     if event is not None:
-        _received.append(event)
+        listener.pending.append(event)
 
 
 _PowerCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
@@ -230,51 +237,66 @@ def _on_charger() -> bool:
         return _cf.to_str(_iokit().IOPSGetProvidingPowerSourceType(info)) != "Battery Power"
 
 
-class _PowerWatch:
-    """Turns IOKit's power-source notifications, on this thread's run loop, into power events."""
+class _Watch:
+    """
+    A source of events other than the notification centers, on this thread's run loop until :meth:`close`.
 
-    def __init__(self) -> None:
-        self.plugged = _on_charger()
-        self.callback = _PowerCallback(self.changed)  # kept alive while the source is scheduled
-        self.source = _RunLoopSource(_iokit().IOPSNotificationCreateRunLoopSource(self.callback, None))
+    Its events go to ``listener``. Its C callback is an attribute, kept alive
+    as long as the watcher: :meth:`close` takes the source off the run loop
+    first. A constructor that fails half-way closes what it made, so nothing
+    stays scheduled with a callback about to be freed.
+    """
 
-    def changed(self, context: int) -> None:
+    def __init__(self, listener: _events.Listener) -> None:
+        self.listener = listener
+        self.source: Optional[_cf.RunLoopSource] = None
         try:
-            plugged = _on_charger()
-        except Exception:  # an exception must not cross back into IOKit
-            return
-        if plugged != self.plugged:
-            self.plugged = plugged
-            _received.append(Event("power_connected" if plugged else "power_disconnected"))
+            self.start()
+        except BaseException:
+            self.close()
+            raise
+
+    def start(self) -> None:
+        raise NotImplementedError
+
+    def emit(self, name: str, **details: Any) -> None:
+        self.listener.pending.append(Event(name, **details))
+
+    def guarded(self, update: Callable[[], None]) -> None:
+        """Run ``update`` for a C callback: an exception must not cross back into C, so the listener raises it."""
+        try:
+            update()
+        except Exception as error:
+            self.listener.errors.append(error)
 
     def close(self) -> None:
-        if self.source.source:
-            _cf.release(self.source.source)
-        self.source.close()
+        if self.source is not None:
+            self.source.close()
+            self.source = None
+
+
+class _PowerWatch(_Watch):
+    """Turns IOKit's power-source notifications, on this thread's run loop, into power events."""
+
+    def start(self) -> None:
+        self.plugged = _on_charger()
+        self.callback = _PowerCallback(self.changed)  # kept alive while the source is scheduled
+        self.source = _cf.RunLoopSource(
+            _iokit().IOPSNotificationCreateRunLoopSource(self.callback, None), owned=True, what="watch the power source"
+        )
+
+    def changed(self, context: int) -> None:
+        self.guarded(self.update)
+
+    def update(self) -> None:
+        plugged = _on_charger()
+        if plugged != self.plugged:
+            self.plugged = plugged
+            self.emit("power_connected" if plugged else "power_disconnected")
 
 
 _Store = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _NETWORK_KEYS = ("State:/Network/Global/IPv4", "State:/Network/Global/IPv6")
-
-
-class _RunLoopSource:
-    """A CoreFoundation run loop source on this thread, removed and released by :meth:`close`."""
-
-    def __init__(self, source: Optional[int]) -> None:
-        run_loop = framework("CoreFoundation")
-        run_loop.CFRunLoopGetCurrent.restype = ctypes.c_void_p
-        run_loop.CFRunLoopAddSource.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-        run_loop.CFRunLoopRemoveSource.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-        self.source = source
-        self.loop = run_loop.CFRunLoopGetCurrent()
-        self.mode = ctypes.c_void_p.in_dll(run_loop, "kCFRunLoopDefaultMode")
-        if source:
-            run_loop.CFRunLoopAddSource(self.loop, source, self.mode)
-
-    def close(self) -> None:
-        if self.source:
-            framework("CoreFoundation").CFRunLoopRemoveSource(self.loop, self.source, self.mode)
-            self.source = None
 
 
 @lru_cache(maxsize=None)
@@ -292,7 +314,7 @@ def _configuration() -> ctypes.CDLL:
     return sc
 
 
-class _NetworkWatch:
+class _NetworkWatch(_Watch):
     """
     Network events, from the dynamic store configd keeps: the global IPv4 and IPv6 state.
 
@@ -300,15 +322,22 @@ class _NetworkWatch:
     (interface, router, addresses) is an event.
     """
 
-    def __init__(self) -> None:
+    store: Optional[int] = None
+
+    def start(self) -> None:
         sc = _configuration()
         self.callback = _Store(self.changed)
         with _cf.owned(_cf.string("pymacos.events")) as name:
             self.store = sc.SCDynamicStoreCreate(None, name, self.callback, None)
+        if not self.store:
+            raise MacOSError("could not watch the network: configd's dynamic store is out of reach")
         self.state = self.read()
         with _cf.owned(_cf.from_python(list(_NETWORK_KEYS))) as keys:
-            sc.SCDynamicStoreSetNotificationKeys(self.store, keys, None)
-        self.source = _RunLoopSource(sc.SCDynamicStoreCreateRunLoopSource(None, self.store, 0) if self.store else None)
+            if not sc.SCDynamicStoreSetNotificationKeys(self.store, keys, None):
+                raise MacOSError("could not watch the network: configd refused the keys")
+        self.source = _cf.RunLoopSource(
+            sc.SCDynamicStoreCreateRunLoopSource(None, self.store, 0), owned=True, what="watch the network"
+        )
 
     def read(self) -> Tuple[object, ...]:
         values = []
@@ -319,20 +348,18 @@ class _NetworkWatch:
         return tuple(values)
 
     def changed(self, store: int, keys: int, info: int) -> None:
-        try:
-            state = self.read()
-        except Exception:  # an exception must not cross back into SystemConfiguration
-            return
+        self.guarded(self.update)
+
+    def update(self) -> None:
+        state = self.read()
         if state != self.state:
             self.state = state
-            _received.append(Event("network_changed"))
+            self.emit("network_changed")
 
     def close(self) -> None:
-        if self.source.source:
-            _cf.release(self.source.source)
-        self.source.close()
-        _cf.release(self.store)
-        self.store = None
+        super().close()
+        store, self.store = self.store, None
+        _cf.release(store)
 
 
 _Matched = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32)
@@ -376,25 +403,34 @@ def _device_name(device: int) -> Optional[str]:
     return None
 
 
-class _USBWatch:
+class _USBWatch(_Watch):
     """USB events, from IOKit's matching notifications for USB devices."""
 
-    def __init__(self) -> None:
+    port: Optional[int] = None
+
+    def start(self) -> None:
         io = _io_registry()
-        self.port = io.IONotificationPortCreate(0)
         self.iterators: List[int] = []
         self.callbacks = []
+        self.port = io.IONotificationPortCreate(0)
+        if not self.port:
+            raise MacOSError("could not watch the USB devices: IOKit gave no notification port")
         for kind, name in ((b"IOServiceFirstMatch", "usb_connected"), (b"IOServiceTerminate", "usb_disconnected")):
             callback = _Matched(lambda refcon, iterator, name=name: self.matched(iterator, name))
+            self.callbacks.append(callback)
             iterator = ctypes.c_uint32()
             # The matching dictionary is consumed by the call.
-            io.IOServiceAddMatchingNotification(
+            status = io.IOServiceAddMatchingNotification(
                 self.port, kind, io.IOServiceMatching(b"IOUSBHostDevice"), callback, None, ctypes.byref(iterator)
             )
-            self.callbacks.append(callback)
+            if status != 0:
+                raise MacOSError("could not watch the USB devices (IOReturn {:#x})".format(status & 0xFFFFFFFF))
             self.iterators.append(iterator.value)
             self.drain(iterator.value, None)  # the devices already there: this also arms the notification
-        self.source = _RunLoopSource(io.IONotificationPortGetRunLoopSource(self.port))
+        # The port owns its source: ours only to schedule.
+        self.source = _cf.RunLoopSource(
+            io.IONotificationPortGetRunLoopSource(self.port), owned=False, what="watch the USB devices"
+        )
 
     def drain(self, iterator: int, name: Optional[str]) -> None:
         io = _io_registry()
@@ -404,50 +440,51 @@ class _USBWatch:
                 return
             try:
                 if name is not None:
-                    _received.append(Event(name, device=_device_name(device)))
+                    self.emit(name, device=_device_name(device))
             finally:
                 io.IOObjectRelease(device)
 
     def matched(self, iterator: int, name: str) -> None:
-        try:
-            self.drain(iterator, name)
-        except Exception:  # an exception must not cross back into IOKit
-            return
+        self.guarded(lambda: self.drain(iterator, name))
 
     def close(self) -> None:
-        self.source.close()  # the port owns the source
+        super().close()
         io = _io_registry()
-        for iterator in self.iterators:
+        for iterator in getattr(self, "iterators", []):
             io.IOObjectRelease(iterator)
-        io.IONotificationPortDestroy(self.port)
+        self.iterators = []
+        port, self.port = self.port, None
+        if port:
+            io.IONotificationPortDestroy(port)
 
 
-_Reconfigured = ctypes.CFUNCTYPE(None, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
 _BEGIN_CONFIGURATION = 1  # kCGDisplayBeginConfigurationFlag: the change is about to happen
 
 
-class _DisplayWatch:
+class _DisplayWatch(_Watch):
     """Display events, from CoreGraphics' reconfiguration callback: one event per change, whatever the displays."""
 
-    def __init__(self) -> None:
-        graphics = framework("CoreGraphics")
-        graphics.CGDisplayRegisterReconfigurationCallback.argtypes = (_Reconfigured, ctypes.c_void_p)
-        graphics.CGDisplayRegisterReconfigurationCallback.restype = ctypes.c_int32
-        graphics.CGDisplayRemoveReconfigurationCallback.argtypes = (_Reconfigured, ctypes.c_void_p)
-        graphics.CGDisplayRemoveReconfigurationCallback.restype = ctypes.c_int32
-        self.callback = _Reconfigured(self.changed)
-        graphics.CGDisplayRegisterReconfigurationCallback(self.callback, None)
+    callback = None
+
+    def start(self) -> None:
+        callback = _events.DisplayCallback(self.changed)
+        status = _events.graphics().CGDisplayRegisterReconfigurationCallback(callback, None)
+        if status != 0:
+            raise MacOSError("could not watch the displays (CGError {})".format(status))
+        self.callback = callback
 
     def changed(self, display: int, flags: int, info: int) -> None:
         # CoreGraphics calls back for each display, before and after: keep one event per change.
-        if not flags & _BEGIN_CONFIGURATION and Event("displays_changed") not in _received:
-            _received.append(Event("displays_changed"))
+        if not flags & _BEGIN_CONFIGURATION and Event("displays_changed") not in self.listener.pending:
+            self.emit("displays_changed")
 
     def close(self) -> None:
-        framework("CoreGraphics").CGDisplayRemoveReconfigurationCallback(self.callback, None)
+        callback, self.callback = self.callback, None
+        if callback is not None:
+            _events.graphics().CGDisplayRemoveReconfigurationCallback(callback, None)
 
 
-_WATCHERS: Dict[str, Callable[[], Any]] = {
+_WATCHERS: Dict[str, Callable[[_events.Listener], _Watch]] = {
     _POWER: _PowerWatch,
     _NETWORK: _NetworkWatch,
     _USB: _USBWatch,
@@ -455,69 +492,72 @@ _WATCHERS: Dict[str, Callable[[], Any]] = {
 }
 
 
-def _observer() -> int:
-    """An observer this module owns, released when listening stops (``_objc.new`` would be autoreleased)."""
+def _observer(listener: _events.Listener, cleanup: ExitStack) -> int:
+    """An observer feeding ``listener``, released by ``cleanup`` (``_objc.new`` would be autoreleased)."""
     observer_class = _objc.define_class("PymacosEventObserver", {"handle:": ("v@:@", _Handle, _handle)})
-    return _objc.send(_objc.send(observer_class, "alloc"), "init")
+    observer = int(_objc.send(_objc.send(observer_class, "alloc"), "init"))
+    cleanup.callback(_objc.send, observer, "release", restype=None)
+    with _lock:
+        _observers[observer] = listener
+
+    def forget() -> None:
+        with _lock:
+            _observers.pop(observer, None)
+
+    cleanup.callback(forget)
+    return observer
 
 
 def _listen(names: List[str], on_event: Callable[[Event], bool], timeout: Optional[float]) -> None:
     """Observe ``names`` and turn the run loop until ``stop()``, the timeout, or ``on_event`` returning ``True``."""
-    framework("AppKit")
-    _notification_names()
-    observer = _observer()
-    wanted = {name: _NOTIFICATIONS[name] for name in names}
-    centers = {kind: _center(kind) for kind in (_WORKSPACE, _DISTRIBUTED)}
-    # The notification names, as AppKit spells them.
-    spelled = {ours: notification for notification, ours in _notification_names().items()}
-    for name, (kind, _) in wanted.items():
-        if kind in _WATCHED:
-            continue
-        if kind == _WORKSPACE:
-            _objc.send(
-                centers[kind],
-                "addObserver:selector:name:object:",
-                observer,
-                _objc.sel("handle:"),
-                _objc.nsstring(spelled[name]),
-                None,
-                argtypes=(_objc.id, _objc.SEL, _objc.id, _objc.id),
-                restype=None,
-            )
-        else:
-            # By default the distributed center may hold notifications back while it deems the
-            # process suspended; a script has no app lifecycle to resume it, so ask for them now.
-            _objc.send(
-                centers[kind],
-                "addObserver:selector:name:object:suspensionBehavior:",
-                observer,
-                _objc.sel("handle:"),
-                _objc.nsstring(spelled[name]),
-                None,
-                _DELIVER_IMMEDIATELY,
-                argtypes=(_objc.id, _objc.SEL, _objc.id, _objc.id, ctypes.c_ulong),
-                restype=None,
-            )
-    _stop.clear()
-    _received.clear()
-    kinds = {kind for kind, _ in wanted.values()}
-    watchers = [watch() for kind, watch in _WATCHERS.items() if kind in kinds]
-    deadline = None if timeout is None else time.monotonic() + timeout
-    try:
-        while not _stop.is_set():
-            remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
-            if remaining <= 0:
-                break
-            _objc.run_until(lambda: bool(_received) or _stop.is_set(), remaining)
-            while _received:
-                if on_event(_received.popleft()):
+    listener = _events.Listener()
+    # Counted in first: a stop() while the observers are being set up is kept.
+    with _listeners.listening(listener), _objc.autorelease_pool(), ExitStack() as cleanup:
+        framework("AppKit")
+        _notification_names()
+        observer = _observer(listener, cleanup)
+        wanted = {name: _NOTIFICATIONS[name] for name in names}
+        centers = {kind: _center(kind) for kind in (_WORKSPACE, _DISTRIBUTED)}
+        for center in centers.values():  # removing an observer never added is harmless
+            cleanup.callback(_objc.send, center, "removeObserver:", observer, argtypes=(_objc.id,), restype=None)
+        # The notification names, as AppKit spells them.
+        spelled = {ours: notification for notification, ours in _notification_names().items()}
+        for name, (kind, _) in wanted.items():
+            if kind in _WATCHED:
+                continue
+            if kind == _WORKSPACE:
+                _objc.send(
+                    centers[kind],
+                    "addObserver:selector:name:object:",
+                    observer,
+                    _objc.sel("handle:"),
+                    _objc.nsstring(spelled[name]),
+                    None,
+                    argtypes=(_objc.id, _objc.SEL, _objc.id, _objc.id),
+                    restype=None,
+                )
+            else:
+                # By default the distributed center may hold notifications back while it deems the
+                # process suspended; a script has no app lifecycle to resume it, so ask for them now.
+                _objc.send(
+                    centers[kind],
+                    "addObserver:selector:name:object:suspensionBehavior:",
+                    observer,
+                    _objc.sel("handle:"),
+                    _objc.nsstring(spelled[name]),
+                    None,
+                    _DELIVER_IMMEDIATELY,
+                    argtypes=(_objc.id, _objc.SEL, _objc.id, _objc.id, ctypes.c_ulong),
+                    restype=None,
+                )
+        kinds = {kind for kind, _ in wanted.values()}
+        for kind, watch in _WATCHERS.items():
+            if kind in kinds:
+                cleanup.callback(watch(listener).close)  # each one closed, even when a later one fails
+        for event in listener.drain(timeout):
+            with _objc.autorelease_pool():
+                if on_event(event):
                     return
-    finally:
-        for watcher in watchers:
-            watcher.close()
-        for center in centers.values():
-            _objc.send(center, "removeObserver:", observer, argtypes=(_objc.id,), restype=None)
-        _objc.send(observer, "release", restype=None)
 
 
 def _takes_event(callback: Callable[..., object]) -> bool:

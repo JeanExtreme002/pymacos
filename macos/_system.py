@@ -8,11 +8,12 @@ commands and loading system frameworks.
 import ctypes
 import subprocess
 import sys
+import warnings
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Callable, Dict, Iterator, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar
 
-from .errors import CommandError, NotSupportedError, PermissionDeniedError
+from .errors import CommandError, CommandTimeoutError, NotSupportedError, PermissionDeniedError
 
 
 def require_macos() -> None:
@@ -21,7 +22,43 @@ def require_macos() -> None:
         raise NotSupportedError("pymacos only works on macOS (running on {!r})".format(sys.platform))
 
 
-def run(args: Sequence[str], *, input: Optional[str] = None, timeout: Optional[float] = None) -> str:
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def deprecated(replacement: str, *, removal: str) -> Callable[[_F], _F]:
+    """
+    Mark a public function as deprecated: calling it warns, then runs it as before.
+
+    ``replacement`` names what to use instead (``"macos.volume.set"``) and
+    ``removal`` the version it goes away in. The policy, in CONTRIBUTING.md:
+    a name is deprecated for at least one minor release before it's removed,
+    and only removed in a major one.
+    """
+    import functools
+
+    def decorate(function: _F) -> _F:
+        message = "{}.{}() is deprecated and will be removed in pymacos {}; use {} instead".format(
+            function.__module__, function.__name__, removal, replacement
+        )
+
+        @functools.wraps(function)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            warnings.warn(message, DeprecationWarning, stacklevel=2)  # points at the caller's line
+            return function(*args, **kwargs)
+
+        wrapper.__doc__ = "Deprecated: use :func:`{}` instead.\n\n{}".format(replacement, function.__doc__ or "")
+        return wrapper  # type: ignore[return-value]
+
+    return decorate
+
+
+def run(
+    args: Sequence[str],
+    *,
+    input: Optional[str] = None,
+    timeout: Optional[float] = None,
+    exact_newlines: bool = False,
+) -> str:
     """
     Run a system command and return its standard output.
 
@@ -29,32 +66,47 @@ def run(args: Sequence[str], *, input: Optional[str] = None, timeout: Optional[f
     text can't be interpreted as shell syntax. A non-zero exit status raises
     :class:`CommandError` carrying the command's stderr. With ``timeout``,
     a command still running after that many seconds is killed, and
-    :class:`subprocess.TimeoutExpired` raised.
+    :class:`CommandTimeoutError` raised.
+
+    Text mode turns ``\r\n`` and ``\r`` into ``\n``; ``exact_newlines=True``
+    keeps them as the command wrote them, for output that holds file names
+    (which may contain any of them).
     """
     require_macos()
 
+    if exact_newlines:
+        options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
+    else:
+        options = {"input": input, "text": True, "encoding": "utf-8"}
     try:
-        result = subprocess.run(
-            list(args), input=input, capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
+        result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+    except subprocess.TimeoutExpired:
+        raise CommandTimeoutError(args, timeout or 0) from None
 
+    stdout, stderr = result.stdout, result.stderr
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
-        raise CommandError(args, result.returncode, result.stderr)
-    return result.stdout
+        raise CommandError(args, result.returncode, stderr)
+    return stdout
 
 
-def applescript(app: str, script: str, *args: str) -> str:
+def applescript(app: str, script: str, *args: str, input: Optional[str] = None) -> str:
     """
     Run an AppleScript that controls ``app``, and return its output.
 
     ``args`` reach the script's ``on run argv`` handler as text, never
-    pasted into the source, even when they start with ``-``. A missing Automation permission raises
+    pasted into the source, even when they start with ``-``. ``input`` goes
+    to its standard input instead, for text that shouldn't show in the
+    process list. A missing Automation permission raises
     :class:`PermissionDeniedError`, saying where to allow it.
     """
     try:
-        return run(["osascript", "-e", script, *(["--", *args] if args else [])])
+        return run(["osascript", "-e", script, *(["--", *args] if args else [])], input=input)
     except CommandError as error:
         if "-1743" in error.stderr:  # errAEEventNotPermitted
             raise PermissionDeniedError(

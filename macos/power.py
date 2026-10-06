@@ -22,10 +22,9 @@ import ctypes
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from . import _cf, _objc
+from . import _cf, _iokit, _objc
 from ._system import framework, run as _run
 from .errors import MacOSError
 
@@ -46,43 +45,9 @@ kIOPMAssertionLevelOn = 255
 kIOReturnSuccess = 0
 
 
-@lru_cache(maxsize=None)
-def _iokit() -> ctypes.CDLL:
-    io = framework("IOKit")
-
-    io.IOPSCopyPowerSourcesInfo.argtypes = ()
-    io.IOPSCopyPowerSourcesInfo.restype = _cf.CFTypeRef
-    io.IOPSCopyPowerSourcesList.argtypes = (_cf.CFTypeRef,)
-    io.IOPSCopyPowerSourcesList.restype = _cf.CFTypeRef
-    io.IOPSGetPowerSourceDescription.argtypes = (_cf.CFTypeRef, _cf.CFTypeRef)
-    io.IOPSGetPowerSourceDescription.restype = _cf.CFTypeRef
-
-    io.IOPMAssertionCreateWithName.argtypes = (
-        _cf.CFTypeRef,
-        ctypes.c_uint32,
-        _cf.CFTypeRef,
-        ctypes.POINTER(ctypes.c_uint32),
-    )
-    io.IOPMAssertionCreateWithName.restype = ctypes.c_int
-    io.IOPMAssertionRelease.argtypes = (ctypes.c_uint32,)
-    io.IOPMAssertionRelease.restype = ctypes.c_int
-    io.IOPMCopyAssertionsByProcess.argtypes = (ctypes.POINTER(_cf.CFTypeRef),)
-    io.IOPMCopyAssertionsByProcess.restype = ctypes.c_int
-
-    io.IOServiceMatching.argtypes = (ctypes.c_char_p,)
-    io.IOServiceMatching.restype = _cf.CFTypeRef
-    io.IOServiceGetMatchingService.argtypes = (ctypes.c_uint32, _cf.CFTypeRef)
-    io.IOServiceGetMatchingService.restype = ctypes.c_uint32
-    io.IORegistryEntryCreateCFProperty.argtypes = (ctypes.c_uint32, _cf.CFTypeRef, _cf.CFTypeRef, ctypes.c_uint32)
-    io.IORegistryEntryCreateCFProperty.restype = _cf.CFTypeRef
-    io.IOObjectRelease.argtypes = (ctypes.c_uint32,)
-    io.IOObjectRelease.restype = ctypes.c_int
-    return io
-
-
 def _battery_registry(*names: str) -> Dict[str, Optional[int]]:
     """Integer properties of the AppleSmartBattery service (``None`` when missing)."""
-    io = _iokit()
+    io = _iokit.lib()
     service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"AppleSmartBattery"))
     values: Dict[str, Optional[int]] = {name: None for name in names}
     if not service:
@@ -138,7 +103,7 @@ def _minutes(value: Optional[int]) -> Optional[timedelta]:
 
 def battery() -> Optional[Battery]:
     """Return the internal battery's status, or ``None`` on a Mac without one (e.g. a Mac mini)."""
-    io = _iokit()
+    io = _iokit.lib()
     with _cf.owned(io.IOPSCopyPowerSourcesInfo()) as info, _cf.owned(io.IOPSCopyPowerSourcesList(info)) as sources:
         for source in _cf.items(sources):
             description = io.IOPSGetPowerSourceDescription(info, source)
@@ -196,7 +161,7 @@ def keep_awake(*, display: bool = False, reason: str = "pymacos keep_awake") -> 
 
     Closing the lid still puts a laptop to sleep, as with ``caffeinate``.
     """
-    io = _iokit()
+    io = _iokit.lib()
     kind = "PreventUserIdleDisplaySleep" if display else "PreventUserIdleSystemSleep"
     assertion = ctypes.c_uint32()
     with _cf.owned(_cf.string(kind)) as kind_ref, _cf.owned(_cf.string(reason)) as reason_ref:
@@ -248,9 +213,7 @@ def adapter() -> Optional[Adapter]:
 
         macos.power.adapter()   # Adapter(watts=96, name='96W USB-C Power Adapter', ...)
     """
-    io = _iokit()
-    io.IOPSCopyExternalPowerAdapterDetails.argtypes = ()
-    io.IOPSCopyExternalPowerAdapterDetails.restype = ctypes.c_void_p
+    io = _iokit.lib()
     with _cf.owned(io.IOPSCopyExternalPowerAdapterDetails()) as details:
         found = _cf.to_python(details) if details else None
     return _adapter(found)
@@ -323,7 +286,7 @@ def sleep_blockers() -> List[SleepBlocker]:
     macOS itself shows up as ``powerd`` while the display is on. Apps playing
     sound or video, :func:`keep_awake` and ``caffeinate`` are the usual others.
     """
-    io = _iokit()
+    io = _iokit.lib()
     found = _cf.CFTypeRef()
     status = io.IOPMCopyAssertionsByProcess(ctypes.byref(found))
     if status != kIOReturnSuccess:

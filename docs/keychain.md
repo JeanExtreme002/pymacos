@@ -63,6 +63,31 @@ security find-generic-password -s my-app -a alice -w
 The password goes straight to the Security framework. It is never passed on a
 command line, where every user on the Mac could see it in the process list.
 
+### Who can read the items
+
+The items get the keychain's default access control: the app that created
+them is trusted to read them without asking, and any other app makes macOS
+ask the user first. Here *the app* is the **Python interpreter** running the
+script, not the script. So:
+
+- Any script, package or REPL run by that same interpreter (including a
+  virtual environment built on it, whose `python` is a link to it) reads the
+  items **without a prompt**. A dependency you install can read every item
+  your scripts stored; a Keychain item is no more private, from other Python
+  code run by the same interpreter, than a file in your home folder.
+- Another interpreter (another version, Homebrew's instead of python.org's)
+  makes macOS ask, and so does the same one after an **upgrade**: a new build
+  is a different app to the keychain. Click *Always Allow* to trust it again.
+- Other users can't read them: the login keychain is theirs alone, and it's
+  locked while they're logged out.
+
+For a secret only one tool should see, keep it out of an interpreter shared
+with untrusted code (a dedicated virtual environment doesn't help: it's the
+same interpreter), or protect it with something the keychain can't hand
+over silently, such as a passphrase the user types. {mod}`macos.auth` adds a
+Touch ID prompt in your script, but that's a check within the process, not
+access control on the item.
+
 ## Limitations
 
 - Service and account names can't contain NUL characters (`"\0"`): the keychain
