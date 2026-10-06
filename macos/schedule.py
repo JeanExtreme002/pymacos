@@ -231,10 +231,12 @@ def add(
     # can't be read raises here, before the old job is touched.
     previous: Optional[bytes] = path.read_bytes() if path.exists() else None
     was_paused = previous is not None and name in _paused()
+    plist = plistlib.dumps(job)  # before anything changes: a value it can't hold raises here
     remove(name)  # unload the old one first (and forget it was paused)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(plistlib.dumps(job))
     try:
+        # Writing the new plist can fail too (a full disk): that also puts the old job back.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(plist)
         _run(["launchctl", "bootstrap", _domain(), str(path)])
     except BaseException:
         _restore(name, path, previous, was_paused)
@@ -260,10 +262,10 @@ def remove(name: str) -> bool:
 
 def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool) -> None:
     """
-    Undo a failed :func:`add`: delete the new plist, and put back the job it replaced, if any.
+    Undo a failed :func:`add`: delete the new plist (if it got written), and put back the job it replaced, if any.
 
-    Best effort: the caller re-raises the bootstrap error, which matters
-    more than a failure here.
+    Best effort: the caller re-raises the error that made it fail, which
+    matters more than a failure here.
     """
     try:
         _bootout(name)  # in case launchd half-loaded it
@@ -271,7 +273,7 @@ def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool)
         pass
     try:
         if previous is None:
-            path.unlink()
+            path.unlink(missing_ok=True)
             return
         path.write_bytes(previous)
         if was_paused:

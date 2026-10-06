@@ -213,6 +213,46 @@ def test_schedule_add_restores_the_replaced_job_when_bootstrap_fails(fake_run, h
     assert calls[-1] == ["launchctl", "bootstrap", "gui/501", path]  # ...and loaded again
 
 
+def test_schedule_add_restores_the_replaced_job_when_writing_the_new_plist_fails(fake_run, home, monkeypatch):
+    from pathlib import Path
+
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    calls = _failing_bootstrap(monkeypatch, fake_run)
+    write_bytes = Path.write_bytes
+
+    def disk_full(self, data):
+        if self == path and b"<integer>60</integer>" in data:  # the new job's plist, not the old one put back
+            write_bytes(self, data[:20])  # a partial write
+            raise OSError(28, "No space left on device", str(self))
+        return write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+
+    with pytest.raises(OSError, match="No space left"):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert _plist(home, "backup")["StartInterval"] == 3600  # the old job is back, not the partial plist...
+    assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(path)]  # ...and loaded again
+
+
+def test_schedule_add_removes_a_partial_plist_when_there_was_no_job(fake_run, home, monkeypatch):
+    from pathlib import Path
+
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    write_bytes = Path.write_bytes
+
+    def disk_full(self, data):
+        write_bytes(self, data[:20])
+        raise OSError(28, "No space left on device", str(self))
+
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+
+    with pytest.raises(OSError, match="No space left"):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+    assert not path.exists()
+
+
 def test_schedule_add_leaves_a_job_whose_plist_it_cant_read(fake_run, home, monkeypatch):
     from pathlib import Path
 
