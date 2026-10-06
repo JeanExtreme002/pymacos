@@ -54,8 +54,9 @@ there. It returns after {func}`~macos.events.stop` or `timeout` seconds; an
 exception in a callback stops it and propagates, as does one met while
 reading an event. With no callbacks registered, it raises `ValueError`.
 {func}`~macos.events.stop` stops every {func}`~macos.events.run` and
-{func}`~macos.events.wait` in progress, including one still starting; each
-of them gets every event, even when several run on different threads.
+{func}`~macos.events.wait` in progress, including one still starting. Each
+has its own queue of events, so one never takes the events another is waiting
+for.
 {func}`~macos.events.on` returns a {class}`~macos.events.Handler`, whose
 `remove()` unregisters it; {func}`~macos.events.off` removes every callback of
 an event.
