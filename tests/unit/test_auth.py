@@ -116,6 +116,36 @@ def test_an_interrupted_prompts_late_success_cant_confirm_the_next(prompts, monk
     assert macos.auth.confirm("deploy", timeout=0.01) is False
 
 
+def test_confirm_from_a_callback_during_a_prompt_raises_instead_of_hanging(prompts):
+    replies, blocks, _ = prompts
+    nested = []
+
+    def a_menu_item_clicked_meanwhile(made):
+        # Run-loop callbacks run on this thread while it waits: a guarded one asks again.
+        with pytest.raises(macos.MacOSError, match="already waiting for an answer on this thread") as caught:
+            macos.auth.confirm("delete everything")
+        nested.append(caught.value)
+        made[-1](True, 0)  # then the first prompt is answered
+
+    replies.extend([a_menu_item_clicked_meanwhile, False])
+    assert macos.auth.confirm("deploy") is True and len(nested) == 1
+    assert macos.auth.confirm("deploy") is False  # once it returned, asking works again
+
+
+def test_confirm_from_other_threads_waits_its_turn(prompts):
+    import threading
+
+    replies, _, _ = prompts
+    replies.extend([True, True])
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(macos.auth.confirm("deploy"))) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results == [True, True]
+
+
 def test_required_hides_the_unguarded_function(monkeypatch):
     monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: False)
 

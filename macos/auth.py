@@ -18,11 +18,11 @@ import functools
 import inspect
 import threading
 from functools import lru_cache
-from typing import Any, Callable, List, TypeVar
+from typing import Any, Callable, List, Optional, TypeVar
 
 from . import _objc
 from ._system import framework
-from .errors import NotSupportedError, PermissionDeniedError
+from .errors import MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = ["confirm", "is_available", "required"]
 
@@ -72,6 +72,7 @@ def is_available(*, only_touch_id: bool = False) -> bool:
 # retired (_generation moves on), and what it says then goes nowhere. Only
 # timeouts make a new block.
 _prompt = threading.Lock()
+_waiting: List[Optional[int]] = [None]  # the thread whose prompt is up
 _state = threading.Lock()
 _answers: List[bool] = []
 _generation = [0]
@@ -109,55 +110,69 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     fingerprint. Cancelling, failing, or ``timeout`` seconds without an answer
     return ``False``. Raises :class:`~macos.errors.NotSupportedError` when
     ``only_touch_id=True`` and Touch ID isn't available.
+
+    One prompt at a time: calls from other threads wait their turn. A call
+    made while this thread is already waiting for an answer (from a menu
+    bar item or a hotkey's callback, which run during that wait) raises
+    :class:`~macos.errors.MacOSError` instead of waiting forever.
     """
     if not reason.strip():
         raise ValueError("reason must not be empty: macOS shows it in the prompt")
     framework("LocalAuthentication")  # before the reply block: NotSupportedError outside macOS
     if only_touch_id and not is_available(only_touch_id=True):
         raise NotSupportedError("Touch ID isn't set up on this Mac (or is locked after failed tries)")
+    me = threading.get_ident()
+    if _waiting[0] == me:
+        # Called from a run-loop callback (a menu item, a hotkey...) while this
+        # thread waits on a prompt: waiting for that prompt's lock would never end.
+        raise MacOSError("confirm() is already waiting for an answer on this thread; ask again once it returns")
     with _prompt:
-        with _state:
-            del _answers[:]
-            generation = _generation[0]
-        handler = _handler(generation)
-        context = _context()
+        _waiting[0] = me
         try:
-            with _objc.autorelease_pool():
-                _objc.send(
-                    context,
-                    "evaluatePolicy:localizedReason:reply:",
-                    _policy(only_touch_id),
-                    _objc.nsstring(reason),
-                    handler,
-                    argtypes=(_objc.NSInteger, _objc.id, ctypes.c_void_p),
-                    restype=None,
-                )
-            if not _objc.run_until(_answered, timeout):
-                _objc.send(context, "invalidate", restype=None)  # takes the prompt away
-                # Its reply still comes, once: wait for it here, or retire the
-                # block, so that reply can't answer the next prompt.
-                _objc.run_until(_answered, _DRAIN)
-                with _state:
-                    if not _answers:
-                        _generation[0] += 1
-                    del _answers[:]
-                return False
             with _state:
-                return _answers.pop(0)
-        except BaseException:
-            # Interrupted (Ctrl-C...) while the prompt may still be up: retire
-            # its block first, so whatever it answers later goes nowhere, then
-            # take the prompt away.
-            with _state:
-                _generation[0] += 1
                 del _answers[:]
+                generation = _generation[0]
+            handler = _handler(generation)
+            context = _context()
             try:
-                _objc.send(context, "invalidate", restype=None)
-            except Exception:
-                pass  # the interruption is what the caller needs to see
-            raise
+                with _objc.autorelease_pool():
+                    _objc.send(
+                        context,
+                        "evaluatePolicy:localizedReason:reply:",
+                        _policy(only_touch_id),
+                        _objc.nsstring(reason),
+                        handler,
+                        argtypes=(_objc.NSInteger, _objc.id, ctypes.c_void_p),
+                        restype=None,
+                    )
+                if not _objc.run_until(_answered, timeout):
+                    _objc.send(context, "invalidate", restype=None)  # takes the prompt away
+                    # Its reply still comes, once: wait for it here, or retire the
+                    # block, so that reply can't answer the next prompt.
+                    _objc.run_until(_answered, _DRAIN)
+                    with _state:
+                        if not _answers:
+                            _generation[0] += 1
+                        del _answers[:]
+                    return False
+                with _state:
+                    return _answers.pop(0)
+            except BaseException:
+                # Interrupted (Ctrl-C...) while the prompt may still be up: retire
+                # its block first, so whatever it answers later goes nowhere, then
+                # take the prompt away.
+                with _state:
+                    _generation[0] += 1
+                    del _answers[:]
+                try:
+                    _objc.send(context, "invalidate", restype=None)
+                except Exception:
+                    pass  # the interruption is what the caller needs to see
+                raise
+            finally:
+                _objc.send(context, "release", restype=None)
         finally:
-            _objc.send(context, "release", restype=None)
+            _waiting[0] = None
 
 
 _Function = TypeVar("_Function", bound=Callable[..., Any])
