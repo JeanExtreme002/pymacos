@@ -40,7 +40,15 @@ def _in_a_thread(work):
     return caught[0] if caught else None
 
 
-def test_what_appkit_does_only_on_the_main_thread_says_so(fake_run, tmp_path):
+def test_what_appkit_does_only_on_the_main_thread_says_so(fake_run, monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from macos import _files, _objc
+
+    # fake_run says it's macOS: the thread check and the pool are faked too, so no framework is
+    # loaded and the test runs on Linux as well. The worker thread isn't the main one either way.
+    monkeypatch.setattr(_files, "on_main_thread", lambda: False)
+    monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
     page = tmp_path / "page.html"
     page.write_text("<p>hi</p>")
     notes = tmp_path / "notes.rtf"

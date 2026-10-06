@@ -34,6 +34,14 @@ def test_a_new_file_gets_the_usual_permissions_not_a_temporary_files(tmp_path, u
     assert os.listdir(str(target.parent)) == ["out.pdf"]  # nothing left beside it
 
 
+def test_an_output_named_like_the_permission_probe(tmp_path, umask_022):
+    target = tmp_path / ".mode"  # the name the probe once took, beside the staged output
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"done")
+    assert target.read_bytes() == b"done" and _mode(target) == 0o644
+    assert os.listdir(str(tmp_path)) == [".mode"]
+
+
 def test_replacing_a_file_keeps_its_permissions(tmp_path, umask_022):
     target = tmp_path / "shared.txt"
     target.write_bytes(b"old")

@@ -1736,7 +1736,7 @@ def _nettop_samples(interval: Optional[float]) -> List[Tuple[int, str, int, int]
     return _nettop_rows(_run(args, timeout=seconds + _NETTOP_SLACK))
 
 
-_NETTOP_SLACK = 30.0  # seconds nettop may take beyond the interval it measures
+_NETTOP_SLACK = 120.0  # seconds nettop may take beyond the interval it measures
 
 
 def _nettop_rows(output: str) -> List[Tuple[int, str, int, int]]:
@@ -1767,7 +1767,7 @@ def network_usage(interval: Optional[float] = None) -> List[NetworkUsage]:
     Without ``interval``, the totals since each process started; with it,
     what they moved in that many seconds (at least 1). Unlike the other
     process functions, it sees every user's processes, the system's
-    included. Goes through ``nettop``; one that doesn't answer within 30
+    included. Goes through ``nettop``; one that doesn't answer within 120
     seconds past ``interval`` raises :class:`~macos.errors.CommandTimeoutError`.
     """
     if interval is not None and interval <= 0:

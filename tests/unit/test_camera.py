@@ -10,6 +10,7 @@ def test_temporary_photo_is_removed_on_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(macos.camera.tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(_capture, "request_permission", lambda media: False)
+    monkeypatch.setattr(_capture, "_status", lambda media: _capture._DENIED)  # denied, not left unanswered
 
     with pytest.raises(macos.PermissionDeniedError):
         macos.camera.photo()

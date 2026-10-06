@@ -227,11 +227,9 @@ def add(
     path = _plist(name)
     # Replacing a job: keep the old plist's bytes, so a failed bootstrap of
     # the new one can put the old job back rather than leave neither (and a
-    # half-installed plist launchd would pick up at the next login).
-    try:
-        previous: Optional[bytes] = path.read_bytes() if path.exists() else None
-    except OSError:
-        previous = None
+    # half-installed plist launchd would pick up at the next login). One that
+    # can't be read raises here, before the old job is touched.
+    previous: Optional[bytes] = path.read_bytes() if path.exists() else None
     was_paused = previous is not None and name in _paused()
     remove(name)  # unload the old one first (and forget it was paused)
     path.parent.mkdir(parents=True, exist_ok=True)

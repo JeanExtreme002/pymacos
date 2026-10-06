@@ -42,15 +42,19 @@ def _default_mode(folder: str) -> int:
     The permissions a new file gets here: 0o666 less the umask.
 
     Read from a file made for it, not with ``os.umask()``, which changes the
-    umask of the whole process for a moment, under any other thread too.
+    umask of the whole process for a moment, under any other thread too. The
+    file is in a folder of its own, so it can't take the name of the output
+    being staged beside it.
     """
-    probe = os.path.join(folder, ".mode")
-    handle = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    inside = tempfile.mkdtemp(dir=folder)
     try:
-        return stat.S_IMODE(os.fstat(handle).st_mode)
+        handle = os.open(os.path.join(inside, "probe"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        try:
+            return stat.S_IMODE(os.fstat(handle).st_mode)
+        finally:
+            os.close(handle)
     finally:
-        os.close(handle)
-        os.unlink(probe)
+        shutil.rmtree(inside, ignore_errors=True)
 
 
 @contextmanager

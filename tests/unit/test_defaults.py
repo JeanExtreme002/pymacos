@@ -77,6 +77,27 @@ def test_defaults_restored_restores_every_key_before_raising(unwritable):
     assert unwritable.set == [("app", None), ("app", None)]  # both deletes tried, though the first failed
 
 
+def test_defaults_restored_restores_every_key_of_a_whole_domain_before_raising(monkeypatch):
+    from macos import defaults
+
+    tried = []
+
+    def refuse(domain, name, *args, **kwargs):
+        tried.append(name)
+        raise macos.PermissionDeniedError("isn't writable")
+
+    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "read", lambda domain, current_host=False: {})  # nothing set when it starts
+    monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: ["a", "b", "c"])  # set in the block
+    monkeypatch.setattr(defaults, "delete", refuse)
+
+    with pytest.raises(macos.PermissionDeniedError):
+        with macos.defaults.restored("com.example.app"):
+            pass
+
+    assert tried == ["a", "b", "c"]  # each delete tried, though the first failed
+
+
 def test_appearance_setters_pass_the_error_on(unwritable):
     with pytest.raises(macos.PermissionDeniedError):
         macos.appearance.set_hide_menu_bar(True)

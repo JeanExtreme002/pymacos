@@ -330,7 +330,7 @@ each process started, for every user's processes, the system's included.
 {func}`~macos.system.energy_usage` measures over one second by default; only
 Apple silicon Macs measure power (Intel Macs read 0), and it sees only this
 user's processes. A macOS too old to report it raises
-{class}`~macos.NotSupportedError`. A `nettop` that doesn't answer within 30
+{class}`~macos.NotSupportedError`. A `nettop` that doesn't answer within 120
 seconds past the interval raises {class}`~macos.CommandTimeoutError`.
 
 ## The GPU and the disks

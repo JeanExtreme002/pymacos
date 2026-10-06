@@ -12,7 +12,12 @@ def test_auth_argument_checks():
 
 @pytest.fixture
 def prompts(monkeypatch):
-    """LocalAuthentication faked: each prompt answers what ``replies`` holds next (``None``: no answer)."""
+    """
+    LocalAuthentication faked: each prompt answers what ``replies`` holds next.
+
+    ``None`` is no answer; a callable gets the list of reply blocks made so
+    far and answers through them, for replies that come late or out of order.
+    """
     from contextlib import nullcontext
 
     from macos import _objc, auth
@@ -22,10 +27,16 @@ def prompts(monkeypatch):
     def send(receiver, selector, *args, **kwargs):
         sent.append(selector)
         if selector.startswith("evaluatePolicy:"):
-            assert args[2] == "the-block"
+            assert args[2] == len(blocks)  # the current block, the newest
             answer = replies.pop(0)
-            if answer is not None:
-                auth._reply(answer, 0)
+            if callable(answer):
+                answer(blocks)
+            elif answer is not None:
+                blocks[-1](answer, 0)
+
+    def block(function, *signature):
+        blocks.append(function)
+        return len(blocks)
 
     monkeypatch.setattr(auth, "framework", lambda name: None)
     monkeypatch.setattr(auth, "_context", lambda: 1)
@@ -33,9 +44,9 @@ def prompts(monkeypatch):
     monkeypatch.setattr(_objc, "nsstring", lambda text: text)
     monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
     monkeypatch.setattr(_objc, "run_until", lambda condition, timeout: condition())
-    monkeypatch.setattr(_objc, "block", lambda *args: blocks.append(args) or "the-block")
+    monkeypatch.setattr(_objc, "block", block)
     auth._handler.cache_clear()
-    monkeypatch.setattr(auth, "_stale", [0])
+    monkeypatch.setattr(auth, "_generation", [0])
     yield replies, blocks, sent
     auth._handler.cache_clear()
     del auth._answers[:]
@@ -52,14 +63,28 @@ def test_confirm_makes_one_reply_block_for_every_prompt(prompts):
 def test_a_late_reply_cant_answer_the_next_prompt(prompts):
     from macos import auth
 
-    replies, _, sent = prompts
+    replies, blocks, sent = prompts
     replies.extend([None, False])
 
     assert macos.auth.confirm("deploy", timeout=0.01) is False
-    assert "invalidate" in sent and auth._stale == [1]
-    auth._reply(True, 0)  # the dismissed prompt's reply, late: dropped
-    assert auth._stale == [0] and auth._answers == []
+    assert "invalidate" in sent and auth._generation == [1]  # the unanswered prompt's block is retired
+    blocks[0](True, 0)  # the dismissed prompt's reply, late: dropped
+    assert auth._answers == []
     assert macos.auth.confirm("deploy") is False  # its own answer, not the stale True
+    assert len(blocks) == 2
+
+
+def test_a_late_success_after_the_next_denial_doesnt_confirm(prompts):
+    replies, blocks, _ = prompts
+
+    def denied_then_late_success(made):
+        made[1](False, 0)  # the new prompt: denied
+        made[0](True, 0)  # then the old, dismissed prompt's success arrives
+
+    replies.extend([None, denied_then_late_success])
+
+    assert macos.auth.confirm("deploy", timeout=0.01) is False
+    assert macos.auth.confirm("deploy") is False
 
 
 def test_required_hides_the_unguarded_function(monkeypatch):

@@ -63,30 +63,34 @@ def is_available(*, only_touch_id: bool = False) -> bool:
             _objc.send(context, "release", restype=None)
 
 
-# One reply block for every prompt: _objc.block keeps each block alive for
-# good, so a new one per confirm() would leak. The block files the answer in
-# _answers, and _prompt lets one prompt at a time wait on it (macOS shows one
-# at a time anyway). A prompt given up on (timeout) still replies once,
-# later: _stale counts those replies, so they can't pass for the next one's.
+# One reply block serves prompt after prompt: _objc.block keeps each block
+# alive for good, so a new one per confirm() would leak. The block files the
+# answer in _answers, and _prompt lets one prompt at a time wait on it (macOS
+# shows one at a time anyway). A prompt given up on (timeout) still replies
+# once, later, in any order with the next prompt's reply: so its block is
+# retired (_generation moves on), and what it says then goes nowhere. Only
+# timeouts make a new block.
 _prompt = threading.Lock()
 _state = threading.Lock()
 _answers: List[bool] = []
-_stale = [0]
+_generation = [0]
 _DRAIN = 2.0  # seconds to wait for a dismissed prompt's own reply
 
 
-def _reply(success: bool, error: int) -> None:
+def _reply(generation: int, success: bool) -> None:
     with _state:
-        if _stale[0]:
-            _stale[0] -= 1
-            return
-        _answers.append(bool(success))
+        if generation == _generation[0]:  # a retired block's reply answers nothing
+            _answers.append(bool(success))
 
 
 @lru_cache(maxsize=None)
-def _handler() -> int:
-    """The reply block, ``void (^)(BOOL success, NSError *error)``, made once: blocks live for good."""
-    return _objc.block(_reply, b"v@?B@", ctypes.c_bool, ctypes.c_void_p)
+def _handler(generation: int) -> int:
+    """The reply block of ``generation``, ``void (^)(BOOL success, NSError *error)``, made once: blocks live for good."""
+
+    def reply(success: bool, error: int) -> None:
+        _reply(generation, success)
+
+    return _objc.block(reply, b"v@?B@", ctypes.c_bool, ctypes.c_void_p)
 
 
 def _answered() -> bool:
@@ -110,10 +114,11 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     framework("LocalAuthentication")  # before the reply block: NotSupportedError outside macOS
     if only_touch_id and not is_available(only_touch_id=True):
         raise NotSupportedError("Touch ID isn't set up on this Mac (or is locked after failed tries)")
-    handler = _handler()
     with _prompt:
         with _state:
             del _answers[:]
+            generation = _generation[0]
+        handler = _handler(generation)
         context = _context()
         try:
             with _objc.autorelease_pool():
@@ -128,12 +133,12 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
                 )
             if not _objc.run_until(_answered, timeout):
                 _objc.send(context, "invalidate", restype=None)  # takes the prompt away
-                # Its reply still comes, once: wait for it here, or have the
-                # block drop it when it does, so it can't answer the next prompt.
+                # Its reply still comes, once: wait for it here, or retire the
+                # block, so that reply can't answer the next prompt.
                 _objc.run_until(_answered, _DRAIN)
                 with _state:
                     if not _answers:
-                        _stale[0] += 1
+                        _generation[0] += 1
                     del _answers[:]
                 return False
             with _state:

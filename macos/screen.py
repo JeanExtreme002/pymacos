@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc, defaults
+from . import _cf, _files, _objc, defaults
 from ._system import framework, private_framework, run as _run
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
@@ -171,21 +171,28 @@ def _capture(path: Union[str, "os.PathLike[str]", None], options: List[str], che
             )
     extension = target.suffix.lower()
 
-    args = ["screencapture", "-x", "-t", _FORMATS[extension], *options, str(target)]  # -x: no shutter sound
-
-    try:
+    def capture(into: Path) -> None:
+        args = ["screencapture", "-x", "-t", _FORMATS[extension], *options, str(into)]  # -x: no shutter sound
         _run(args, timeout=_CAPTURE_TIMEOUT)
         # screencapture can exit 0 without writing anything (a display that went away, a capture
         # cancelled by the system): an empty or missing file isn't a screenshot.
         try:
-            written = target.stat().st_size
+            written = into.stat().st_size
         except OSError:
             written = 0
         if not written:
             raise MacOSError("screencapture didn't save a screenshot to {}".format(target))
+
+    if path is not None:
+        # Into a new file beside it, moved over the output once checked: an image already
+        # there can't pass for the new one, and stays as it was when the capture fails.
+        with _files.replacing(target) as staged:
+            capture(staged)
+        return target
+    try:
+        capture(target)
     except BaseException:
-        if path is None:
-            target.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
         raise
     return target
 

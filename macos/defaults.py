@@ -21,9 +21,10 @@ most apps only read them when they start, so restart them to see a change.
 """
 
 import ctypes
+import functools
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 from . import _cf
 from ._system import framework
@@ -217,23 +218,28 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
         yield
     finally:
         # One key that can't be written back mustn't keep the others from
-        # being restored: restore them all, then raise the first failure.
-        failure: Optional[PermissionDeniedError] = None
-        for domain, name_or_all, value in saved:
+        # being restored, in its domain or another: each change is tried on
+        # its own, and the first failure raised once they all were.
+        failure: List[PermissionDeniedError] = []
+
+        def attempt(change: Callable[[], object]) -> None:
             try:
-                if name_or_all is None:
-                    for name in keys(domain, current_host=current_host):
-                        if name not in value:
-                            delete(domain, name, current_host=current_host)
-                    for name, old in value.items():
-                        # The domain's own value: one equal to the global fallback still has to be written back.
-                        if _own(domain, name, missing, current_host) != old:
-                            write(domain, name, old, current_host=current_host)
-                elif value is missing:
-                    delete(domain, name_or_all, current_host=current_host)
-                else:
-                    write(domain, name_or_all, value, current_host=current_host)
+                change()
             except PermissionDeniedError as error:
-                failure = failure or error
-        if failure is not None:
-            raise failure
+                failure.append(error)
+
+        for domain, name_or_all, value in saved:
+            if name_or_all is None:
+                for name in keys(domain, current_host=current_host):
+                    if name not in value:
+                        attempt(functools.partial(delete, domain, name, current_host=current_host))
+                for name, old in value.items():
+                    # The domain's own value: one equal to the global fallback still has to be written back.
+                    if _own(domain, name, missing, current_host) != old:
+                        attempt(functools.partial(write, domain, name, old, current_host=current_host))
+            elif value is missing:
+                attempt(functools.partial(delete, domain, name_or_all, current_host=current_host))
+            else:
+                attempt(functools.partial(write, domain, name_or_all, value, current_host=current_host))
+        if failure:
+            raise failure[0]

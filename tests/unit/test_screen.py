@@ -29,7 +29,11 @@ def test_screenshot_arguments(capture, tmp_path):
     target = macos.screenshot(tmp_path / "shot.JPG", region=(1, 2, 30, 40), display=2, cursor=True, check_permission=False)
 
     assert target == (tmp_path / "shot.JPG").resolve()
-    assert fake_run.args == ["screencapture", "-x", "-t", "jpg", "-C", "-R1,2,30,40", "-D2", str(target)]
+    assert fake_run.args[:-1] == ["screencapture", "-x", "-t", "jpg", "-C", "-R1,2,30,40", "-D2"]
+    # Captured beside the output, under its name, then moved over it.
+    staged = fake_run.args[-1]
+    assert staged != str(target) and staged.endswith("/shot.JPG") and str(target.parent) in staged
+    assert target.read_bytes() == b"\x89PNG" and list(tmp_path.iterdir()) == [target]
 
 
 def test_screenshot_defaults_to_a_temporary_png(capture):
@@ -76,6 +80,17 @@ def test_screenshot_that_saved_nothing_is_an_error(fake_run, monkeypatch, tmp_pa
     with pytest.raises(macos.MacOSError, match="didn't save a screenshot"):
         macos.screenshot(tmp_path / "shot.png", check_permission=False)
     assert fake_run.calls[-1]["timeout"] > 0  # a hung screencapture is stopped
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_earlier_image_cant_pass_for_a_screenshot_that_saved_nothing(fake_run, tmp_path):
+    target = tmp_path / "shot.png"
+    target.write_bytes(b"the earlier screenshot")
+
+    with pytest.raises(macos.MacOSError, match="didn't save a screenshot"):
+        macos.screenshot(target, check_permission=False)
+    assert target.read_bytes() == b"the earlier screenshot"  # left as it was
+    assert list(tmp_path.iterdir()) == [target]
 
 
 def test_start_screensaver(fake_run):

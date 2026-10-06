@@ -213,6 +213,29 @@ def test_schedule_add_restores_the_replaced_job_when_bootstrap_fails(fake_run, h
     assert calls[-1] == ["launchctl", "bootstrap", "gui/501", path]  # ...and loaded again
 
 
+def test_schedule_add_leaves_a_job_whose_plist_it_cant_read(fake_run, home, monkeypatch):
+    from pathlib import Path
+
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    calls = _failing_bootstrap(monkeypatch, fake_run)
+    read_bytes = Path.read_bytes
+
+    def unreadable(self):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+
+    with pytest.raises(PermissionError):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert calls == []  # not unloaded, nor replaced: without a copy, it couldn't be put back
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert _plist(home, "backup")["StartInterval"] == 3600
+
+
 def test_schedule_add_keeps_a_replaced_paused_job_paused_when_bootstrap_fails(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=3600)
     calls = _failing_bootstrap(monkeypatch, fake_run)

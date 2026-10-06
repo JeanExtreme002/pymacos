@@ -67,7 +67,7 @@ def test_startup_items(tmp_path, monkeypatch):
 
 def test_largest_walks_a_folder_spotlight_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [])
-    monkeypatch.setattr(macos._system, "require_macos", lambda: None)  # Spotlight is faked: any platform will do
+    monkeypatch.setattr(finder, "require_macos", lambda: None)  # Spotlight is faked: any platform will do
     (tmp_path / "sub").mkdir()
     for name, size in (("small.txt", 10), ("big.bin", 3000), ("sub/bigger.bin", 5000), ("sub/mid.bin", 2000)):
         (tmp_path / name).write_bytes(b"x" * size)
@@ -103,7 +103,7 @@ def test_largest_also_walks_what_spotlight_leaves_out(tmp_path, monkeypatch):
     hidden.mkdir()
     (visible / "film.mov").write_bytes(b"x" * 3000)
     (hidden / "huge.bin").write_bytes(b"x" * 9000)  # Spotlight never indexes a hidden folder
-    monkeypatch.setattr(macos._system, "require_macos", lambda: None)
+    monkeypatch.setattr(finder, "require_macos", lambda: None)
     monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [visible / "film.mov"])
     found = finder.largest(tmp_path, at_least=1000)
     assert [(path.name, size) for path, size in found] == [("huge.bin", 9000), ("film.mov", 3000)]
