@@ -122,7 +122,8 @@ def last_backup() -> Optional[datetime]:
         _check_access(error.stderr)
         return None  # no backup yet, no backup disk set up, or it isn't connected
     # tmutil prints the backup's path, named after its date; its errors come with a success status.
-    _check_access(output)
+    # Only the other lines can be one: a volume or a Mac may be named anything, "Full Disk Access" too.
+    _check_access("\n".join(line for line in output.splitlines() if not line.startswith("/")))
     found = _BACKUP_NAME.findall(output)
     return datetime.strptime(found[-1], "%Y-%m-%d-%H%M%S") if found else None
 

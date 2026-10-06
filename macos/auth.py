@@ -15,6 +15,7 @@ sensitive action, not encryption: a Keychain item isn't locked behind it.
 
 import ctypes
 import functools
+import inspect
 import threading
 from functools import lru_cache
 from typing import Any, Callable, List, TypeVar
@@ -192,8 +193,11 @@ def required(reason: str, *, only_touch_id: bool = False) -> Callable[[_Function
             return function(*args, **kwargs)
 
         # functools.wraps sets __wrapped__, which inspect.unwrap() and
-        # signature() follow straight to the unguarded function.
+        # signature() follow straight to the unguarded function. The signature
+        # is kept on its own, without the function: code that inspects the
+        # arguments (events.run() passing the event or not) sees the same.
         delattr(guarded, "__wrapped__")
+        guarded.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
         return guarded  # type: ignore[return-value]
 
     return decorate

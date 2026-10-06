@@ -121,6 +121,9 @@ def test_a_metadata_copy_takes_the_format_of_its_extension(tmp_path):
     assert macos.image.taken_at(as_png) == when
     same = macos.image.set_location(photo, -22.95, -43.21, output=tmp_path / "copy.jpeg")
     assert macos.image.info(same).format == "jpeg" and macos.image.location(same) == pytest.approx((-22.95, -43.21))
+    with pytest.raises(ValueError, match="can't write '.webp' images"):
+        macos.image.set_taken_at(photo, when, output=tmp_path / "copy.webp")
+    assert not (tmp_path / "copy.webp").exists()
     # In place, the image keeps its own format, whatever its name says.
     misnamed = tmp_path / "really-a-jpeg.png"
     misnamed.write_bytes(photo.read_bytes())

@@ -381,10 +381,14 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
     The metadata is rewritten without touching the pixels when the format
     allows it (JPEG, PNG, TIFF...). Otherwise, the image is saved again. A
     copy takes the format of its extension, as :func:`convert` does (a
-    ``.png`` copy of a JPEG is a PNG); the image itself keeps its own.
+    ``.png`` copy of a JPEG is a PNG), and an extension it can't write is
+    refused (``ValueError``) unless the copy's is the original's own; the
+    image itself keeps its own format.
     """
     original = Path(path).expanduser().absolute()
     target = Path(output).expanduser().absolute() if output is not None else original
+    if output is not None and target.suffix.lower() != original.suffix.lower():
+        _output(target)  # a ".webp" copy of a JPEG would be JPEG bytes under a WebP name
     io = _io()
     cf = _cf.lib()
     with _cf.owned(_source(original)) as image_source:

@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.auth`. They run on any platform."""
 
+import inspect
+
 import pytest
 
 import macos
@@ -115,8 +117,6 @@ def test_an_interrupted_prompts_late_success_cant_confirm_the_next(prompts, monk
 
 
 def test_required_hides_the_unguarded_function(monkeypatch):
-    import inspect
-
     monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: False)
 
     @macos.auth.required("deploy")
@@ -125,6 +125,24 @@ def test_required_hides_the_unguarded_function(monkeypatch):
         return "deployed"
 
     assert not hasattr(deploy, "__wrapped__")
+    assert str(inspect.signature(deploy)) == "()"  # the arguments it takes, though not the function itself
     assert (deploy.__name__, deploy.__doc__) == ("deploy", "Deploy it.")
     with pytest.raises(macos.PermissionDeniedError):
         inspect.unwrap(deploy)()
+
+
+def test_a_guarded_callback_without_arguments_gets_no_event(monkeypatch):
+    from macos import events
+
+    monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: True)
+
+    @macos.auth.required("lock up")
+    def on_sleep():
+        return "locked"
+
+    @macos.auth.required("log it")
+    def on_event(event):
+        return event
+
+    assert events._takes_event(on_sleep) is False and on_sleep() == "locked"
+    assert events._takes_event(on_event) is True
