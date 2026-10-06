@@ -54,7 +54,8 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     command = ["osascript"]
     for line in script:
         command += ["-e", line]
-    return _run([*command, "--", *args]).rstrip("\n").split("\n")
+    # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
+    return _run([*command, "--", *args], exact_newlines=True).rstrip("\n").split("\n")
 
 
 def _giving_up(timeout: Optional[float]) -> str:

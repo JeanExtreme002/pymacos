@@ -52,7 +52,13 @@ def deprecated(replacement: str, *, removal: str) -> Callable[[_F], _F]:
     return decorate
 
 
-def run(args: Sequence[str], *, input: Optional[str] = None, timeout: Optional[float] = None) -> str:
+def run(
+    args: Sequence[str],
+    *,
+    input: Optional[str] = None,
+    timeout: Optional[float] = None,
+    exact_newlines: bool = False,
+) -> str:
     """
     Run a system command and return its standard output.
 
@@ -61,21 +67,32 @@ def run(args: Sequence[str], *, input: Optional[str] = None, timeout: Optional[f
     :class:`CommandError` carrying the command's stderr. With ``timeout``,
     a command still running after that many seconds is killed, and
     :class:`CommandTimeoutError` raised.
+
+    Text mode turns ``\r\n`` and ``\r`` into ``\n``; ``exact_newlines=True``
+    keeps them as the command wrote them, for output that holds file names
+    (which may contain any of them).
     """
     require_macos()
 
+    if exact_newlines:
+        options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
+    else:
+        options = {"input": input, "text": True, "encoding": "utf-8"}
     try:
-        result = subprocess.run(
-            list(args), input=input, capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
+        result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     except subprocess.TimeoutExpired:
         raise CommandTimeoutError(args, timeout or 0) from None
 
+    stdout, stderr = result.stdout, result.stderr
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
-        raise CommandError(args, result.returncode, result.stderr)
-    return result.stdout
+        raise CommandError(args, result.returncode, stderr)
+    return stdout
 
 
 def applescript(app: str, script: str, *args: str, input: Optional[str] = None) -> str:

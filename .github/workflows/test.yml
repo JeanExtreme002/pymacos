@@ -45,7 +45,7 @@ jobs:
       # They talk to a real, shared runner, where speech, launchd and the
       # network are sometimes slow: a failure is retried before it counts.
       # Their coverage is added to the unit tests' for the Codecov report.
-      run: pytest tests/live -v --reruns 2 --reruns-delay 5 --cov=macos --cov-append --cov-report=term --cov-report=xml
+      run: pytest tests/live -v --reruns 1 --reruns-delay 5 --cov=macos --cov-append --cov-report=term --cov-report=xml
     - name: Upload coverage to Codecov
       # Informational only (see codecov.yml): a flaky upload never fails the
       # job. Runs even when tests fail, so partial coverage stays visible.

@@ -102,3 +102,36 @@ def test_dialog_chosen_paths_may_hold_newlines(fake_run):
     assert macos.dialog.choose_file() == Path("/a/odd\nname.pdf")
     fake_run.stdout = "ok\n/Users/me/new\nfolder/\0\n"
     assert macos.dialog.choose_folder() == Path("/Users/me/new\nfolder")
+
+
+def test_dialog_chosen_paths_keep_carriage_returns(fake_run, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    # Through the capture layer: the output comes back as bytes, decoded without
+    # text mode, which would turn the \r\n and \r of these names into \n.
+    calls = []
+
+    def picker(args, **kwargs):
+        calls.append(kwargs)
+        stdout = "ok\n/a/first\r\nline.pdf\0/b/old\rmac.pdf\0\n".encode("utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout, b"")
+
+    monkeypatch.setattr(_system.subprocess, "run", picker)
+    assert macos.dialog.choose_files() == [Path("/a/first\r\nline.pdf"), Path("/b/old\rmac.pdf")]
+    assert not calls[-1].get("text")
+
+
+def test_run_decodes_exact_output_and_errors(fake_run, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    def tool(args, **kwargs):
+        assert kwargs["input"] == "é\r\n".encode("utf-8") and "text" not in kwargs
+        return subprocess.CompletedProcess(args, 1, b"", "falhou\r\n".encode("utf-8"))
+
+    monkeypatch.setattr(_system.subprocess, "run", tool)
+    with pytest.raises(macos.CommandError, match="falhou"):
+        _system.run(["tool"], input="é\r\n", exact_newlines=True)
