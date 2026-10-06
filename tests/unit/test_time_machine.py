@@ -68,6 +68,11 @@ def test_time_machine_last_backup_on_a_disk_named_like_an_error(fake_run):
     assert macos.time_machine.last_backup() == datetime(2026, 9, 28, 23, 10, 4)
 
 
+def test_time_machine_last_backup_on_a_disk_whose_name_has_a_newline(fake_run):
+    fake_run.stdout = "/Volumes/Backup\nFull Disk Access/Backups.backupdb/My Mac/2026-09-28-231004\n"
+    assert macos.time_machine.last_backup() == datetime(2026, 9, 28, 23, 10, 4)
+
+
 def test_time_machine_last_backup_none_when_there_is_none(fake_run):
     fake_run.returncode, fake_run.stderr = 1, "No machine directory found for host.\n"
     assert macos.time_machine.last_backup() is None
