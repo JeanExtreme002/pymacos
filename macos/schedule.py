@@ -276,7 +276,12 @@ def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool)
         if previous is None:
             path.unlink(missing_ok=True)
             return
-        path.write_bytes(previous)
+        try:
+            unchanged = path.read_bytes() == previous  # removing it failed: it's still there, as it was
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            path.write_bytes(previous)  # skipped otherwise: a read-only plist would refuse, and keep it unloaded
         if was_paused:
             _run(["launchctl", "disable", _target(name)])  # a paused job stays unloaded
         else:

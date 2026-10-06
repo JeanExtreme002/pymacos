@@ -268,6 +268,33 @@ def test_schedule_add_restores_the_replaced_job_when_removing_it_fails(fake_run,
     assert _plist(home, "backup")["StartInterval"] == 3600
 
 
+def test_schedule_add_reloads_a_read_only_job_it_couldnt_remove(fake_run, home, monkeypatch):
+    from pathlib import Path
+
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    calls = _failing_bootstrap(monkeypatch, fake_run, fail=False)
+    unlink, write_bytes = Path.unlink, Path.write_bytes
+
+    def read_only(method):
+        def refuse(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError(13, "Permission denied", str(self))
+            return method(self, *args, **kwargs)
+
+        return refuse
+
+    monkeypatch.setattr(Path, "unlink", read_only(unlink))  # can't be removed...
+    monkeypatch.setattr(Path, "write_bytes", read_only(write_bytes))  # ...nor written
+
+    with pytest.raises(PermissionError):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+    bootstraps = [call for call in calls if call[1] == "bootstrap"]
+    assert bootstraps == [["launchctl", "bootstrap", "gui/501", str(path)]]  # the unchanged old job, loaded again
+    assert _plist(home, "backup")["StartInterval"] == 3600
+
+
 def test_schedule_add_removes_a_partial_plist_when_there_was_no_job(fake_run, home, monkeypatch):
     from pathlib import Path
 

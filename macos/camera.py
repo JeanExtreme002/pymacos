@@ -284,8 +284,14 @@ def photo(path: Optional[PathLike] = None, *, camera: Union[str, Camera, None] =
         with _objc.autorelease_pool():
             device = _device(camera)
             output = _objc.new("AVCapturePhotoOutput")
-            session = _session([_input(device)], output)
+            # The delegate first: once the session runs (the camera's light on),
+            # nothing may come between it and the block that stops it.
             delegate = _delegate("photo")
+            try:
+                session = _session([_input(device)], output)
+            except BaseException:
+                _forget(delegate)
+                raise
             try:
                 _objc.run_until(lambda: False, _WARM_UP)
                 settings = _objc.send(_objc.cls("AVCapturePhotoSettings"), "photoSettings")
@@ -364,8 +370,12 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
             )
             inputs.append(_input(microphone))
         output = _objc.new("AVCaptureMovieFileOutput")
-        session = _session(inputs, output)
-        delegate = _delegate("movie")
+        delegate = _delegate("movie")  # before the session runs, as in photo()
+        try:
+            session = _session(inputs, output)
+        except BaseException:
+            _forget(delegate)
+            raise
         try:
             _objc.send(
                 output,

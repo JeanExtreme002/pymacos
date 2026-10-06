@@ -66,3 +66,49 @@ def test_a_capture_that_timed_out_is_forgotten(monkeypatch):
     camera._store(again, {"done": True, "data": b"new photo"})
     assert camera._wait(again, "photo")["data"] == b"new photo"
     assert again not in camera._results and again not in camera._waiting
+
+
+@pytest.fixture
+def capture_stubs(monkeypatch):
+    """photo() and _record() up to the session: what was made, started and forgotten, in order."""
+    from contextlib import nullcontext
+
+    from macos import _capture, camera
+
+    happened = []
+    monkeypatch.setattr(camera._files, "require_main_thread", lambda what: None)
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(camera._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(camera._objc, "new", lambda name: name)
+    monkeypatch.setattr(camera, "_device", lambda which: "device")
+    monkeypatch.setattr(camera, "_input", lambda device: "input")
+    monkeypatch.setattr(camera, "_delegate", lambda kind: happened.append("delegate") or "the-delegate")
+    monkeypatch.setattr(camera, "_forget", lambda delegate: happened.append("forget"))
+    return happened
+
+
+def test_the_camera_isnt_turned_on_when_its_delegate_cant_be_made(capture_stubs, monkeypatch, tmp_path):
+    from macos import camera
+
+    def interrupted(kind):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(camera, "_delegate", interrupted)
+    monkeypatch.setattr(camera, "_session", lambda inputs, output: capture_stubs.append("camera on"))
+    for work in (lambda: macos.camera.photo(tmp_path / "me.jpg"), lambda: camera._record(tmp_path / "clip.mov", 1, None, False)):
+        with pytest.raises(KeyboardInterrupt):
+            work()
+    assert "camera on" not in capture_stubs  # nothing between the camera turning on and the block that turns it off
+
+
+def test_a_session_that_fails_to_start_forgets_its_delegate(capture_stubs, monkeypatch, tmp_path):
+    from macos import camera
+
+    def refused(inputs, output):
+        raise macos.MacOSError("the camera can't be used that way")
+
+    monkeypatch.setattr(camera, "_session", refused)
+    for work in (lambda: macos.camera.photo(tmp_path / "me.jpg"), lambda: camera._record(tmp_path / "clip.mov", 1, None, False)):
+        with pytest.raises(macos.MacOSError, match="can't be used that way"):
+            work()
+    assert capture_stubs == ["delegate", "forget", "delegate", "forget"]
