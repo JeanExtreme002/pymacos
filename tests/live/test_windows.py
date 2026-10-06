@@ -21,11 +21,12 @@ def test_windows(test_window):
 
     window.center()
     time.sleep(0.2)
-    display = macos.screen.displays()[0]
+    # In the area the menu bar and the Dock leave, like snap().
+    area_x, area_y, area_width, area_height = macos.windows._usable_areas()[0]
     x, y, width, height = window.frame
     assert (width, height) == (360, 260)  # the same size
-    assert abs(x + width / 2 - (display.x + display.width / 2)) <= 1
-    assert abs(y + height / 2 - (display.y + display.height / 2)) <= 1
+    assert abs(x + width / 2 - (area_x + area_width / 2)) <= 1
+    assert abs(y + height / 2 - (area_y + area_height / 2)) <= 1
 
     assert window.fullscreen is False
     if os.environ.get("CI"):  # it switches to a Space of its own: not on the user's Mac
