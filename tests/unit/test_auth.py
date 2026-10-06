@@ -131,6 +131,21 @@ def test_required_hides_the_unguarded_function(monkeypatch):
         inspect.unwrap(deploy)()
 
 
+def test_required_takes_a_callable_without_a_signature(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: True)
+    try:
+        inspect.signature(sys.getsizeof)
+    except ValueError:
+        pass  # what this test needs: a builtin that has none
+    else:
+        pytest.skip("sys.getsizeof has a signature on this Python")
+
+    size = macos.auth.required("measure")(sys.getsizeof)
+    assert size(0) == sys.getsizeof(0) and not hasattr(size, "__wrapped__")
+
+
 def test_a_guarded_callback_without_arguments_gets_no_event(monkeypatch):
     from macos import events
 

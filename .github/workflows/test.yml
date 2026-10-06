@@ -38,7 +38,9 @@ jobs:
       # It measures the unit tests alone: which live tests run depends on the
       # runner (no battery, no Bluetooth, no network...), so a gate on the
       # whole suite could fail for reasons unrelated to the change.
-      run: pytest tests/unit -v --cov=macos --cov-report=term --cov-fail-under=60
+      # The XML is for Codecov even when this step fails and the live tests are
+      # skipped; when they run, they rewrite it with both suites' coverage.
+      run: pytest tests/unit -v --cov=macos --cov-report=term --cov-report=xml --cov-fail-under=60
     - name: Live tests
       # They talk to a real, shared runner, where speech, launchd and the
       # network are sometimes slow: a failure is retried before it counts.

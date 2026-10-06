@@ -197,7 +197,10 @@ def required(reason: str, *, only_touch_id: bool = False) -> Callable[[_Function
         # is kept on its own, without the function: code that inspects the
         # arguments (events.run() passing the event or not) sees the same.
         delattr(guarded, "__wrapped__")
-        guarded.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
+        try:
+            guarded.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
+        except (TypeError, ValueError):
+            pass  # some builtins have none to keep: the wrapper's own (*args, **kwargs) stands
         return guarded  # type: ignore[return-value]
 
     return decorate
