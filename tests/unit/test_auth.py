@@ -87,6 +87,33 @@ def test_a_late_success_after_the_next_denial_doesnt_confirm(prompts):
     assert macos.auth.confirm("deploy") is False
 
 
+def test_an_interrupted_prompts_late_success_cant_confirm_the_next(prompts, monkeypatch):
+    from macos import _objc, auth
+
+    replies, blocks, sent = prompts
+
+    def interrupted(condition, timeout):
+        raise KeyboardInterrupt  # Ctrl-C while waiting for the answer
+
+    monkeypatch.setattr(_objc, "run_until", interrupted)
+    replies.append(None)
+    with pytest.raises(KeyboardInterrupt):
+        macos.auth.confirm("deploy")
+    assert "invalidate" in sent and auth._generation == [1]  # its block retired
+
+    monkeypatch.setattr(_objc, "run_until", lambda condition, timeout: condition())
+
+    def late_success_then_denied(made):
+        made[0](True, 0)  # the interrupted prompt's success, arriving during the next call
+        made[1](False, 0)  # the next prompt: denied
+
+    replies.append(late_success_then_denied)
+    assert macos.auth.confirm("deploy") is False
+
+    replies.append(lambda made: made[0](True, 0))  # only the stale success, no answer of its own
+    assert macos.auth.confirm("deploy", timeout=0.01) is False
+
+
 def test_required_hides_the_unguarded_function(monkeypatch):
     import inspect
 

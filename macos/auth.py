@@ -143,6 +143,18 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
                 return False
             with _state:
                 return _answers.pop(0)
+        except BaseException:
+            # Interrupted (Ctrl-C...) while the prompt may still be up: retire
+            # its block first, so whatever it answers later goes nowhere, then
+            # take the prompt away.
+            with _state:
+                _generation[0] += 1
+                del _answers[:]
+            try:
+                _objc.send(context, "invalidate", restype=None)
+            except Exception:
+                pass  # the interruption is what the caller needs to see
+            raise
         finally:
             _objc.send(context, "release", restype=None)
 
