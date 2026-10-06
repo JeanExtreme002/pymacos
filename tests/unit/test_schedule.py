@@ -174,7 +174,14 @@ def test_schedule_rejects_a_time_with_a_trailing_newline(fake_run, home):
         macos.schedule.add("x", home / "backup.py", at="09:00\n9")
 
 
-def _failing_bootstrap(monkeypatch, fake_run):
+def _failing_bootstrap(monkeypatch, fake_run, *, fail=True):
+    """
+    Record launchctl's commands; with ``fail``, the first bootstrap (the new job's) fails.
+
+    Without it, every command succeeds: for the tests where something else
+    fails before the new job is bootstrapped, so the old job's own bootstrap,
+    when it's put back, must work.
+    """
     import subprocess
 
     from macos import _system
@@ -183,7 +190,7 @@ def _failing_bootstrap(monkeypatch, fake_run):
 
     def launchctl(args, **kwargs):
         calls.append(list(args))
-        if args[1] == "bootstrap" and len([call for call in calls if call[1] == "bootstrap"]) == 1:
+        if fail and args[1] == "bootstrap" and len([call for call in calls if call[1] == "bootstrap"]) == 1:
             return subprocess.CompletedProcess(args, 5, "", "Bootstrap failed: 5: Input/output error")
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -218,7 +225,7 @@ def test_schedule_add_restores_the_replaced_job_when_writing_the_new_plist_fails
 
     macos.schedule.add("backup", home / "backup.py", every=3600)
     path = home / "Library/LaunchAgents/pymacos.backup.plist"
-    calls = _failing_bootstrap(monkeypatch, fake_run)
+    calls = _failing_bootstrap(monkeypatch, fake_run, fail=False)  # the old job's bootstrap must succeed
     write_bytes = Path.write_bytes
 
     def disk_full(self, data):
@@ -233,7 +240,8 @@ def test_schedule_add_restores_the_replaced_job_when_writing_the_new_plist_fails
         macos.schedule.add("backup", home / "backup.py", every=60)
 
     assert _plist(home, "backup")["StartInterval"] == 3600  # the old job is back, not the partial plist...
-    assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(path)]  # ...and loaded again
+    bootstraps = [call for call in calls if call[1] == "bootstrap"]
+    assert bootstraps == [["launchctl", "bootstrap", "gui/501", str(path)]]  # ...loaded again: the only bootstrap
 
 
 def test_schedule_add_restores_the_replaced_job_when_removing_it_fails(fake_run, home, monkeypatch):
@@ -241,7 +249,7 @@ def test_schedule_add_restores_the_replaced_job_when_removing_it_fails(fake_run,
 
     macos.schedule.add("backup", home / "backup.py", every=3600)
     path = home / "Library/LaunchAgents/pymacos.backup.plist"
-    calls = _failing_bootstrap(monkeypatch, fake_run)
+    calls = _failing_bootstrap(monkeypatch, fake_run, fail=False)  # the old job's bootstrap must succeed
     unlink = Path.unlink
 
     def refused(self, *args, **kwargs):
@@ -255,7 +263,8 @@ def test_schedule_add_restores_the_replaced_job_when_removing_it_fails(fake_run,
         macos.schedule.add("backup", home / "backup.py", every=60)
 
     assert ["launchctl", "bootout", "gui/501/pymacos.backup"] in calls  # it was unloaded...
-    assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(path)]  # ...and is loaded again
+    bootstraps = [call for call in calls if call[1] == "bootstrap"]
+    assert bootstraps == [["launchctl", "bootstrap", "gui/501", str(path)]]  # ...and loaded again: the only bootstrap
     assert _plist(home, "backup")["StartInterval"] == 3600
 
 
