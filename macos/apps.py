@@ -375,11 +375,12 @@ def open_with(target: Union[str, "os.PathLike[str]"], app: str, *, background: b
     and :class:`~macos.errors.CommandError`, with macOS's reason, when the
     app or the file won't open. Also available as ``macos.open_with``.
     """
-    from .launch import _flags, _target  # launch imports this module
+    from .launch import _flags, _resolve  # launch imports this module
 
-    resolved = _target(target)
+    _, arguments = _resolve(target)
+    resolved = arguments[-1]
     try:
-        _run(["open", *_flags(background), "-a", _locate(app), "--", resolved])
+        _run(["open", *_flags(background), "-a", _locate(app), *arguments])
     except CommandError as error:
         if _app_missing(error):
             raise AppNotFoundError("{!r} could not open {}: {}".format(app, resolved, error.stderr or error)) from error

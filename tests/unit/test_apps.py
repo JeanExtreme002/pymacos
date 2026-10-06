@@ -10,7 +10,7 @@ import macos
 
 def test_open_passes_urls_through_and_checks_paths(fake_run, tmp_path):
     macos.open("https://python.org", background=True)
-    assert fake_run.args == ["open", "-g", "--", "https://python.org"]
+    assert fake_run.args == ["open", "-g", "-u", "https://python.org"]
 
     macos.open(tmp_path)
     assert fake_run.args == ["open", "--", str(tmp_path)]

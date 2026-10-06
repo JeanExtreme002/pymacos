@@ -16,7 +16,7 @@ double-clicking in Finder or choosing *Open With*.
 import os
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 from ._system import run as _run
 from .apps import open_with
@@ -36,13 +36,20 @@ def _scheme(target: Target) -> Optional[str]:
     return None
 
 
-def _target(target: Target) -> str:
-    if _scheme(target) is not None:
-        return str(target)
+def _resolve(target: Target) -> Tuple[Optional[str], List[str]]:
+    """
+    Tell, once, whether ``target`` is a URL or a path: its scheme (``None`` for a path), and the ``open`` arguments for it.
+
+    A URL goes with ``-u``, which ``open`` takes as a URL even when a file
+    of that name appears afterwards: what was checked is what's opened.
+    """
+    scheme = _scheme(target)
+    if scheme is not None:
+        return scheme, ["-u", str(target)]
     path = Path(target).expanduser().absolute()
     if not os.path.lexists(path):
         raise FileNotFoundError(str(path))
-    return str(path)
+    return None, ["--", str(path)]
 
 
 def _flags(background: bool) -> List[str]:
@@ -65,13 +72,14 @@ def open(target: Target, *, background: bool = False, schemes: Optional[Iterable
 
         macos.open(link, schemes={"https", "http"})   # a link from a web page: not a file, nor zoommtg://
     """
+    found, arguments = _resolve(target)  # classified once: the check and the command agree
     if schemes is not None:
         allowed = {scheme.lower().rstrip(":") for scheme in ([schemes] if isinstance(schemes, str) else schemes)}
-        scheme = _scheme(target) or "file"
+        scheme = found or "file"
         if scheme not in allowed:
             raise ValueError(
                 "{!r} is a {} {}, and only {} may be opened".format(
                     os.fspath(target), scheme, "URL" if scheme != "file" else "path", ", ".join(sorted(allowed)) or "nothing"
                 )
             )
-    _run(["open", *_flags(background), "--", _target(target)])
+    _run(["open", *_flags(background), *arguments])
