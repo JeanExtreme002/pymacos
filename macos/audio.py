@@ -680,13 +680,17 @@ class _Samples:
         self.seek(0)
 
     def seek(self, frame: int) -> None:
-        self.stream.seek(self.start + frame * 2 * self.channels)
+        self.position = max(0, min(frame, self.frames))
+        self.stream.seek(self.start + self.position * 2 * self.channels)
 
     def read(self, frames: int) -> "array.array[int]":
         """The next ``frames`` frames (fewer at the end), read straight into the array: no copy in between."""
+        # Never past the data chunk: other chunks (LIST metadata...) may follow it, and aren't sound.
+        frames = max(0, min(frames, self.frames - self.position))
         samples = array.array("h", [0]) * (frames * self.channels)
-        count = (self.stream.readinto(memoryview(samples).cast("B")) or 0) // 2
+        count = (self.stream.readinto(memoryview(samples).cast("B")) or 0) // 2 if frames else 0
         del samples[count - count % self.channels :]  # whole frames only
+        self.position += len(samples) // self.channels
         if sys.byteorder == "big":
             samples.byteswap()  # WAV is little-endian
         return samples

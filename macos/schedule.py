@@ -232,9 +232,10 @@ def add(
     previous: Optional[bytes] = path.read_bytes() if path.exists() else None
     was_paused = previous is not None and name in _paused()
     plist = plistlib.dumps(job)  # before anything changes: a value it can't hold raises here
-    remove(name)  # unload the old one first (and forget it was paused)
     try:
-        # Writing the new plist can fail too (a full disk): that also puts the old job back.
+        # Removing the old job can fail after unloading it, and writing the new
+        # plist (a full disk): those also put the old job back.
+        remove(name)  # unload the old one first (and forget it was paused)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plist)
         _run(["launchctl", "bootstrap", _domain(), str(path)])

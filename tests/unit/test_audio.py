@@ -195,6 +195,23 @@ def test_wav_samples_are_read_in_whole_frames():
     assert list(samples.read(1)) == [2, -2]
 
 
+def test_wav_samples_stop_at_the_end_of_the_data_chunk():
+    import io
+    import struct
+
+    # A LIST chunk (metadata) after the samples, as some tools write it: never read as sound.
+    listed = struct.pack("<4sI4s4sI", b"LIST", 14, b"INFO", b"ISFT", 5) + b"tool\x00\x00"
+    wav = _wav([1, -1, 2, -2], 2, 8000) + listed
+    wav = wav[:4] + struct.pack("<I", len(wav) - 8) + wav[8:]  # RIFF size, including the new chunk
+
+    samples = macos.audio._Samples(io.BytesIO(wav))
+    assert samples.frames == 2
+    assert list(samples.read(10)) == [1, -1, 2, -2]  # an oversized read stops at the data's end
+    assert list(samples.read(10)) == []  # and nothing comes after it
+    samples.seek(1)
+    assert list(samples.read(10)) == [2, -2]
+
+
 def test_record_until_silence_stops_after_quiet(monkeypatch, tmp_path):
     from contextlib import nullcontext
 

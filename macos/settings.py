@@ -553,11 +553,14 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
                         continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
                     if current == _normalized(value):
                         continue
+                    # Noted before the change: one that fails half-way (two preferences, the
+                    # second refused) is put back too.
+                    undo.append((setting, current))
                     try:
                         setting.change(value)
                     except NotSupportedError:
-                        continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
-                    undo.append((setting, current))
+                        undo.pop()  # nothing changed: this Mac lacks it (a keyboard backlight, Night Shift...)
+                        continue
                     changed.append("{}.{}".format(section, name))
         except BaseException:
             # What the checks can't foresee (a permission, a file gone): put

@@ -133,6 +133,23 @@ def test_apply_puts_back_what_changed_when_a_later_change_fails(fake_settings, m
     assert changes == [("autohide", True), ("autohide", False)] and values["autohide"] is False
 
 
+def test_apply_puts_back_a_setting_that_failed_half_way(fake_settings, monkeypatch):
+    values, changes, _ = fake_settings
+    state = {"size": 48}
+
+    def two_writes(value):
+        state["size"] = value  # the first preference is written...
+        if value == 64:
+            raise macos.PermissionDeniedError("the domain isn't writable")  # ...the second refused
+
+    table = settings._SETTINGS["dock"]
+    monkeypatch.setitem(table, "size", settings._Setting(lambda: state["size"], two_writes))
+    with pytest.raises(macos.PermissionDeniedError):
+        settings.apply({"dock": {"autohide": True, "size": 64}})
+    assert state["size"] == 48  # the failing setting is put back too
+    assert changes == [("autohide", True), ("autohide", False)] and values["autohide"] is False
+
+
 def test_every_real_setting_has_a_check_and_this_macs_values_pass_it():
     for section, table in settings._SETTINGS.items():
         for name, setting in table.items():
