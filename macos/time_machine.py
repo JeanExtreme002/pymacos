@@ -28,6 +28,8 @@ from typing import List, Optional, Union
 from ._system import require_macos, run as _run
 from .errors import CommandError, MacOSError, PermissionDeniedError
 
+_TIMEOUT = 120.0  # seconds for tmutil, except a backup waited for: it may wake a network disk first
+
 __all__ = [
     "destinations",
     "backup_now",
@@ -49,7 +51,7 @@ def destinations() -> List[str]:
     """The names of the disks Time Machine backs up to; ``[]`` when none is set up."""
     require_macos()
     try:
-        output = _run(["tmutil", "destinationinfo"])
+        output = _run(["tmutil", "destinationinfo"], timeout=_TIMEOUT)
     except CommandError as error:
         if "No destinations configured" in error.stderr:
             return []
@@ -65,18 +67,18 @@ def backup_now(*, wait: bool = False) -> None:
     """
     if not destinations():
         raise MacOSError("Time Machine has no backup disk: set one up in System Settings › General › Time Machine")
-    _run(["tmutil", "startbackup", *(["--block"] if wait else [])])
+    _run(["tmutil", "startbackup", *(["--block"] if wait else [])], timeout=None if wait else _TIMEOUT)
 
 
 def stop_backup() -> None:
     """Stop the backup in progress, like *Skip This Backup*."""
     require_macos()
-    _run(["tmutil", "stopbackup"])
+    _run(["tmutil", "stopbackup"], timeout=_TIMEOUT)
 
 
 def _status() -> str:
     require_macos()
-    return _run(["tmutil", "status"])
+    return _run(["tmutil", "status"], timeout=_TIMEOUT)
 
 
 def is_backing_up() -> bool:
@@ -117,7 +119,7 @@ def last_backup() -> Optional[datetime]:
     """
     require_macos()
     try:
-        output = _run(["tmutil", "latestbackup"])
+        output = _run(["tmutil", "latestbackup"], timeout=_TIMEOUT)
     except CommandError as error:
         _check_access(error.stderr)
         return None  # no backup yet, no backup disk set up, or it isn't connected
@@ -148,7 +150,7 @@ def exclude(path: PathLike) -> None:
     isn't listed in System Settings' *Exclude from Backups* list either.
     Copies made before stay on the backup disk.
     """
-    _run(["tmutil", "addexclusion", _existing(path)])
+    _run(["tmutil", "addexclusion", _existing(path)], timeout=_TIMEOUT)
 
 
 def include(path: PathLike) -> None:
@@ -158,7 +160,7 @@ def include(path: PathLike) -> None:
     Nothing to do when it isn't excluded. Doesn't undo an exclusion made in
     System Settings or by macOS itself: see :func:`is_excluded`.
     """
-    _run(["tmutil", "removeexclusion", _existing(path)])
+    _run(["tmutil", "removeexclusion", _existing(path)], timeout=_TIMEOUT)
 
 
 def is_excluded(path: PathLike) -> bool:
@@ -167,4 +169,4 @@ def is_excluded(path: PathLike) -> bool:
     :func:`exclude`, the list in System Settings, or macOS itself (caches and
     temporary files). A file inside an excluded folder counts as excluded.
     """
-    return _run(["tmutil", "isexcluded", _existing(path)]).lstrip().startswith("[Excluded]")
+    return _run(["tmutil", "isexcluded", _existing(path)], timeout=_TIMEOUT).lstrip().startswith("[Excluded]")

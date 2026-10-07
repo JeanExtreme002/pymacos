@@ -28,7 +28,16 @@ from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tu
 
 from . import _cf, _iokit, _libc, _objc, defaults
 from ._libc import pids as _pids
-from ._system import framework, require_macos, run as _run
+from ._system import (
+    LAUNCHCTL_TIMEOUT,
+    PROFILER_TIMEOUT,
+    framework,
+    killall,
+    launchd_disabled,
+    launchd_user_domain,
+    require_macos,
+    run as _run,
+)
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
 __all__ = [
@@ -145,9 +154,6 @@ def build() -> str:
     return _run(["sw_vers", "-buildVersion"]).strip()
 
 
-_PROFILER_TIMEOUT = 60.0  # seconds: system_profiler takes a moment, and has hung on some Macs
-
-
 @lru_cache(maxsize=None)
 def model() -> str:
     """
@@ -157,7 +163,7 @@ def model() -> str:
     some virtual machines.
     """
     # system_profiler takes a moment, and the answer never changes: cache it (a failure isn't cached).
-    output = _run(["system_profiler", "SPHardwareDataType", "-json"], timeout=_PROFILER_TIMEOUT)
+    output = _run(["system_profiler", "SPHardwareDataType", "-json"], timeout=PROFILER_TIMEOUT)
     try:
         name = json.loads(output)["SPHardwareDataType"][0]["machine_name"]
     except (ValueError, LookupError, TypeError):
@@ -529,15 +535,21 @@ def eject(volume: Union[str, "os.PathLike[str]", Volume]) -> None:
     _release(["diskutil", "eject", str(chosen.path)])
 
 
-def _detach(devices: List[str]) -> bool:
-    """Detach the whole disk of an image just attached (the shortest of its devices); whether there was one."""
+def _detach(devices: List[str]) -> str:
+    """
+    Detach the whole disk of an image just attached (the shortest of its devices), for an error message.
+
+    Returns what happened, to append to that message: ``" (it was detached)"``,
+    ``" (detaching /dev/diskN failed: ...)"``, or ``""`` when no disk was named.
+    A failed detach doesn't raise: the error that made us detach is the one to raise.
+    """
     for device in sorted(devices, key=len)[:1]:
         try:
             _run(["hdiutil", "detach", device, "-force"], timeout=_HDIUTIL_TIMEOUT)
-        except MacOSError:
-            pass  # the error that made us detach is the one to raise
-        return True
-    return False
+        except MacOSError as error:
+            return " (detaching {} failed, it may still be attached: {})".format(device, error)
+        return " (it was detached)"
+    return ""
 
 
 _HDIUTIL_TIMEOUT = 60.0  # seconds for a detach
@@ -580,17 +592,13 @@ def mount_image(path: Union[str, "os.PathLike[str]"], *, timeout: float = 300.0)
     if not isinstance(entities, list):
         # Attached, maybe, but where is unknown: detach the disk its text names, rather than leave it attached.
         detached = _detach(_DEVICE.findall(output))
-        raise MacOSError(
-            "hdiutil attached {} but its answer can't be read{}: {!r}".format(
-                image, " (it was detached)" if detached else "", output[:500]
-            )
-        )
+        raise MacOSError("hdiutil attached {} but its answer can't be read{}: {!r}".format(image, detached, output[:500]))
     entities = [entity for entity in entities if isinstance(entity, dict)]
     points = [str(entity["mount-point"]) for entity in entities if entity.get("mount-point")]
     if not points:
         # Attached without a volume: detach its disk, so the image isn't left attached.
-        _detach([str(entity["dev-entry"]) for entity in entities if entity.get("dev-entry")])
-        raise MacOSError("{} has no volume to mount".format(image))
+        detached = _detach([str(entity["dev-entry"]) for entity in entities if entity.get("dev-entry")])
+        raise MacOSError("{} has no volume to mount{}".format(image, detached))
     return Path(points[0])
 
 
@@ -839,10 +847,7 @@ def set_keep_windows_on_quit(on: bool = True) -> None:
 
 def _restart_control_center() -> None:
     """Quit Control Center, which draws the menu bar's clock and icons: macOS starts it again, reading the settings."""
-    try:
-        _run(["killall", "ControlCenter"])
-    except MacOSError:
-        pass  # not running: it reads them when it starts
+    killall("ControlCenter")
 
 
 def battery_percentage_shown() -> bool:
@@ -2351,22 +2356,11 @@ class StartupItem:
 def _launchd_state(domain: str, label: str) -> Optional[bool]:
     """Whether a job runs now: ``True``, ``False`` (loaded, not running, or not loaded), or ``None`` if launchd won't say."""
     try:
-        output = _run(["launchctl", "print", "{}/{}".format(domain, label)])
+        output = _run(["launchctl", "print", "{}/{}".format(domain, label)], timeout=LAUNCHCTL_TIMEOUT)
     except CommandError as error:
         return False if "Could not find service" in (error.stderr or "") else None
     found = re.search(r"^\s*state = (\S+)", output, re.M)
     return found.group(1) == "running" if found else None
-
-
-def _disabled(domain: str) -> Dict[str, bool]:
-    """launchctl's own switches: label -> disabled."""
-    try:
-        output = _run(["launchctl", "print-disabled", domain])
-    except CommandError:
-        return {}
-    # Written as words or as booleans, depending on the macOS version: "disabled" and true mean off.
-    found = re.findall(r'"([^"]+)"\s*=>\s*(enabled|disabled|true|false)', output)
-    return {label: state in ("disabled", "true") for label, state in found}
 
 
 def startup_items() -> List[StartupItem]:
@@ -2388,8 +2382,8 @@ def startup_items() -> List[StartupItem]:
     import plistlib
 
     require_macos()
-    user_domain = "gui/{}".format(os.getuid())
-    switches = {"agent": _disabled(user_domain), "daemon": _disabled("system")}
+    user_domain = launchd_user_domain()
+    switches = {"agent": launchd_disabled(user_domain), "daemon": launchd_disabled("system")}
     found = []
     for folder, kind, shared in _STARTUP_FOLDERS:
         root = Path(folder).expanduser()

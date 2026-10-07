@@ -34,7 +34,10 @@ macos.hotkeys.run()
 one at a time, until {func}`~macos.hotkeys.stop` or `timeout` seconds; an
 exception in a callback stops it and propagates. Holding the keys down doesn't
 repeat the call, and registering a shortcut again replaces its callback.
-{func}`~macos.hotkeys.unregister` removes a shortcut.
+{func}`~macos.hotkeys.unregister` removes a shortcut. The keyboard is watched
+on a thread of its own, so a slow callback doesn't hold up typing in other
+apps. To listen from a thread other than the main one with a non-US keyboard
+layout, see [Keyboard layouts](keyboard.md#keyboard-layouts).
 
 Function keys, arrows, Home, End, Page Up and Down and Forward Delete match
 whether or not macOS flags them with Fn, as it does on its own: `"f5"` is

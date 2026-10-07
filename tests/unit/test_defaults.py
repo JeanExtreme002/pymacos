@@ -87,7 +87,7 @@ def test_defaults_restored_restores_every_key_of_a_whole_domain_before_raising(m
         raise macos.PermissionDeniedError("isn't writable")
 
     monkeypatch.setattr(defaults, "_check", lambda domain: None)
-    monkeypatch.setattr(defaults, "read", lambda domain, current_host=False: {})  # nothing set when it starts
+    monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: default)  # nothing set when it starts
     monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: ["a", "b", "c"])  # set in the block
     monkeypatch.setattr(defaults, "delete", refuse)
 
@@ -103,3 +103,28 @@ def test_appearance_setters_pass_the_error_on(unwritable):
         macos.appearance.set_hide_menu_bar(True)
     with pytest.raises(macos.PermissionDeniedError):
         macos.trackpad.set_natural_scrolling(True)
+
+
+def test_defaults_restored_snapshots_the_domains_own_values_only(monkeypatch):
+    from macos import defaults
+
+    own = {"size": 48}  # what the user's file sets
+    in_effect = {"size": 48, "managed": True}  # what read() gives, a configuration profile's key included
+    written = []
+
+    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, **kwargs: in_effect if key is None else in_effect.get(key))
+    monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: own.get(key, default))
+    monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: sorted(own))
+
+    def write(domain, key, value, **kwargs):
+        written.append((key, value))
+        own[key] = value
+
+    monkeypatch.setattr(defaults, "write", write)
+    monkeypatch.setattr(defaults, "delete", lambda domain, key, **kwargs: own.pop(key, None) is not None)
+
+    with macos.defaults.restored("com.example.app"):
+        own["size"] = 64
+    assert own == {"size": 48}
+    assert ("managed", True) not in written  # the profile's value isn't copied into the user's file

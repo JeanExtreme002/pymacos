@@ -27,7 +27,7 @@ from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _files, _objc, defaults
-from ._system import framework, private_framework, run as _run
+from ._system import framework, killall, private_framework, run as _run
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -321,10 +321,7 @@ _SETTING_FORMATS = ("png", "jpg", "heic", "tiff", "gif", "pdf", "bmp")
 
 def _apply_capture_settings() -> None:
     # The screenshot shortcuts' UI reads the settings when it starts.
-    try:
-        _run(["killall", "SystemUIServer"])
-    except MacOSError:
-        pass  # not running: nothing to apply
+    killall("SystemUIServer")
 
 
 def screenshot_folder() -> Path:
@@ -862,7 +859,6 @@ def record(
             "Screen Recording permission is missing: allow the app running Python (your terminal or IDE) in "
             "System Settings › Privacy & Security › Screen & System Audio Recording, then restart it"
         )
-    target.parent.mkdir(parents=True, exist_ok=True)
     # -V stops after the given seconds; screencapture only takes whole seconds.
     args = ["screencapture", "-x", "-v", "-V{}".format(max(1, round(seconds)))]
     if region is not None:
@@ -874,13 +870,19 @@ def record(
         args.append("-g")
     if clicks:
         args.append("-k")
-    args.append(str(target))
-    try:
-        _run(args, timeout=max(1, round(seconds)) + 60)  # screencapture has hung on some Macs, VMs among them
-    except CommandTimeoutError:
-        raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
-    if not target.exists():
-        raise MacOSError("the screen recording wasn't saved")
+    # Into a new file beside it, moved over the output once saved, as screenshots are: a
+    # recording already there can't pass for the new one, and stays when this one fails.
+    with _files.replacing(target) as staged:
+        try:
+            _run([*args, str(staged)], timeout=max(1, round(seconds)) + 60)  # screencapture has hung on some Macs, VMs among them
+        except CommandTimeoutError:
+            raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
+        try:
+            written = staged.stat().st_size
+        except OSError:
+            written = 0
+        if not written:
+            raise MacOSError("the screen recording wasn't saved")
     return target
 
 
@@ -1116,7 +1118,11 @@ def _configure(change: Callable[[ctypes.CDLL, int], int]) -> None:
     if cg.CGBeginDisplayConfiguration(ctypes.byref(config)) != 0 or not config.value:
         raise MacOSError("could not start changing the displays")
     handle = config.value
-    status = change(cg, handle)
+    try:
+        status = change(cg, handle)
+    except BaseException:
+        cg.CGCancelDisplayConfiguration(handle)  # never leave a configuration open
+        raise
     if status != 0:
         cg.CGCancelDisplayConfiguration(handle)
         raise MacOSError("macOS refused the display change (error {})".format(status))

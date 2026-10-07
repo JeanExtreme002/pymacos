@@ -115,7 +115,7 @@ def restart() -> None:
     old = _pid()
     # Killed, not asked to quit: a quitting Dock saves the settings it had over the change.
     # launchd starts a new one right away.
-    _run(["killall", "-KILL", "Dock"])
+    _run(["killall", "-KILL", "Dock"], timeout=10)  # killall only signals: never long
     deadline = time.monotonic() + 10
     while True:
         pid = _pid()
@@ -254,9 +254,12 @@ def _insert(tiles: List[Dict[str, Any]], tile: Dict[str, Any], index: Optional[i
 
 def remove_app(app: str) -> bool:
     """Take ``app`` (a name, bundle ID or path) out of the Dock; return whether it was there. It stays installed."""
+    if not app.strip():
+        raise ValueError("remove_app() needs an app's name, bundle ID or path")
     target = os.path.realpath(os.path.expanduser(app)) if app.endswith(".app") else app
     tiles = _tiles()
-    kept = [tile for tile in tiles if not _matches(tile, target)]
+    # Apps only: a spacer has no label to tell it apart, nor is it an app.
+    kept = [tile for tile in tiles if not (_is_app(tile) and _matches(tile, target))]
     if len(kept) == len(tiles):
         return False
     defaults.write(_DOMAIN, "persistent-apps", kept)

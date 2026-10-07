@@ -57,6 +57,12 @@ def test_tile_grid():
     assert [x + width for x, _, width, _ in frames] == [334, 669, 1003]
     assert [x for x, _, _, _ in frames] == [0, 334, 669]
     assert _grid(2, (0, 0, 1003, 801), 1, 0)[-1][1] + _grid(2, (0, 0, 1003, 801), 1, 0)[-1][3] == 801
+    # An edge landing on .5 rounds the same way for both windows that share it: they touch, never overlap.
+    row = _grid(26, (52, 0, 233, 200), None, 0)[:6]
+    assert all(left + width == next_left for (left, _, width, _), (next_left, _, _, _) in zip(row, row[1:]))
+    # A fractional area (the Dock's size is a float): the last row ends at the area's bottom, not a point under the Dock.
+    _, top, _, height = _grid(4, (0, 24.5, 1440, 795.5), None, 0)[-1]
+    assert top + height == 820
 
 
 class _FakeWindow:

@@ -25,7 +25,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Set, Tuple, Union
 
 from . import _objc
-from ._system import framework, run as _run
+from ._system import PROFILER_TIMEOUT, framework, run as _run
 from .errors import MacOSError, NotSupportedError
 
 __all__ = ["Device", "power", "set_power", "devices", "connect", "disconnect"]
@@ -147,7 +147,7 @@ def devices() -> List[Device]:
     ``connected``, its ``kind`` and, when the device reports it, its
     ``battery`` level.
     """
-    output = _run(["system_profiler", "SPBluetoothDataType", "-json"])
+    output = _run(["system_profiler", "SPBluetoothDataType", "-json"], timeout=PROFILER_TIMEOUT)
     try:
         sections = json.loads(output).get("SPBluetoothDataType") or []
     except ValueError:

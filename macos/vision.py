@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _files, _objc
+from . import _cf, _files, _objc
 from ._objc import BOOL, NSInteger, NSUInteger
 from ._system import framework
 from .errors import MacOSError, NotSupportedError
@@ -487,9 +487,12 @@ def remove_background(image: Image, *, crop: bool = False) -> Optional[bytes]:
         if not buffer:
             raise _error(error, "the background could not be removed")
 
-        # Pixel buffer -> Core Image -> PNG.
-        picture = _objc.send(_objc.cls("CIImage"), "imageWithCVPixelBuffer:", buffer, argtypes=(ctypes.c_void_p,))
-        return _objc.ciimage_png(picture)
+        # Pixel buffer -> Core Image -> PNG. The buffer comes retained
+        # (CF_RETURNS_RETAINED): released once drawn, or every call would leak
+        # a full-size image.
+        with _cf.owned(buffer):
+            picture = _objc.send(_objc.cls("CIImage"), "imageWithCVPixelBuffer:", buffer, argtypes=(ctypes.c_void_p,))
+            return _objc.ciimage_png(picture)
 
 
 def scan_document(image: Image) -> Optional[bytes]:

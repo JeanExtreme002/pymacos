@@ -22,7 +22,7 @@ IDE), and keeping the shortcut from the app in front needs *Accessibility*.
 import threading
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from . import _events, keyboard
+from . import _events, _objc, keyboard
 
 __all__ = ["Hotkey", "register", "unregister", "run", "stop", "wait", "has_permission", "request_permission"]
 
@@ -89,6 +89,17 @@ class _Listener(_events.Listener):
     def __init__(self, wanted: Optional[Tuple[int, int]]) -> None:
         super().__init__()
         self.wanted = wanted
+        self.arrived = threading.Event()  # set when a shortcut is queued in pending
+
+    def queue(self, combination: Tuple[int, int]) -> None:
+        """Hand a pressed shortcut to this listener, from the tap's thread."""
+        self.pending.append(combination)
+        self.arrived.set()
+
+    def pause(self, seconds: float) -> None:
+        """Wait for the tap's thread to queue a shortcut: this thread's run loop has no tap to turn."""
+        self.arrived.wait(seconds)
+        self.arrived.clear()  # what came meanwhile is in pending, read on the next turn
 
 
 _listeners = _events.Listeners()
@@ -157,11 +168,11 @@ def _dispatch(combination: Tuple[int, int], caught: _Listener) -> None:
     waiting = [listener for listener in active if listener.wanted == combination]
     runners = [listener for listener in active if listener.wanted is None]
     for listener in waiting:
-        listener.pending.append(combination)
+        listener.queue(combination)
     if runners:
-        runners[0].pending.append(combination)  # the oldest run() calls the callback
+        runners[0].queue(combination)  # the oldest run() calls the callback
     elif not waiting:
-        caught.pending.append(combination)  # no run(): the wait() that caught it calls it
+        caught.queue(combination)  # no run(): the wait() that caught it calls it
 
 
 def _handler(listener: _Listener) -> Callable[[int, int], Optional[int]]:
@@ -189,22 +200,71 @@ def _handler(listener: _Listener) -> Callable[[int, int], Optional[int]]:
     return handle
 
 
+class _TapThread:
+    """
+    The event tap of a listener, on a thread of its own that turns its run loop, until :meth:`close`.
+
+    The callbacks run on the listener's thread instead: while a slow one runs
+    (or presses keys itself), the tap goes on passing the keyboard through.
+    Were the tap on the callback's thread, every keystroke of the system would
+    wait for the callback to return, until macOS switched the tap off.
+    """
+
+    def __init__(self, listener: _Listener) -> None:
+        self._listener = listener
+        self._done = threading.Event()
+        self._ready = threading.Event()
+        self._failed: List[BaseException] = []
+        self._thread = threading.Thread(target=self._run, name="macos.hotkeys tap", daemon=True)
+        self._thread.start()
+        try:
+            self._ready.wait()
+        except BaseException:  # Ctrl-C while the tap starts: stop it too, or it would swallow the shortcuts for good
+            self.close()
+            raise
+        if self._failed:
+            self._thread.join()
+            raise self._failed[0]
+
+    def _run(self) -> None:
+        listener = self._listener
+        try:
+            tap = _events.Tap([_KEY_DOWN, _KEY_UP], _handler(listener), listener, listen_only=False, denied=_DENIED)
+        except BaseException as error:  # no tap (no permission...): the listener's thread raises it
+            self._failed.append(error)
+            self._ready.set()
+            return
+        self._ready.set()
+        try:
+            while not self._done.is_set() and not listener.stop.is_set():
+                _objc.spin(_events._SLICE)
+        except BaseException as error:
+            listener.errors.append(error)
+        finally:
+            tap.close()
+
+    def close(self) -> None:
+        self._done.set()
+        self._thread.join()
+
+
 def _listen(on_press: Callable[[Tuple[int, int]], bool], wanted: Optional[Tuple[int, int]], timeout: Optional[float]) -> None:
     """
-    Run an event tap on this thread until ``stop()``, the timeout, or ``on_press`` returning ``True``.
+    Listen for shortcuts until ``stop()``, the timeout, or ``on_press`` returning ``True``.
 
-    ``on_press`` gets the pressed combinations that match a shortcut; it runs
-    outside the tap, so a slow callback can't make macOS switch the tap off.
+    ``on_press`` gets the pressed combinations that match a shortcut, on this
+    thread; the tap runs on its own (see :class:`_TapThread`), so a slow
+    ``on_press`` doesn't hold up the keyboard.
     """
     listener = _Listener(wanted)
     with _listeners.listening(listener):
-        tap = _events.Tap([_KEY_DOWN, _KEY_UP], _handler(listener), listener, listen_only=False, denied=_DENIED)
+        tapping = _TapThread(listener)
         try:
             for combination in listener.drain(timeout):
                 if on_press(combination):
                     return
         finally:
-            tap.close()
+            tapping.close()
 
 
 def _call(combination: Tuple[int, int]) -> None:
@@ -219,7 +279,9 @@ def run(*, timeout: Optional[float] = None) -> None:
     Listen for the registered shortcuts and call their callbacks, until :func:`stop` or ``timeout`` seconds.
 
     Callbacks run on this thread, one at a time; an exception in one stops
-    :func:`run` and propagates. Ctrl-C stops it too.
+    :func:`run` and propagates. Ctrl-C stops it too. The keyboard is watched
+    from another thread meanwhile, so a slow callback doesn't hold up the
+    keys typed in other apps, and may press keys itself.
     """
 
     def call(combination: Tuple[int, int]) -> bool:

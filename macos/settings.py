@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import appearance, dock, finder, keyboard, mouse, screen, sound, system, trackpad, windows
-from ._system import batched_restarts, require_macos
+from ._system import add_note, batched_restarts, require_macos
 from .errors import NotSupportedError
 
 __all__ = ["export", "apply", "names"]
@@ -521,6 +521,15 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
     backlight, Night Shift...) are skipped. Returns ``["dock.autohide", ...]``.
     """
     require_macos()
+    if not isinstance(settings, Mapping):
+        raise ValueError("settings must be an object of sections, not {!r}".format(settings))
+    not_objects = [section for section, values in settings.items() if not isinstance(values, Mapping)]
+    if not_objects:
+        raise ValueError(
+            "each section must be an object of names and values, as export() gives: {}".format(
+                ", ".join("{} is {!r}".format(section, settings[section]) for section in not_objects)
+            )
+        )
     unknown = []
     for section, values in settings.items():
         if section not in _SETTINGS:
@@ -541,7 +550,7 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
     if bad:
         raise ValueError("invalid settings: {}".format("; ".join(bad)))
     changed: List[str] = []
-    undo: List[Tuple[_Setting, Any]] = []  # (setting, its value before), to put back if a later change fails
+    undo: List[Tuple[str, _Setting, Any]] = []  # (name, setting, its value before), to put back if a later change fails
     with batched_restarts():
         try:
             for section, values in settings.items():
@@ -555,20 +564,25 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
                         continue
                     # Noted before the change: one that fails half-way (two preferences, the
                     # second refused) is put back too.
-                    undo.append((setting, current))
+                    undo.append(("{}.{}".format(section, name), setting, current))
                     try:
                         setting.change(value)
                     except NotSupportedError:
                         undo.pop()  # nothing changed: this Mac lacks it (a keyboard backlight, Night Shift...)
                         continue
                     changed.append("{}.{}".format(section, name))
-        except BaseException:
+        except BaseException as error:
             # What the checks can't foresee (a permission, a file gone): put
             # back the settings already changed, newest first, then raise.
-            for setting, before in reversed(undo):
+            # The original error is the one raised; those that couldn't be put
+            # back are named alongside it, so nobody is left guessing.
+            stuck = []
+            for name, setting, before in reversed(undo):
                 try:
                     setting.change(before)
-                except Exception:
-                    pass  # best effort: the original error matters more
+                except Exception as failure:
+                    stuck.append("{} ({})".format(name, failure))
+            if stuck:
+                add_note(error, "these settings were changed and couldn't be put back: {}".format("; ".join(stuck)))
             raise
     return changed

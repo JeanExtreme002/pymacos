@@ -82,3 +82,16 @@ def test_dock_add_app_index_skips_spacers(dock_settings):
     macos.dock.add_app("Code", index=1)  # after Safari, the first app
     assert [tile.get("tile-type") for tile in store["persistent-apps"]] == ["spacer-tile", "file-tile", "file-tile"]
     assert [entry.name for entry in macos.dock.apps()] == ["Safari", "Code"]
+
+
+def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):
+    store, restarts, _ = dock_settings
+    spacer = {"tile-data": {}, "tile-type": "spacer-tile"}
+    unlabelled = {"tile-data": {}, "tile-type": "file-tile"}  # no label, no bundle ID: matched "" before
+    store["persistent-apps"] += [spacer, unlabelled]
+
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="needs an app"):
+            macos.dock.remove_app(blank)
+    assert macos.dock.remove_app("Safari") is True
+    assert store["persistent-apps"] == [spacer, unlabelled] and len(restarts) == 1

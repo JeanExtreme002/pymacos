@@ -8,6 +8,7 @@ commands and loading system frameworks.
 import ctypes
 import subprocess
 import sys
+import threading
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
@@ -71,13 +72,18 @@ def run(
     Text mode turns ``\r\n`` and ``\r`` into ``\n``; ``exact_newlines=True``
     keeps them as the command wrote them, for output that holds file names
     (which may contain any of them).
+
+    Output that isn't valid UTF-8 never raises: in text mode the bad bytes
+    become U+FFFD, and with ``exact_newlines=True`` they are kept the way
+    :func:`os.fsdecode` keeps them (surrogate escapes), so a file name read
+    back still opens the same file.
     """
     require_macos()
 
     if exact_newlines:
         options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
     else:
-        options = {"input": input, "text": True, "encoding": "utf-8"}
+        options = {"input": input, "text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
     except FileNotFoundError:
@@ -87,7 +93,7 @@ def run(
 
     stdout, stderr = result.stdout, result.stderr
     if isinstance(stdout, bytes):
-        stdout = stdout.decode("utf-8")
+        stdout = stdout.decode("utf-8", "surrogateescape")
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
@@ -114,6 +120,57 @@ def applescript(app: str, script: str, *args: str, input: Optional[str] = None) 
                 "{} in System Settings › Privacy & Security › Automation".format(app)
             ) from None
         raise
+
+
+def add_note(error: BaseException, message: str) -> None:
+    """
+    Tell what else went wrong while handling ``error``: as a note on it (Python 3.11+), else as a warning.
+
+    For clean-ups that fail after the error that started them, which stays the one raised.
+    """
+    if hasattr(error, "add_note"):
+        error.add_note(message)
+    else:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def killall(process: str) -> None:
+    """
+    Quit every process named ``process``, for macOS to start it again with the settings just written.
+
+    One that isn't running is fine: it reads them when it starts.
+    """
+    try:
+        run(["killall", process], timeout=10)  # killall only signals: never long
+    except CommandError as error:
+        if error.returncode != 1:  # 1: no process had the name
+            raise
+
+
+LAUNCHCTL_TIMEOUT = 60.0
+"""Seconds for a ``launchctl`` call: it answers at once, unless launchd is wedged."""
+PROFILER_TIMEOUT = 60.0
+"""Seconds for ``system_profiler``: it takes a moment, and has hung on some Macs."""
+
+
+def launchd_user_domain() -> str:
+    """The launchd domain of this user's session, ``gui/<uid>``, where launch agents run."""
+    import os
+
+    return "gui/{}".format(os.getuid())
+
+
+def launchd_disabled(domain: str) -> Dict[str, bool]:
+    """launchctl's own on/off switches in ``domain``: label -> disabled; ``{}`` when it won't say."""
+    import re
+
+    try:
+        output = run(["launchctl", "print-disabled", domain], timeout=LAUNCHCTL_TIMEOUT)
+    except CommandError:
+        return {}
+    # Written as words or as booleans, depending on the macOS version: "disabled" and true mean off.
+    found = re.findall(r'"([^"]+)"\s*=>\s*(enabled|disabled|true|false)', output)
+    return {label: state in ("disabled", "true") for label, state in found}
 
 
 _ACTIVATE_SETTINGS = "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings"
@@ -160,28 +217,45 @@ def private_framework(name: str) -> ctypes.CDLL:
 
 
 # Restarts (the Dock, Finder...) put off until a batch of changes ends, by name.
-_deferred: Optional[Dict[str, Callable[[], None]]] = None
+# Per thread: a batch on one thread doesn't hold back another thread's restarts.
+_batch = threading.local()
 
 
 def restart_later(name: str, restart: Callable[[], None]) -> bool:
     """Inside :func:`batched_restarts`, note ``restart`` to run once at its end and return ``True``; else ``False``."""
-    if _deferred is None:
+    deferred: Optional[Dict[str, Callable[[], None]]] = getattr(_batch, "deferred", None)
+    if deferred is None:
         return False
-    _deferred[name] = restart
+    deferred[name] = restart
     return True
 
 
 @contextmanager
 def batched_restarts() -> Iterator[None]:
     """Run each restart asked for in the block once, when it ends (even if it fails), instead of after every change."""
-    global _deferred
-    if _deferred is not None:
+    if getattr(_batch, "deferred", None) is not None:
         yield  # already batching
         return
-    _deferred = {}
+    _batch.deferred = {}
+    failed: Optional[BaseException] = None
     try:
         yield
+    except BaseException as error:
+        failed = error
+        raise
     finally:
-        pending, _deferred = _deferred, None
-        for restart in pending.values():
-            restart()
+        pending, _batch.deferred = _batch.deferred, None
+        # Every restart runs, even after one fails, and never hides the error of the block itself.
+        problems = []
+        for name, restart in pending.items():
+            try:
+                restart()
+            except Exception as problem:
+                problems.append((name, problem))
+        if problems:
+            first = failed if failed is not None else problems[0][1]
+            for name, reason in problems:
+                if reason is not first:
+                    add_note(first, "restarting {} failed too: {}".format(name, reason))
+            if failed is None:
+                raise first

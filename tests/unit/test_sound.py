@@ -33,3 +33,21 @@ def test_play_drains_what_it_autoreleases(monkeypatch):
     macos.sound.play("Glass")
 
     assert events == ["push", "load", "setVolume:", "duration", "play", "pop", "release"]  # released after
+
+
+def test_a_named_sound_is_played_from_a_copy(monkeypatch):
+    sent = []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append(selector)
+        return 7
+
+    monkeypatch.setattr(macos.sound, "_appkit", lambda: None)
+    monkeypatch.setattr(macos.sound._objc, "send", send)
+    monkeypatch.setattr(macos.sound._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(macos.sound._objc, "nsstring", lambda text: 2)
+
+    macos.sound._load("Glass")
+
+    # The shared instance soundNamed: returns may be playing already.
+    assert sent == ["soundNamed:", "copy"]

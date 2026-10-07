@@ -15,6 +15,7 @@ call names its ``argtypes``/``restype`` instead of relying on ctypes defaults.
 import ctypes
 import os
 import platform
+import threading
 import time
 from contextlib import contextmanager
 from functools import lru_cache
@@ -269,6 +270,17 @@ def _color_space_model() -> Any:
     return function
 
 
+@lru_cache(maxsize=None)
+def cicontext() -> int:
+    """
+    The ``CIContext`` every render goes through, made once and kept for the process.
+
+    Making one is costly (it sets up a GPU pipeline), and one context is safe
+    to use from several threads at once. Needs CoreImage loaded.
+    """
+    return int(send(send(cls("CIContext"), "contextWithOptions:", None, argtypes=(id,)), "retain"))
+
+
 def ciimage_cgimage(image: int) -> int:
     """
     Render a ``CIImage`` into an owned ``CGImage``.
@@ -276,7 +288,7 @@ def ciimage_cgimage(image: int) -> int:
     RGB pixels keep the image's own color space (Display P3 for iPhone
     photos, for example) instead of being squeezed into sRGB.
     """
-    context = send(cls("CIContext"), "contextWithOptions:", None, argtypes=(id,))
+    context = cicontext()
     extent = send(image, "extent", restype=CGRect)
     space = send(image, "colorSpace", restype=ctypes.c_void_p)
     if space and _color_space_model()(space) == 1:  # kCGColorSpaceModelRGB
@@ -352,6 +364,9 @@ def block(function: Any, signature: bytes, *argtypes: Any) -> int:
 
 
 _CLASSES: dict = {}
+# Two threads making the same class at once: the second would find the name taken
+# but not yet registered, and cache no class at all.
+_CLASSES_LOCK = threading.Lock()
 
 
 def define_class(name: str, methods: Any, protocols: Sequence[str] = ()) -> int:
@@ -362,6 +377,11 @@ def define_class(name: str, methods: Any, protocols: Sequence[str] = ()) -> int:
     function)``; each function gets ``(self, _cmd, *arguments)``. Used for
     the delegates the camera and microphone APIs call back.
     """
+    with _CLASSES_LOCK:
+        return _define_class(name, methods, protocols)
+
+
+def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
     if name in _CLASSES:
         return int(_CLASSES[name][0])
     lib = _libobjc()

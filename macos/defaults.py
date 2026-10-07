@@ -209,7 +209,11 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     for item in what:
         if isinstance(item, str):
             _check(item)
-            saved.append((item, None, read(item, current_host=current_host)))
+            # The domain's own layer, as keys() lists it and the restore writes it back:
+            # read() would give the values in effect, from a profile or the global
+            # domain too, and the restore would copy those into the user's own file.
+            own = {name: _own(item, name, missing, current_host) for name in keys(item, current_host=current_host)}
+            saved.append((item, None, {name: value for name, value in own.items() if value is not missing}))
         else:
             domain, key = item
             _check(domain)

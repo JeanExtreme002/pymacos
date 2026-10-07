@@ -172,7 +172,11 @@ class Listener:
             remaining = _SLICE if deadline is None else min(_SLICE, deadline - time.monotonic())
             if remaining <= 0:
                 return
-            _objc.spin(remaining)
+            self.pause(remaining)
+
+    def pause(self, seconds: float) -> None:
+        """Wait up to ``seconds`` for the callbacks, between two looks at :attr:`pending`: by turning this thread's run loop."""
+        _objc.spin(seconds)
 
 
 class Listeners:

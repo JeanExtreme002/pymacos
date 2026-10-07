@@ -209,3 +209,143 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
     assert sorted(path.parent.name for path, size in found) == ["folder0", "folder1", "folder2"]
     with pytest.raises(ValueError, match="timeout"):
         finder.largest(tmp_path, timeout=0)
+
+
+def test_restarting_finder_only_ignores_it_not_running(commands):
+    # Quit from its menu (see set_quit_menu), Finder reads the settings when it starts again.
+    commands.answers["Finder"] = (1, "", "No matching processes belonging to you were found")
+    macos.finder.restart()
+    commands.answers["Finder"] = (2, "", "killall: unknown signal")
+    with pytest.raises(macos.CommandError, match="unknown signal"):
+        macos.finder.restart()
+
+
+def test_watch_raises_what_went_wrong_in_the_callback(tmp_path, monkeypatch):
+    import contextlib
+    import ctypes
+
+    calls = {}
+
+    class Services:
+        def FSEventStreamCreate(self, allocator, callback, info, paths, since, latency, flags):
+            calls["callback"] = callback
+            return 7
+
+        def FSEventStreamScheduleWithRunLoop(self, stream, loop, mode):
+            pass
+
+        def FSEventStreamStart(self, stream):
+            return True
+
+        def FSEventStreamStop(self, stream):
+            calls["stopped"] = True
+
+        def FSEventStreamInvalidate(self, stream):
+            pass
+
+        FSEventStreamRelease = FSEventStreamInvalidate
+
+    class RunLoop:
+        def CFRunLoopGetCurrent(self):
+            return 1
+
+        def CFRunLoopRunInMode(self, mode, seconds, once):
+            names = (ctypes.c_char_p * 1)(str(tmp_path / "new.txt").encode())
+            flags, ids = (ctypes.c_uint32 * 1)(0), (ctypes.c_uint64 * 1)(0)
+            calls["callback"](7, None, 1, ctypes.cast(names, ctypes.c_void_p), flags, ids)
+
+    def broken(path, flags, seen):
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(finder, "_core_services", Services)
+    monkeypatch.setattr(finder._cf, "lib", RunLoop)
+    monkeypatch.setattr(finder._cf, "from_python", lambda value: 1)
+    monkeypatch.setattr(finder._cf, "owned", contextlib.nullcontext)
+    monkeypatch.setattr(finder._cf, "default_mode", lambda: 0)
+    monkeypatch.setattr(finder, "_kind", broken)
+
+    with pytest.raises(OSError, match="went away"):  # not swallowed, which would drop every event
+        next(macos.finder.watch(tmp_path, timeout=5))
+    assert calls["stopped"]
+    with pytest.raises(TypeError, match="pattern"):
+        next(macos.finder.watch(tmp_path, pattern=[b"*.pdf"]))
+    # A generator isn't used up by the check: "new.txt" still matches, and reaches _kind.
+    with pytest.raises(OSError, match="went away"):
+        next(macos.finder.watch(tmp_path, pattern=(wanted for wanted in ["*.txt"]), timeout=5))
+
+
+@pytest.mark.parametrize(
+    "where, recursive, expected",
+    [
+        ("folder", True, "folder"),  # events lost in the folder itself
+        ("sub", True, "sub"),  # in a subfolder: that one to read again
+        ("sub", False, None),  # ...which a watch of the folder alone ignores
+        ("/", False, "folder"),  # lost above the folder: all of it
+    ],
+)
+def test_watch_says_when_macos_lost_track(tmp_path, monkeypatch, where, recursive, expected):
+    import contextlib
+    import ctypes
+    import os
+
+    folder = Path(os.path.realpath(str(tmp_path)))
+    (folder / "sub").mkdir()
+    paths = {"folder": folder, "sub": folder / "sub", "/": Path("/")}
+    calls = {}
+
+    class Services:
+        def FSEventStreamCreate(self, allocator, callback, info, paths, since, latency, flags):
+            calls["callback"] = callback
+            return 7
+
+        def FSEventStreamStart(self, stream):
+            return True
+
+        def FSEventStreamScheduleWithRunLoop(self, *args):
+            pass
+
+        FSEventStreamStop = FSEventStreamInvalidate = FSEventStreamRelease = FSEventStreamScheduleWithRunLoop
+
+    class RunLoop:
+        def CFRunLoopGetCurrent(self):
+            return 1
+
+        def CFRunLoopRunInMode(self, mode, seconds, once):
+            if calls.get("sent"):
+                return
+            calls["sent"] = True
+            names = (ctypes.c_char_p * 1)(str(paths[where]).encode())
+            flags, ids = (ctypes.c_uint32 * 1)(0x1 | 0x20000), (ctypes.c_uint64 * 1)(0)  # MustScanSubDirs
+            calls["callback"](7, None, 1, ctypes.cast(names, ctypes.c_void_p), flags, ids)
+
+    monkeypatch.setattr(finder, "_core_services", Services)
+    monkeypatch.setattr(finder._cf, "lib", RunLoop)
+    monkeypatch.setattr(finder._cf, "from_python", lambda value: 1)
+    monkeypatch.setattr(finder._cf, "owned", contextlib.nullcontext)
+    monkeypatch.setattr(finder._cf, "default_mode", lambda: 0)
+
+    events = list(macos.finder.watch(folder, pattern="*.pdf", recursive=recursive, timeout=0.3))
+    if expected is None:
+        assert events == []
+    else:
+        assert events == [finder.Event(paths[expected], "rescan", True)]
+
+
+def test_wait_for_change_waits_past_a_rescan(monkeypatch, tmp_path):
+    pdf = finder.Event(tmp_path / "report.pdf", "created", False)
+    monkeypatch.setattr(finder, "watch", lambda *args, **kwargs: iter([finder.Event(tmp_path, "rescan", True), pdf]))
+    assert macos.finder.wait_for_change(tmp_path, pattern="*.pdf") == pdf
+    monkeypatch.setattr(finder, "watch", lambda *args, **kwargs: iter([finder.Event(tmp_path, "rescan", True)]))
+    assert macos.finder.wait_for_change(tmp_path, timeout=1) is None  # the folder is never taken for the file
+
+
+def test_wait_for_change_looks_through_the_folder_when_macos_lost_track(monkeypatch, tmp_path):
+    def watch(folder, **kwargs):
+        (tmp_path / "notes.txt").write_text("x")  # changed, but not a PDF
+        (tmp_path / "report.pdf").write_bytes(b"%PDF")  # the download, lost among dropped events
+        yield finder.Event(tmp_path, "rescan", True)
+
+    monkeypatch.setattr(finder, "watch", watch)
+    found = macos.finder.wait_for_change(tmp_path, pattern="*.pdf", timeout=1)
+    made = "created" if sys.platform == "darwin" else "modified"  # only macOS file systems record a file's birth
+    assert found == finder.Event(tmp_path / "report.pdf", made, False)

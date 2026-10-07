@@ -367,11 +367,17 @@ def _matches(written: Dict[str, Any], changes: Dict[str, Dict[str, Any]]) -> boo
         for key, value in values.items():
             found = written.get(group, {}).get(key)
             if isinstance(value, float):
-                if not isinstance(found, (int, float)) or abs(found - value) > 1e-6:
+                # EXIF keeps GPS degrees to about 5 decimals (48.858370123 reads back 48.85837).
+                if not isinstance(found, (int, float)) or abs(found - value) > 1e-5:
                     return False
             elif found != value:
                 return False
     return True
+
+
+def _dropped(written: Dict[str, Any], changes: Dict[str, Dict[str, Any]]) -> List[str]:
+    """The groups of ``changes`` (``"{GPS}"``...) of which the written image kept nothing at all."""
+    return [group for group, values in changes.items() if not any(key in written.get(group, {}) for key in values)]
 
 
 def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: Optional[PathLike]) -> Path:
@@ -425,6 +431,10 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
             # Another format, or one (HEIC) that drops part of the changes when
             # copied that way: save the image again with them instead.
             if not copied or not _matches(metadata(temporary), changes):
+                if kind in _MULTI_FRAME and io.CGImageSourceGetCount(image_source) > 1:
+                    # Saved again, it would keep its first frame only: an animated GIF would stop moving.
+                    # (A copy in a one-frame format, a .jpg of a GIF, keeps the first frame, as convert() does.)
+                    raise ValueError("{} has several frames, and its metadata can't be changed in place".format(original))
                 with _cf.owned(_cf.from_python(changes)) as properties:
                     _write_to(
                         temporary,
@@ -433,6 +443,12 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
                             destination, image_source, 0, properties
                         ),
                     )
+                # Some formats have nowhere to put a tag (GIF holds no GPS): refuse rather than
+                # replace the image with a copy that silently lacks it. A value the format keeps
+                # its own way (rounded, normalized) still counts as kept.
+                lost = _dropped(metadata(temporary), changes)
+                if lost:
+                    raise ValueError("{} images can't hold {} metadata".format(target.suffix or kind, ", ".join(lost)))
     return target
 
 
@@ -779,7 +795,7 @@ def _sample(path: PathLike, longest: int = 100) -> List[Tuple[int, int, int]]:
         height = max(1, int(extent.size.height * scale))
         small = _transform(picture, scale, 0, 0, scale)
         buffer = ctypes.create_string_buffer(width * height * 4)
-        context = _objc.send(_objc.cls("CIContext"), "contextWithOptions:", None, argtypes=(_objc.id,))
+        context = _objc.cicontext()
         rgba8 = ctypes.c_int.in_dll(framework("CoreImage"), "kCIFormatRGBA8").value
         _objc.send(
             context,
@@ -1101,6 +1117,31 @@ def watermark(
     return _edit(source, output, change, quality)
 
 
+def _thumbnail(path: Path, longest: Optional[int]) -> int:
+    """
+    An owned, upright ``CGImage`` of an image file, scaled down to ``longest`` pixels if given.
+
+    ImageIO decodes straight to that size: a 12-megapixel photo made into a
+    256-pixel thumbnail is never held at full size.
+    """
+    io = _io()
+    with _cf.owned(_source(path)) as source:
+        details = _describe(source)
+        full = max(details.width, details.height)
+        options = _options(
+            {
+                "kCGImageSourceCreateThumbnailFromImageAlways": True,
+                "kCGImageSourceCreateThumbnailWithTransform": True,
+                "kCGImageSourceThumbnailMaxPixelSize": min(longest or full, full),
+            }
+        )
+        with _cf.owned(options):
+            picture = io.CGImageSourceCreateThumbnailAtIndex(source, 0, options)
+    if not picture:
+        raise ValueError("{} is not an image macOS can read".format(path))
+    return int(picture)
+
+
 def contact_sheet(
     images: Sequence[PathLike],
     output: PathLike,
@@ -1155,7 +1196,10 @@ def contact_sheet(
             argtypes=(_objc.CGRect,),
         )
         for index, source in enumerate(sources):
-            thumbnail = _to_origin(_objc.ciimage(source))
+            # Decoded at thumbnail size, not in full: a hundred photos would be over a gigapixel.
+            # The CIImage keeps the picture alive until the sheet is drawn.
+            with _cf.owned(_thumbnail(source, size)) as picture:
+                thumbnail = _objc.send(_objc.cls("CIImage"), "imageWithCGImage:", picture, argtypes=(ctypes.c_void_p,))
             extent = _extent(thumbnail)
             scale = min(size / extent.size.width, size / extent.size.height, 1.0)
             thumb_width, thumb_height = extent.size.width * scale, extent.size.height * scale

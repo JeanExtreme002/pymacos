@@ -77,7 +77,10 @@ def _load(sound: Union[str, "os.PathLike[str]"]) -> int:
     player = _objc.send(_objc.cls("NSSound"), "soundNamed:", _objc.nsstring(text), argtypes=(_objc.id,))
     if not player:
         raise ValueError("no alert sound is named {!r}; see macos.sound.names()".format(text))
-    return _objc.send(player, "retain")
+    # soundNamed: hands out one shared, cached instance: a copy (+1) of it, so
+    # a sound still playing doesn't make the next play fail, and setVolume:
+    # changes this play only.
+    return _objc.send(player, "copy")
 
 
 def play(sound: Union[str, "os.PathLike[str]"], *, volume: float = 1.0, wait: bool = True) -> None:

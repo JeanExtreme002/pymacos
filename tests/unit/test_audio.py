@@ -166,6 +166,15 @@ def test_audio_sample_editing(fake_pcm):
     assert len(fake_pcm["samples"]) == 20 and fake_pcm["channels"] == 2
 
 
+def test_fade_goes_a_piece_at_a_time(fake_pcm, monkeypatch):
+    monkeypatch.setattr(macos.audio, "_CHUNK_FRAMES", 2)
+    # The same samples as in one piece, with fades that cross the pieces' edges and overlap.
+    macos.audio.fade("in.wav", "out.wav", fade_in=0.2, fade_out=0.2)
+    assert fake_pcm["pieces"] == [[0, 0, 100, -100], [300, -300, 200, -200], [0, 0]]
+    macos.audio.fade("in.wav", "out.wav", fade_in=0.5, fade_out=0.5)
+    assert fake_pcm["samples"] == [0, 0, 24, -24, 48, -48, 48, -48, 0, 0]  # as when it was done whole
+
+
 def test_trim_and_gain_go_a_piece_at_a_time(fake_pcm, monkeypatch):
     monkeypatch.setattr(macos.audio, "_CHUNK_FRAMES", 2)
     macos.audio.trim("in.wav", "out.wav", 0.1)
@@ -229,7 +238,7 @@ def test_record_until_silence_stops_after_quiet(monkeypatch, tmp_path):
 
     target = tmp_path / "note.m4a"
     monkeypatch.setattr(_capture, "require_permission", lambda media: None)
-    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: target.write_bytes(b"x") or 1)
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: path.write_bytes(b"x") or 1)
     monkeypatch.setattr(macos.audio._objc, "send", send)
     monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
     monkeypatch.setattr(macos.audio.time, "monotonic", lambda: clock[0])
@@ -239,6 +248,71 @@ def test_record_until_silence_stops_after_quiet(monkeypatch, tmp_path):
 
     assert 2.4 <= clock[0] <= 2.7  # about 1 s after the speech ended, not at 30 s
     assert calls[-1] == "stop"
+    assert target.read_bytes() == b"x"
+
+
+def test_a_failed_recording_leaves_the_old_file_alone(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from macos import _capture
+
+    target = tmp_path / "memo.m4a"
+    target.write_bytes(b"yesterday")
+    # prepareToRecord empties the file it's given: it must never be the target itself.
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: path.write_bytes(b"") or 1)
+    monkeypatch.setattr(macos.audio._objc, "send", lambda receiver, selector, *args, **kwargs: selector != "record")
+    monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
+
+    with pytest.raises(macos.MacOSError, match="could not start"):
+        macos.audio.record(target, 1)
+    assert target.read_bytes() == b"yesterday"
+    assert [path.name for path in tmp_path.iterdir()] == ["memo.m4a"]
+
+
+@pytest.mark.parametrize("record", ["record", "record_until_silence"])
+def test_a_recording_stopped_with_ctrl_c_is_kept(monkeypatch, tmp_path, record):
+    from contextlib import nullcontext
+
+    from macos import _capture
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    target = tmp_path / "memo.m4a"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: path.write_bytes(b"so far") or 1)
+    monkeypatch.setattr(macos.audio._objc, "send", lambda receiver, selector, *args, **kwargs: True)
+    monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(macos.audio.time, "sleep", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):  # the script still stops, as asked
+        getattr(macos.audio, record)(target, 60)
+    assert target.read_bytes() == b"so far"  # with what was recorded until then
+    assert [path.name for path in tmp_path.iterdir()] == ["memo.m4a"]
+
+
+@pytest.mark.parametrize("record", ["record", "record_until_silence"])
+def test_ctrl_c_before_anything_was_saved_stays_a_ctrl_c(monkeypatch, tmp_path, record):
+    from contextlib import nullcontext
+
+    from macos import _capture
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    target = tmp_path / "memo.m4a"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: 1)  # writes nothing
+    monkeypatch.setattr(macos.audio._objc, "send", lambda receiver, selector, *args, **kwargs: True)
+    monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(macos.audio.time, "sleep", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):  # not a MacOSError: the user stopped it
+        getattr(macos.audio, record)(target, 60)
+    assert target.read_bytes() == b"yesterday"
 
 
 def test_audio_argument_checks(tmp_path):

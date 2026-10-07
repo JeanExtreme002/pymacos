@@ -150,6 +150,46 @@ def test_apply_puts_back_a_setting_that_failed_half_way(fake_settings, monkeypat
     assert changes == [("autohide", True), ("autohide", False)] and values["autohide"] is False
 
 
+def test_apply_names_the_settings_it_could_not_put_back(fake_settings, monkeypatch):
+    values, changes, _ = fake_settings
+
+    def stuck(value):
+        values["autohide"] = value
+        if value is False:  # the change went through, putting it back doesn't
+            raise macos.PermissionDeniedError("the domain went read-only")
+
+    def refused(value):
+        raise macos.PermissionDeniedError("the domain isn't writable")
+
+    table = settings._SETTINGS["dock"]
+    monkeypatch.setitem(table, "autohide", settings._Setting(table["autohide"].read, stuck))
+    monkeypatch.setitem(table, "size", settings._Setting(table["size"].read, refused))
+    with _notes_or_warning() as reported:
+        with pytest.raises(macos.PermissionDeniedError, match="isn't writable") as caught:
+            settings.apply({"dock": {"autohide": True, "size": 64}})
+    text = " ".join(getattr(caught.value, "__notes__", [])) + " ".join(str(item.message) for item in reported)
+    assert "dock.autohide" in text and "went read-only" in text
+
+
+def _notes_or_warning():
+    """Python 3.11+ attaches the note to the error; older ones warn."""
+    import sys
+    import warnings
+
+    if sys.version_info >= (3, 11):
+        return warnings.catch_warnings(record=True)
+    return pytest.warns(RuntimeWarning)
+
+
+def test_apply_refuses_a_section_that_is_not_an_object(fake_settings):
+    _, changes, _ = fake_settings
+    with pytest.raises(ValueError, match="dock is True"):
+        settings.apply({"dock": True})
+    with pytest.raises(ValueError, match="object of sections"):
+        settings.apply(["dock"])
+    assert changes == []
+
+
 def test_every_real_setting_has_a_check_and_this_macs_values_pass_it():
     for section, table in settings._SETTINGS.items():
         for name, setting in table.items():

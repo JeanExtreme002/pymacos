@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -140,13 +141,29 @@ def test_screen_record_command(fake_run, monkeypatch, tmp_path):
 
     def record(args, **kwargs):
         fake_run(args, **kwargs)
-        target.write_bytes(b"movie")
+        Path(args[-1]).write_bytes(b"movie")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(_system.subprocess, "run", record)
 
     assert macos.screen.record(target, 2.4, region=(0, 0, 800, 600), display=2, audio=True, clicks=True) == target
-    assert fake_run.args == ["screencapture", "-x", "-v", "-V2", "-R0,0,800,600", "-D2", "-g", "-k", str(target)]
+    assert fake_run.args[:-1] == ["screencapture", "-x", "-v", "-V2", "-R0,0,800,600", "-D2", "-g", "-k"]
+    # Recorded beside the target, then moved over it.
+    assert Path(fake_run.args[-1]).name == "demo.mov" and Path(fake_run.args[-1]).parent.parent == tmp_path
+    assert target.read_bytes() == b"movie"
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
+def test_a_screen_recording_that_saves_nothing_leaves_the_old_one(fake_run, monkeypatch, tmp_path):
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+
+    # screencapture exited 0 without writing: the old recording can't pass for the new one.
+    with pytest.raises(macos.MacOSError, match="wasn't saved"):
+        macos.screen.record(target, 1)
+    assert target.read_bytes() == b"yesterday"
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
 def test_screen_record_gives_up_on_a_stuck_screencapture(fake_run, monkeypatch, tmp_path):
@@ -254,3 +271,27 @@ def test_screenshot_settings(monkeypatch, tmp_path):
         screen.set_screenshot_format("webp")
     with pytest.raises(NotADirectoryError):
         screen.set_screenshot_folder(tmp_path / "missing")
+
+
+def test_a_display_change_that_fails_is_cancelled(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def begin(pointer):
+        pointer._obj.value = 99
+        return 0
+
+    cg = SimpleNamespace(
+        CGBeginDisplayConfiguration=begin,
+        CGCancelDisplayConfiguration=lambda handle: calls.append(("cancel", handle)),
+        CGCompleteDisplayConfiguration=lambda handle, option: calls.append(("complete", handle)),
+    )
+    monkeypatch.setattr(screen, "_arrangement_api", lambda: cg)
+
+    def change(api, handle):
+        raise ValueError("no such display")
+
+    with pytest.raises(ValueError, match="no such display"):
+        screen._configure(change)
+    assert calls == [("cancel", 99)]

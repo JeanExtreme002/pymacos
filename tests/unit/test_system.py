@@ -511,6 +511,23 @@ def test_mount_image_detaches_and_explains_an_answer_it_cannot_read(fake_run, tm
     assert fake_run.calls[0]["timeout"] == 30
 
 
+def test_mount_image_says_when_its_cleanup_detach_failed(monkeypatch, fake_run, tmp_path):
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    unreadable = "/dev/disk7          \tGUID_partition_scheme\n"
+
+    def run(args, **kwargs):
+        fake_run.calls.append({"args": list(args), **kwargs})
+        if args[1] == "detach":
+            return subprocess.CompletedProcess(args, 16, "", "hdiutil: couldn't eject disk7 - Resource busy")
+        return subprocess.CompletedProcess(args, 0, unreadable, "")
+
+    monkeypatch.setattr(macos._system.subprocess, "run", run)
+    with pytest.raises(macos.MacOSError, match="detaching /dev/disk7 failed.*Resource busy") as caught:
+        macos.system.mount_image(image)
+    assert "(it was detached)" not in str(caught.value)
+
+
 def test_mount_image_and_updates_give_up_on_a_stuck_command(monkeypatch, fake_run, tmp_path):
     def stuck(args, **kwargs):
         raise subprocess.TimeoutExpired(args, kwargs["timeout"])

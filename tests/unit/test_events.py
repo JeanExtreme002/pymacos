@@ -164,7 +164,7 @@ def test_watchers_close_what_they_made_when_they_fail(monkeypatch):
         def SCDynamicStoreCreate(self, *args):
             return 0  # configd unreachable
 
-    monkeypatch.setattr(events, "_configuration", Store)
+    monkeypatch.setattr(events._sc, "lib", Store)
     monkeypatch.setattr(events._cf, "string", lambda text: 1)
     with pytest.raises(macos.MacOSError, match="could not watch the network"):
         events._NetworkWatch(_events.Listener())
@@ -184,7 +184,7 @@ def test_watchers_close_what_they_made_when_they_fail(monkeypatch):
         def IONotificationPortDestroy(self, port):
             self.destroyed.append(port)
 
-    monkeypatch.setattr(events, "_io_registry", Ports)
+    monkeypatch.setattr(events._iokit, "lib", Ports)
     with pytest.raises(macos.MacOSError, match="IOReturn 0xe00002c7"):
         events._USBWatch(_events.Listener())
     assert Ports.destroyed == [9]

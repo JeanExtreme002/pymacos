@@ -19,9 +19,9 @@ import subprocess
 import tempfile
 from itertools import islice
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 
-from ._system import require_macos
+from ._system import require_macos, run
 from .errors import CommandError, NotSupportedError
 
 __all__ = ["search", "search_name", "metadata"]
@@ -38,6 +38,7 @@ def _folder(folder: Optional[PathLike]) -> List[str]:
     return ["-onlyin", str(resolved)]
 
 
+_MDLS_TIMEOUT = 60.0  # seconds: mdls answers from the index, at once unless it is wedged
 _INVALID = "Failed to create query"  # what mdfind prints (on stdout) for a malformed query
 
 
@@ -58,14 +59,16 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
     require_macos()
     # No `-interpret`: without it, mdfind already understands Spotlight-bar
     # syntax (plain words, kind:, date:), and with it raw `kMDItem...` queries
-    # are taken as text and return wrong results.
+    # are taken as text and return wrong results. `-0` ends each path with a
+    # NUL instead of a newline: a file name may hold a newline, never a NUL.
     #
     # stderr goes to a temporary file, not a pipe: stdout is read to the end
     # first, and mdfind blocks (so this would too) once a pipe nobody reads
     # holds 64 KB, which its locale chatter and warnings can reach.
+    command = ["mdfind", "-0", *args]
     errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
-        process = subprocess.Popen(["mdfind", *args], stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8")
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
     except FileNotFoundError:
         errors.close()
         raise NotSupportedError("the 'mdfind' command was not found on this system") from None
@@ -77,24 +80,42 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
     try:
         # Read lazily: with a limit, stop (and stop mdfind) once there are
         # enough results, instead of collecting every match of a broad query.
-        # Read at least one line even with limit=0: that's where a malformed
+        # Read at least one record even with limit=0: that's where a malformed
         # query's diagnostic shows up.
         wanted = None if limit is None else max(limit, 1)
-        lines = list(islice((line.rstrip("\n") for line in process.stdout if line.strip()), wanted))
-        if lines and lines[0].startswith(_INVALID):
+        records = list(islice((record for record in _records(process.stdout) if record.strip()), wanted))
+        if records and records[0].startswith(_INVALID):
             raise _invalid(query)
-        if wanted is None or len(lines) < wanted:
+        if wanted is None or len(records) < wanted:
             # mdfind ran to the end, so its exit status is meaningful.
             if process.wait() != 0:
                 errors.seek(0)
-                raise CommandError(["mdfind", *args], process.returncode, errors.read())
-        return [Path(line) for line in lines[:limit]]
+                raise CommandError(command, process.returncode, errors.read())
+        return [Path(record) for record in records[:limit]]
     finally:
         if process.poll() is None:
             process.kill()
         process.wait()
         process.stdout.close()
         errors.close()
+
+
+def _records(stream: Any) -> Iterator[str]:
+    """
+    The NUL-terminated paths ``mdfind -0`` writes, read as they come.
+
+    Decoded like file names (undecodable bytes are kept, as :func:`os.fsdecode`
+    does). The text after the last NUL is a diagnostic, such as the one for a
+    malformed query, which ends with a newline instead.
+    """
+    pending = b""
+    for chunk in iter(lambda: stream.read1(65536), b""):  # what has arrived, without waiting for 64 KB
+        pending += chunk
+        *complete, pending = pending.split(b"\0")
+        for record in complete:
+            yield os.fsdecode(record)
+    if pending:
+        yield os.fsdecode(pending.rstrip(b"\n"))
 
 
 def search(query: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None) -> List[Path]:
@@ -137,11 +158,6 @@ def metadata(path: PathLike) -> Dict[str, Any]:
     if not os.path.lexists(target):
         raise FileNotFoundError(str(target))
 
-    require_macos()
-    try:
-        result = subprocess.run(["mdls", "-plist", "-", str(target)], capture_output=True)
-    except FileNotFoundError:
-        raise NotSupportedError("the 'mdls' command was not found on this system") from None
-    if result.returncode != 0:
-        raise CommandError(["mdls", "-plist", "-", str(target)], result.returncode, result.stderr.decode("utf-8", "replace"))
-    return dict(plistlib.loads(result.stdout))
+    # exact_newlines: the plist is decoded as bytes, as written, then parsed.
+    output = run(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT, exact_newlines=True)
+    return dict(plistlib.loads(os.fsencode(output)))

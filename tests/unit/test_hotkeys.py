@@ -199,3 +199,78 @@ def test_stop_reaches_every_listener_and_is_kept_from_the_start(monkeypatch):
         macos.hotkeys.stop()
     assert all(listener.stop.is_set() for listener in listeners)
     assert hotkeys._listeners.active() == []
+
+
+def test_the_tap_keeps_handling_keys_while_a_callback_runs(fake_tap, registered, monkeypatch):
+    # The tap turns its own thread's run loop: a slow callback must not hold up the keys typed meanwhile.
+    k = registered("cmd+k")
+    caller = threading.current_thread()
+    in_callback, let_go = threading.Event(), threading.Event()
+    answers, tap_threads = [], []
+
+    def spin(seconds):
+        tap_threads.append(threading.current_thread())
+        if not answers:
+            answers.append(fake_tap.callback(0, KEY_DOWN, fake_tap.key(40, CMD), 0))  # the shortcut
+        elif in_callback.is_set() and len(answers) == 1:
+            other = fake_tap.key(38, 0)  # "j", typed while the callback still runs
+            answers.append(fake_tap.callback(0, KEY_DOWN, other, 0) == other)
+            let_go.set()
+        threading.Event().wait(0.001)
+
+    monkeypatch.setattr(_events._objc, "spin", spin)
+    called = []
+
+    def callback():
+        called.append(threading.current_thread())
+        in_callback.set()
+        assert let_go.wait(5), "the tap stalled while the callback ran"
+        hotkeys.stop()
+
+    hotkeys.register("cmd+k", callback)
+    hotkeys.run(timeout=5)
+
+    assert answers == [None, True]  # the shortcut kept from the app, then "j" passed straight through
+    assert called == [caller]  # callbacks on the caller's thread
+    assert tap_threads and caller not in tap_threads  # the tap on another
+    assert k in hotkeys._registered
+
+
+def test_a_tap_macos_refuses_raises_on_the_callers_thread(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise macos.PermissionDeniedError("no tap")
+
+    monkeypatch.setattr(_events, "Tap", refuse)
+    monkeypatch.setattr(_events, "graphics", lambda: None)
+    with pytest.raises(macos.PermissionDeniedError, match="no tap"):
+        hotkeys.run(timeout=1)
+    assert hotkeys._listeners.active() == []
+
+
+def test_ctrl_c_while_the_tap_starts_stops_the_tap_too(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    closed = []
+
+    class Tap:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            closed.append(True)
+
+    class Interrupted(threading.Event):
+        def wait(self, timeout=None):
+            if timeout is None:  # the wait for the tap to start: Ctrl-C lands there
+                raise KeyboardInterrupt
+            return super().wait(timeout)
+
+    monkeypatch.setattr(_events, "Tap", Tap)
+    monkeypatch.setattr(_events, "graphics", lambda: None)
+    monkeypatch.setattr(hotkeys, "threading", SimpleNamespace(**{**vars(threading), "Event": Interrupted}))
+    monkeypatch.setattr(hotkeys._objc, "spin", lambda seconds: None)
+    with pytest.raises(KeyboardInterrupt):
+        hotkeys.run(timeout=1)
+    assert closed == [True]  # no tap left behind, swallowing the shortcuts
+    assert hotkeys._listeners.active() == []

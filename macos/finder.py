@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set,
 
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, framework, require_macos, restart_later, run as _run
+from ._system import applescript, framework, killall, require_macos, restart_later, run as _run
 from .errors import MacOSError
 
 __all__ = [
@@ -466,12 +466,19 @@ class Event:
     path: Path
     """The file or folder that changed, with symbolic links resolved (``/private/tmp/...`` for ``/tmp/...``)."""
     kind: str
-    """``'created'``, ``'modified'``, ``'deleted'`` or ``'renamed'`` (the new name of a moved or renamed item)."""
+    """
+    ``'created'``, ``'modified'``, ``'deleted'`` or ``'renamed'`` (the new name of a moved or renamed item).
+
+    ``'rescan'`` when macOS couldn't say what changed (it dropped events, or merged too many into one):
+    ``path`` is then a folder whose contents may have changed in any way, to look through again.
+    """
     is_dir: bool
 
 
 # FSEventStreamEventFlags
 _CREATED, _RENAMED, _IS_DIR = 0x100, 0x800, 0x20000
+# MustScanSubDirs, UserDropped, KernelDropped: events were lost or coalesced, the folder must be read again.
+_RESCAN = 0x1 | 0x2 | 0x4
 _FILE_EVENTS, _NO_DEFER = 0x10, 0x2  # FSEventStreamCreateFlags: one event per file, the first one right away
 _SINCE_NOW = 0xFFFFFFFFFFFFFFFF  # kFSEventStreamEventIdSinceNow
 _LATENCY = 0.1  # seconds FSEvents gathers events for before calling back
@@ -561,7 +568,9 @@ def watch(
     ``"*.pdf"`` (or any of a list, ignoring case), and ``recursive=False``
     ignores what happens in subfolders. Writing a
     new file usually yields ``'created'`` and then ``'modified'``; saving
-    over a file yields ``'modified'``. Uses FSEvents, like Spotlight and Time
+    over a file yields ``'modified'``. When macOS loses track (events dropped
+    under heavy load), a ``'rescan'`` event names the folder to look through
+    again. Uses FSEvents, like Spotlight and Time
     Machine: no polling, and no permission needed, except that the
     Desktop, Documents and Downloads folders ask for access the first time,
     like any access to them.
@@ -570,18 +579,37 @@ def watch(
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
     services, run_loop = _core_services(), _cf.lib()  # the run loop's functions are declared there
+    if pattern is not None and not isinstance(pattern, str):
+        # Kept as a tuple: checking a generator would use it up before the first event.
+        try:
+            pattern = tuple(pattern)
+        except TypeError:
+            pattern = (pattern,)  # type: ignore[assignment]
+        if not all(isinstance(wanted, str) for wanted in pattern):
+            raise TypeError("pattern must be a str or a list of str, not {!r}".format(pattern))
     pending: "collections.deque[Event]" = collections.deque()
+    errors: List[Exception] = []
     seen: Set[Path] = set()
 
     def changed(stream: int, info: int, count: int, paths: int, flags: "ctypes._Pointer", ids: "ctypes._Pointer") -> None:
-        names = ctypes.cast(paths, ctypes.POINTER(ctypes.c_char_p))
-        for index in range(count):
-            changed_path = Path(os.fsdecode(names[index]))
-            if changed_path == folder or (not recursive and changed_path.parent != folder):
-                continue
-            if not _matches(changed_path.name, pattern):
-                continue
-            pending.append(Event(changed_path, _kind(changed_path, flags[index], seen), bool(flags[index] & _IS_DIR)))
+        try:
+            names = ctypes.cast(paths, ctypes.POINTER(ctypes.c_char_p))
+            for index in range(count):
+                changed_path = Path(os.fsdecode(names[index]))
+                if flags[index] & _RESCAN:
+                    # Whatever the pattern: the files it would match may be among the lost events.
+                    if changed_path != folder and folder not in changed_path.parents:
+                        pending.append(Event(folder, "rescan", True))  # lost above the folder: all of it
+                    elif recursive or changed_path == folder:
+                        pending.append(Event(changed_path, "rescan", True))
+                    continue
+                if changed_path == folder or (not recursive and changed_path.parent != folder):
+                    continue
+                if not _matches(changed_path.name, pattern):
+                    continue
+                pending.append(Event(changed_path, _kind(changed_path, flags[index], seen), bool(flags[index] & _IS_DIR)))
+        except Exception as error:  # an exception must not cross back into C: the loop below raises it
+            errors.append(error)
 
     callback = _Callback(changed)  # kept alive for as long as the stream runs
     with _cf.owned(_cf.from_python([str(folder)])) as paths:
@@ -597,6 +625,8 @@ def watch(
         while True:
             while pending:
                 yield pending.popleft()
+            if errors:
+                raise errors.pop(0)
             remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
             if remaining <= 0:
                 return
@@ -622,10 +652,43 @@ def wait_for_change(
 
         event = macos.finder.wait_for_change("~/Downloads", pattern="*.pdf", timeout=60)
 
-    ``pattern`` and ``recursive`` work as in :func:`watch`.
+    ``pattern`` and ``recursive`` work as in :func:`watch`. When macOS loses
+    track of what changed (a ``'rescan'`` in :func:`watch`), the folder is
+    looked through for a matching file made or changed since the wait began.
     """
+    # Some disks keep file times to the second or two (FAT), and some systems a little behind
+    # the clock: a file written just after the wait began may carry a time just before it.
+    since = time.time() - _TIME_SLACK
+    if pattern is not None and not isinstance(pattern, str):
+        pattern = tuple(pattern)  # read twice: by watch() and by the look through the folder
     for event in watch(path, pattern=pattern, recursive=recursive, timeout=timeout):
-        return event
+        if event.kind != "rescan":
+            return event
+        found = _changed_since(event.path, since, pattern, recursive)
+        if found is not None:
+            return found
+    return None
+
+
+_TIME_SLACK = 2.0  # seconds
+
+
+def _changed_since(folder: Path, since: float, pattern: Union[str, Sequence[str], None], recursive: bool) -> Optional[Event]:
+    """A file in ``folder`` matching ``pattern``, made or changed at ``since`` or later, as an :class:`Event`; or ``None``."""
+    for root, folders, files in os.walk(str(folder)):
+        for name in files + folders:
+            if not _matches(name, pattern):
+                continue
+            changed = Path(root) / name
+            try:
+                info = os.lstat(str(changed))
+            except OSError:
+                continue  # gone meanwhile
+            if info.st_mtime >= since or info.st_ctime >= since:
+                made = getattr(info, "st_birthtime", 0) >= since
+                return Event(changed, "created" if made else "modified", name in folders)
+        if not recursive:
+            break
     return None
 
 
@@ -687,7 +750,7 @@ def restart() -> None:
     """Relaunch Finder, so it reads its settings again (the ``set_show_*`` functions do it for you)."""
     if restart_later("Finder", restart):
         return
-    _run(["killall", "Finder"])  # macOS opens it again right away, with its windows
+    killall("Finder")  # macOS opens it again right away, with its windows (unless quit from its menu, see set_quit_menu)
 
 
 def _setting(domain: str, key: str) -> bool:

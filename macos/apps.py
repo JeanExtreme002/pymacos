@@ -22,8 +22,10 @@ import ctypes
 import errno
 import os
 import shutil
+import threading
 import time
 import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from functools import lru_cache
@@ -472,32 +474,77 @@ def set_default_for(kind: str, app: str, *, timeout: float = 60.0) -> None:
         raise MacOSError("could not make {} the default for {!r} (error {})".format(app, kind, status))
 
 
+# One completion block serves call after call: _objc.block keeps each block
+# alive for good, so a new one per call would leak. One call at a time waits on
+# it. A call given up on (timeout, Ctrl-C) may still be answered later, so its
+# block is retired (_default_generation moves on), and what it says then goes
+# nowhere. Only those make a new block.
+_default_call = threading.Lock()
+_default_state = threading.Lock()
+_default_answers: List[Optional[str]] = []
+_default_generation = [0]
+
+
+def _default_answer(generation: int, message: Optional[str]) -> None:
+    with _default_state:
+        if generation == _default_generation[0]:  # a retired block's answer answers nothing
+            _default_answers.append(message)
+
+
+@lru_cache(maxsize=None)
+def _default_handler(generation: int) -> int:
+    """The completion block of ``generation``, ``void (^)(NSError *)``, made once: blocks live for good."""
+
+    def done(error: int) -> None:
+        message = None
+        if error:
+            try:
+                message = _objc.pystring(_objc.send(error, "localizedDescription")) or "unknown error"
+            except Exception as problem:  # an exception must not cross back into Objective-C
+                message = str(problem) or "unknown error"
+        _default_answer(generation, message)
+
+    return _objc.block(done, b"v@?@", ctypes.c_void_p)
+
+
+def _retire_default_handler() -> None:
+    with _default_state:
+        _default_generation[0] += 1
+        del _default_answers[:]
+
+
 def _set_default_with_workspace(workspace: int, path: str, type_name: str, app: str, kind: str, timeout: float) -> None:
     """``NSWorkspace``'s way (macOS 12+), which reports back through a completion handler."""
     framework("UniformTypeIdentifiers")
     content_type = _objc.send(_objc.cls("UTType"), "typeWithIdentifier:", _objc.nsstring(type_name), argtypes=(_objc.id,))
     if not content_type:
         raise ValueError("{!r} isn't a kind of file macOS knows".format(kind))
-    results: List[Optional[str]] = []
-
-    def done(error: int) -> None:
-        results.append(_objc.pystring(_objc.send(error, "localizedDescription")) if error else None)
-
-    handler = _objc.block(done, b"v@?@", ctypes.c_void_p)
-    _objc.send(
-        workspace,
-        "setDefaultApplicationAtURL:toOpenContentType:completionHandler:",
-        _objc.file_url(path),
-        content_type,
-        handler,
-        argtypes=(_objc.id, _objc.id, ctypes.c_void_p),
-        restype=None,
-    )
-    # Since macOS 26 the user is asked to confirm: the handler comes with their answer.
-    if not _objc.run_until(lambda: bool(results), timeout):
-        raise MacOSError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
-    if results[0]:
-        raise MacOSError("could not make {} the default for {!r}: {}".format(app, kind, results[0]))
+    with _default_call:
+        with _default_state:
+            del _default_answers[:]
+            generation = _default_generation[0]
+        try:
+            _objc.send(
+                workspace,
+                "setDefaultApplicationAtURL:toOpenContentType:completionHandler:",
+                _objc.file_url(path),
+                content_type,
+                _default_handler(generation),
+                argtypes=(_objc.id, _objc.id, ctypes.c_void_p),
+                restype=None,
+            )
+            # Since macOS 26 the user is asked to confirm: the handler comes with their answer.
+            answered = _objc.run_until(lambda: bool(_default_answers), timeout)
+        except BaseException:
+            _retire_default_handler()  # its answer may still come: it must not pass for the next call's
+            raise
+        if not answered:
+            _retire_default_handler()
+            raise MacOSError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
+        with _default_state:
+            message = _default_answers.pop(0)
+    if message:
+        raise MacOSError("could not make {} the default for {!r}: {}".format(app, kind, message))
 
 
 def _content_type(kind: str) -> int:
@@ -528,8 +575,9 @@ def install_from_dmg(
 
     The image is mounted, the ``.app`` at its top is copied into
     ``destination``, and the image is unmounted. An app already there raises
-    :class:`FileExistsError`, unless ``replace=True``. Installers (``.pkg``)
-    aren't run.
+    :class:`FileExistsError`, unless ``replace=True``; replacing an app that's
+    running raises :class:`~macos.MacOSError` (quit it first). Installers
+    (``.pkg``) aren't run.
     """
     target_folder = Path(destination).expanduser()
     if not target_folder.is_dir():
@@ -544,6 +592,9 @@ def install_from_dmg(
         target = target_folder / source.name
         if target.exists() and not replace:
             raise FileExistsError(str(target))
+        if target.exists() and get(str(target)) is not None:
+            # Swapped out from under it, a running app crashes, or saves into the old copy.
+            raise MacOSError("{} is running: quit it first".format(target.stem))
         # Copied beside it first, then swapped in: a failed copy leaves the installed app as it was.
         token = uuid.uuid4().hex  # unique per call: two installs of the same app don't share these
         staged = target_folder / ".{}.installing-{}".format(source.name, token)
@@ -558,6 +609,14 @@ def install_from_dmg(
                     os.rename(str(old), str(target))  # put the old app back
                     raise
                 shutil.rmtree(str(old), ignore_errors=True)
+                if old.exists():  # files the user can't delete (root-owned): say where the old copy is
+                    warnings.warn(
+                        "{} is installed, but the old copy couldn't all be removed: delete {} yourself".format(
+                            target.name, old
+                        ),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
             else:
                 os.rename(str(staged), str(target))
         finally:

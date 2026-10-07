@@ -52,7 +52,7 @@ def test_startup_items(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "_STARTUP_FOLDERS", ((str(agents), "agent", False), (str(daemons), "daemon", True)))
     monkeypatch.setattr(system, "require_macos", lambda: None)
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
-    monkeypatch.setattr(system, "_disabled", lambda domain: {"com.example.helper": True} if domain == "system" else {})
+    monkeypatch.setattr(system, "launchd_disabled", lambda domain: {"com.example.helper": True} if domain == "system" else {})
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: domain == "gui/501")
 
     found = {item.label: item for item in system.startup_items()}
@@ -118,8 +118,10 @@ def test_disabled_jobs_in_words_or_booleans(monkeypatch):
         "com.example.four" => false
     }
     """
-    monkeypatch.setattr(system, "_run", lambda args: output)
-    assert system._disabled("gui/501") == {
+    from macos import _system
+
+    monkeypatch.setattr(_system, "run", lambda args, **kwargs: output)
+    assert _system.launchd_disabled("gui/501") == {
         "com.example.one": True, "com.example.two": False, "com.example.three": True, "com.example.four": False
     }  # fmt: skip
 
@@ -132,7 +134,7 @@ def test_startup_item_with_broken_arguments(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "_STARTUP_FOLDERS", ((str(tmp_path), "agent", False),))
     monkeypatch.setattr(system, "require_macos", lambda: None)
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
-    monkeypatch.setattr(system, "_disabled", lambda domain: {})
+    monkeypatch.setattr(system, "launchd_disabled", lambda domain: {})
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: None)
     found = {item.label: (item.program, item.arguments) for item in system.startup_items()}
     assert found == {"com.example.number": (None, ()), "com.example.text": (None, ())}  # listed, not split into letters
@@ -148,7 +150,7 @@ def test_launchctl_switches_win_over_the_plist(tmp_path, monkeypatch):
     monkeypatch.setattr(system, "_STARTUP_FOLDERS", ((str(tmp_path), "agent", False),))
     monkeypatch.setattr(system, "require_macos", lambda: None)
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
-    monkeypatch.setattr(system, "_disabled", lambda domain: switches)
+    monkeypatch.setattr(system, "launchd_disabled", lambda domain: switches)
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: None)
     found = {item.label: item.enabled for item in system.startup_items()}
     assert found == {"com.example.overridden": True, "com.example.turned_off": False, "com.example.plain": False}

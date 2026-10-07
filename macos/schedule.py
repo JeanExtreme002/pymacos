@@ -30,9 +30,9 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
-from ._system import run as _run, require_macos
+from ._system import LAUNCHCTL_TIMEOUT, add_note, launchd_disabled, launchd_user_domain, require_macos, run
 from .errors import CommandError
 
 __all__ = ["Job", "add", "remove", "jobs", "get", "run_now", "pause", "resume"]
@@ -88,7 +88,23 @@ def _log(name: str) -> Path:
 
 
 def _domain() -> str:
-    return "gui/{}".format(os.getuid())
+    return launchd_user_domain()
+
+
+def _run(args: List[str]) -> str:
+    """Run a ``launchctl`` command, given up on if launchd doesn't answer."""
+    return run(args, timeout=LAUNCHCTL_TIMEOUT)
+
+
+def _path() -> str:
+    """
+    The caller's ``PATH``, for the job: its absolute folders only.
+
+    A relative entry ("." or an empty one, which means ".") would be looked up
+    in the script's folder at every run, for as long as the job exists.
+    """
+    folders = [folder for folder in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(folder)]
+    return os.pathsep.join(dict.fromkeys(folders)) or "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def _check_name(name: str) -> None:
@@ -212,7 +228,7 @@ def add(
         "StandardOutPath": str(log),
         "StandardErrorPath": str(log),
         # launchd's PATH is minimal: keep the caller's, so the script finds the same commands.
-        "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"), "PYTHONUNBUFFERED": "1"},
+        "EnvironmentVariables": {"PATH": _path(), "PYTHONUNBUFFERED": "1"},
         "RunAtLoad": bool(at_login),
     }
     if every is not None:
@@ -239,8 +255,10 @@ def add(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plist)
         _run(["launchctl", "bootstrap", _domain(), str(path)])
-    except BaseException:
-        _restore(name, path, previous, was_paused)
+    except BaseException as error:
+        problem = _restore(name, path, previous, was_paused)
+        if problem:
+            add_note(error, problem)
         raise
     found = get(name)
     assert found is not None
@@ -261,21 +279,24 @@ def remove(name: str) -> bool:
     return False
 
 
-def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool) -> None:
+def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool) -> Optional[str]:
     """
     Undo a failed :func:`add`: delete the new plist (if it got written), and put back the job it replaced, if any.
 
-    Best effort: the caller re-raises the error that made it fail, which
-    matters more than a failure here.
+    The caller re-raises the error that made it fail, which matters more than
+    a failure here: what went wrong here is returned, for the caller to note
+    on that error, instead of raised. ``None`` when all was undone.
     """
+    problems = []
     try:
         _bootout(name)  # in case launchd half-loaded it
-    except Exception:
-        pass
+    except Exception as failure:
+        # The steps below still run: a plist put back loads at the next login at worst.
+        problems.append("the new job couldn't be unloaded: {}".format(failure))
     try:
         if previous is None:
             path.unlink(missing_ok=True)
-            return
+            return "; ".join(problems) or None
         try:
             unchanged = path.read_bytes() == previous  # removing it failed: it's still there, as it was
         except OSError:
@@ -286,8 +307,12 @@ def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool)
             _run(["launchctl", "disable", _target(name)])  # a paused job stays unloaded
         else:
             _run(["launchctl", "bootstrap", _domain(), str(path)])
-    except Exception:
-        pass
+    except Exception as failure:
+        if previous is None:
+            problems.append("the new job's file {} couldn't be deleted: {}".format(path, failure))
+        else:
+            problems.append("the job {!r} it replaced couldn't be put back ({}); its file is {}".format(name, failure, path))
+    return "; ".join(problems) or None
 
 
 def _target(name: str) -> str:
@@ -308,11 +333,8 @@ def _bootout(name: str) -> None:
 
 def _paused() -> List[str]:
     """The names of the paused jobs, from ``launchctl print-disabled``."""
-    try:
-        output = _run(["launchctl", "print-disabled", _domain()])
-    except CommandError:
-        return []
-    return re.findall(r'"{}([^"]+)"\s*=>\s*(?:disabled|true)'.format(re.escape(_PREFIX)), output)
+    switches = launchd_disabled(_domain())
+    return [label[len(_PREFIX):] for label, disabled in switches.items() if disabled and label.startswith(_PREFIX)]
 
 
 def _state(name: str) -> Tuple[bool, Optional[int]]:
@@ -331,13 +353,23 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         data = plistlib.loads(path.read_bytes())
     except (OSError, plistlib.InvalidFileException, ValueError):
         return None
-    name = str(data.get("Label", ""))[len(_PREFIX):]
-    arguments = list(data.get("ProgramArguments", []))
-    calendar = data.get("StartCalendarInterval") or []
-    if isinstance(calendar, dict):
-        calendar = [calendar]
-    times = tuple(dict.fromkeys("{:02}:{:02}".format(entry.get("Hour", 0), entry.get("Minute", 0)) for entry in calendar))
-    days = tuple(dict.fromkeys(_WEEKDAYS[entry["Weekday"] % 7] for entry in calendar if "Weekday" in entry))
+    if not isinstance(data, dict):
+        return None  # a file edited by hand into something else: not one of ours to list
+    try:
+        name = str(data.get("Label", ""))[len(_PREFIX):]
+        listed = data.get("ProgramArguments")
+        arguments = [str(argument) for argument in listed] if isinstance(listed, list) else []
+        calendar = data.get("StartCalendarInterval") or []
+        if isinstance(calendar, dict):
+            calendar = [calendar]
+        calendar = [entry for entry in calendar if isinstance(entry, dict)] if isinstance(calendar, list) else []
+        moments = ((int(entry.get("Hour", 0)), int(entry.get("Minute", 0))) for entry in calendar)
+        times = tuple(dict.fromkeys("{:02}:{:02}".format(hour, minute) for hour, minute in moments))
+        days = tuple(dict.fromkeys(_WEEKDAYS[int(entry["Weekday"]) % 7] for entry in calendar if "Weekday" in entry))
+        listed_paths = data.get("WatchPaths")
+        watched: List[Any] = listed_paths if isinstance(listed_paths, list) else []
+    except (TypeError, ValueError):  # a time or a day that isn't a number
+        return None
     running, status = _state(name)
     return Job(
         name=name,
@@ -347,7 +379,7 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         at=times,
         weekdays=days,
         at_login=bool(data.get("RunAtLoad")),
-        when_changed=tuple(Path(path) for path in data.get("WatchPaths") or [] if isinstance(path, str)),
+        when_changed=tuple(Path(path) for path in watched if isinstance(path, str)),
         at_mount=bool(data.get("StartOnMount")),
         paused=name in paused,
         log=Path(data.get("StandardOutPath", str(_log(name)))),

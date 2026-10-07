@@ -73,12 +73,8 @@ _HEIGHTS = {480: "Preset640x480", 540: "Preset960x540", 720: "Preset1280x720", 1
 _HEVC_HEIGHTS = {1080: "PresetHEVC1920x1080", 2160: "PresetHEVC3840x2160"}
 
 
-class _CMTime(ctypes.Structure):
-    _fields_ = [("value", ctypes.c_int64), ("timescale", ctypes.c_int32), ("flags", ctypes.c_uint32), ("epoch", ctypes.c_int64)]
-
-
-_VALID = 1  # kCMTimeFlags_Valid
-_TIMESCALE = 600  # the usual movie timescale: exact for 24, 25, 30 and 60 fps
+# The time values and tracks the editing helpers use too: one CMTime type for the whole package.
+_CMTime = _media.CMTime
 
 
 @dataclass(frozen=True)
@@ -107,20 +103,11 @@ _existing = _files.existing
 
 def _asset(path: Path) -> int:
     """An autoreleased ``AVURLAsset``. Call inside an autorelease pool."""
-    asset = _objc.send(
-        _objc.cls("AVURLAsset"), "URLAssetWithURL:options:", _objc.file_url(path), None, argtypes=(_objc.id, _objc.id)
-    )
-    if not asset or not _objc.send(asset, "isPlayable", restype=_objc.BOOL):
-        raise ValueError("{} is not a video macOS can play".format(path))
-    return asset
+    return _media.asset(path, "video")
 
 
-def _tracks(asset: int, kind: str) -> List[int]:
-    return list(_objc.nsarray(_objc.send(asset, "tracksWithMediaType:", _objc.nsstring(kind), argtypes=(_objc.id,))))
-
-
-def _seconds(time: _CMTime) -> float:
-    return time.value / time.timescale if time.flags & _VALID and time.timescale else 0.0
+_tracks = _media.tracks
+_seconds = _media.seconds
 
 
 @lru_cache(maxsize=None)
@@ -239,7 +226,7 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
         )
         _objc.send(generator, "setAppliesPreferredTrackTransform:", True, argtypes=(_objc.BOOL,), restype=None)
         # The exact frame, not the nearest keyframe.
-        exact = _CMTime(0, 1, _VALID, 0)
+        exact = _media.time(0)
         for selector in ("setRequestedTimeToleranceBefore:", "setRequestedTimeToleranceAfter:"):
             _objc.send(generator, selector, exact, argtypes=(_CMTime,), restype=None)
         if size is not None:
@@ -251,7 +238,7 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
         image = _objc.send(
             generator,
             "copyCGImageAtTime:actualTime:error:",
-            _CMTime(round(at * _TIMESCALE), _TIMESCALE, _VALID, 0),
+            _media.time(at),
             ctypes.byref(actual),
             ctypes.byref(error),
             argtypes=(_CMTime, ctypes.c_void_p, ctypes.c_void_p),
@@ -356,7 +343,7 @@ def _frames_at(
                 _objc.cls("AVAssetImageGenerator"), "assetImageGeneratorWithAsset:", media, argtypes=(_objc.id,)
             )
             _objc.send(generator, "setAppliesPreferredTrackTransform:", True, argtypes=(_objc.BOOL,), restype=None)
-            leeway = _CMTime(round(tolerance * _TIMESCALE), _TIMESCALE, _VALID, 0)
+            leeway = _media.time(tolerance)
             for selector in ("setRequestedTimeToleranceBefore:", "setRequestedTimeToleranceAfter:"):
                 _objc.send(generator, selector, leeway, argtypes=(_CMTime,), restype=None)
             if width:
@@ -369,7 +356,7 @@ def _frames_at(
                 picture = _objc.send(
                     generator,
                     "copyCGImageAtTime:actualTime:error:",
-                    _CMTime(round(moment * _TIMESCALE), _TIMESCALE, _VALID, 0),
+                    _media.time(moment),
                     None,
                     ctypes.byref(error),
                     argtypes=(_CMTime, ctypes.c_void_p, ctypes.c_void_p),
@@ -545,14 +532,16 @@ def trim(source: PathLike, output: PathLike, start: float = 0.0, duration: Optio
         raise ValueError("start must not be negative and duration must be positive")
     original = _existing(source)
     target = _target(output)
+    if _same_file(original, target):
+        # avconvert --replace would delete the source before reading it: compare
+        # files, not spellings ("Clip.mov" is "clip.mov" on a case-insensitive disk).
+        raise ValueError("trim() can't write over its source; pick another output")
     length = info(original).duration
     if start >= length:
         raise ValueError("start={} is past the end of the {:.3f}-second video".format(start, length))
     args = ["avconvert", "--source", str(original), "--output", str(target), "--preset", "PresetPassthrough", "--replace"]
     args += ["--start", str(start), "--duration", str(min(duration, length - start) if duration else length - start)]
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target == original:
-        raise ValueError("trim() can't write over its source; pick another output")
     _run(args)
     return target
 
@@ -921,30 +910,32 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
                 raise MacOSError("could not start writing {}".format(target))
             _objc.send(writer, "startSessionAtSourceTime:", _media.time(0), argtypes=(_media.CMTime,), restype=None)
             for index, picture in enumerate(pictures):
-                deadline = time.monotonic() + _WRITER_PATIENCE
-                while not _objc.send(writer_input, "isReadyForMoreMediaData", restype=_objc.BOOL):
-                    if _objc.send(writer, "status", restype=_objc.NSInteger) != _WRITING:
-                        raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
-                    if time.monotonic() > deadline:
-                        _objc.send(writer, "cancelWriting", restype=None)
-                        raise MacOSError("the video encoder stopped taking frames")
-                    time.sleep(0.005)
-                buffer = _pixel_buffer(picture, width, height)
-                try:
-                    # index / fps seconds, exactly: value index * 600, timescale fps * 600.
-                    moment = _media.CMTime(index * 600, int(round(fps * 600)), 1, 0)
-                    appended = _objc.send(
-                        adaptor,
-                        "appendPixelBuffer:withPresentationTime:",
-                        buffer,
-                        moment,
-                        argtypes=(ctypes.c_void_p, _media.CMTime),
-                        restype=_objc.BOOL,
-                    )
-                finally:
-                    _cf.release(buffer)
-                if not appended:
-                    raise MacOSError("could not add frame {} to the video".format(index + 1))
+                # A pool per frame: what encoding one autoreleases goes with it, not after the last.
+                with _objc.autorelease_pool():
+                    deadline = time.monotonic() + _WRITER_PATIENCE
+                    while not _objc.send(writer_input, "isReadyForMoreMediaData", restype=_objc.BOOL):
+                        if _objc.send(writer, "status", restype=_objc.NSInteger) != _WRITING:
+                            raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
+                        if time.monotonic() > deadline:
+                            _objc.send(writer, "cancelWriting", restype=None)
+                            raise MacOSError("the video encoder stopped taking frames")
+                        time.sleep(0.005)
+                    buffer = _pixel_buffer(picture, width, height)
+                    try:
+                        # index / fps seconds, exactly: value index * 600, timescale fps * 600.
+                        moment = _media.CMTime(index * 600, int(round(fps * 600)), 1, 0)
+                        appended = _objc.send(
+                            adaptor,
+                            "appendPixelBuffer:withPresentationTime:",
+                            buffer,
+                            moment,
+                            argtypes=(ctypes.c_void_p, _media.CMTime),
+                            restype=_objc.BOOL,
+                        )
+                    finally:
+                        _cf.release(buffer)
+                    if not appended:
+                        raise MacOSError("could not add frame {} to the video".format(index + 1))
             _objc.send(writer_input, "markAsFinished", restype=None)
             _objc.send(
                 writer,
@@ -965,21 +956,7 @@ def _load_image(path: Path, longest: Optional[int]) -> int:
     """An owned, upright ``CGImage`` of an image file, scaled down to ``longest`` pixels if given."""
     from . import image
 
-    io = image._io()
-    with _cf.owned(image._source(path)) as source:
-        details = image._describe(source)
-        options = image._options(
-            {
-                "kCGImageSourceCreateThumbnailFromImageAlways": True,
-                "kCGImageSourceCreateThumbnailWithTransform": True,
-                "kCGImageSourceThumbnailMaxPixelSize": longest or max(details.width, details.height),
-            }
-        )
-        with _cf.owned(options):
-            picture = io.CGImageSourceCreateThumbnailAtIndex(source, 0, options)
-    if not picture:
-        raise ValueError("{} is not an image macOS can read".format(path))
-    return int(picture)
+    return image._thumbnail(path, longest)
 
 
 def from_images(
