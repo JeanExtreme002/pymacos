@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.finder`. They run on any platform."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -386,3 +387,23 @@ def test_a_rescan_reports_the_latest_new_file_not_one_only_opened(tmp_path):
 
     found = finder._changed_since(tmp_path, since, "*.pdf", True, None)
     assert found is not None and found.path.name == "second.pdf"  # the latest of the two that changed
+
+
+def test_a_rescan_finds_a_copy_by_its_birth_though_it_keeps_the_original_s_mtime(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    since = 1_700_000_000.5
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    (tmp_path / "opened.pdf").write_bytes(b"%PDF")
+    old = since - 86_400  # yesterday
+    times = {
+        "report.pdf": (old, since + 3),  # copied by Finder during the wait: old mtime, born now
+        "opened.pdf": (old, old),  # only opened in Preview: neither moved (ctime did, which doesn't count)
+    }
+
+    def lstat(path):
+        mtime, birth = times[os.path.basename(path)]
+        return SimpleNamespace(st_mtime=mtime, st_mtime_ns=int(mtime * 1e9) + 1, st_birthtime=birth)
+
+    monkeypatch.setattr(finder.os, "lstat", lstat)
+    assert finder._changed_since(tmp_path, since, "*.pdf", True, None) == finder.Event(tmp_path / "report.pdf", "created", False)

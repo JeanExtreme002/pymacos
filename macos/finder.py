@@ -691,9 +691,10 @@ def _changed_since(
     """
     The file in ``folder`` matching ``pattern`` changed last since ``since``, as an :class:`Event`; or ``None``.
 
-    Its contents' time (mtime) is what counts, not ctime: opening a file in Preview, tagging it or
-    any extended attribute moves ctime, and an old file isn't the change waited for. Gives up,
-    with ``None``, at ``deadline`` (``time.monotonic()``): a large folder never outlasts the wait's timeout.
+    Its contents' time (mtime) counts, and its birth: a copy Finder makes keeps the original's
+    mtime, but is born now. Not ctime: opening a file in Preview, tagging it or any extended
+    attribute moves ctime, and an old file isn't the change waited for. Gives up, with ``None``,
+    at ``deadline`` (``time.monotonic()``): a large folder never outlasts the wait's timeout.
     """
     latest: Optional[Tuple[float, Event]] = None
     for root, folders, files in os.walk(str(folder)):
@@ -707,12 +708,13 @@ def _changed_since(
                 info = os.lstat(str(changed))
             except OSError:
                 continue  # gone meanwhile
-            if not _changed_at_or_after(info.st_mtime, info.st_mtime_ns, since):
-                continue
-            birth = getattr(info, "st_birthtime", None)
+            birth = getattr(info, "st_birthtime", None)  # only macOS file systems record it
             made = birth is not None and _changed_at_or_after(birth, int(birth * 1e9), since)
-            if latest is None or info.st_mtime > latest[0]:
-                latest = (info.st_mtime, Event(changed, "created" if made else "modified", name in folders))
+            if not made and not _changed_at_or_after(info.st_mtime, info.st_mtime_ns, since):
+                continue
+            when = max(info.st_mtime, birth or 0.0)
+            if latest is None or when > latest[0]:
+                latest = (when, Event(changed, "created" if made else "modified", name in folders))
         if not recursive:
             break
     return None if latest is None else latest[1]

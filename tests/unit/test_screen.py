@@ -135,6 +135,12 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
     assert macos.screen.is_locked() is locked
 
 
+@pytest.fixture(autouse=True)
+def _no_terminal(monkeypatch):
+    """No terminal sent a Ctrl-C here, whether the tests run in one or not (CI): the tests that need one say so."""
+    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: False)
+
+
 class _FakeRecording:
     """``subprocess.Popen`` for screencapture: ``record(args, timeout)`` plays what it does while recording."""
 
@@ -234,7 +240,6 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     recording = _FakeRecording(interrupted)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
-    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: False)  # no terminal sent it one
     with pytest.raises(KeyboardInterrupt):  # the script still stops, as asked
         macos.screen.record(target, 60)
     process = recording.made[0][1]

@@ -138,9 +138,10 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     killed and :class:`UnfinishedInterrupt` (a ``KeyboardInterrupt``) says its
     file is incomplete. Otherwise it is as :func:`run`, minus the output.
 
-    It stays in Python's process group, not a session of its own: closing the
-    terminal, or an IDE stopping the script, ends it too, rather than leave the
-    screen recording with nobody to stop it.
+    It stays in Python's process group, not a session of its own, so what
+    signals the whole group (closing the terminal, for one) ends it too, rather
+    than leave the screen recording with nobody to stop it. A signal to Python
+    alone (``kill`` of its pid) still leaves it to run until its own end.
     """
     require_macos()
     try:
