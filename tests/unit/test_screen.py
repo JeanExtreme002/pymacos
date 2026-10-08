@@ -138,9 +138,11 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
 class _FakeRecording:
     """``subprocess.Popen`` for screencapture: ``record(args, timeout)`` plays what it does while recording."""
 
-    def __init__(self, record, stuck_finishing=False):
+    def __init__(self, record, stuck_finishing=False, interrupted_again=False, exit_status=0):
         self.record = record
         self.stuck_finishing = stuck_finishing  # after Ctrl-C, it doesn't finish the movie in time
+        self.interrupted_again = interrupted_again
+        self.exit_status = exit_status  # how it ends after Ctrl-C
         self.made = []
 
     def __call__(self, args, **kwargs):
@@ -158,7 +160,9 @@ class _FakeRecording:
                     recording.record(args, timeout)
                 elif len(Process.calls) == 2 and recording.stuck_finishing:
                     raise subprocess.TimeoutExpired(args, timeout)
-                self.returncode = 0
+                elif len(Process.calls) == 2 and recording.interrupted_again:
+                    raise KeyboardInterrupt  # Ctrl-C a second time, while it finishes
+                self.returncode = recording.exit_status if len(Process.calls) == 2 else 0
                 return None, b""
 
             def poll(self):
@@ -239,7 +243,10 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
-def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_run, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "how", [{"stuck_finishing": True}, {"interrupted_again": True}, {"exit_status": 1}], ids=["slow", "twice", "failed"]
+)
+def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_run, monkeypatch, tmp_path, how):
     target = tmp_path / "demo.mov"
     target.write_bytes(b"yesterday")
 
@@ -247,13 +254,14 @@ def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_ru
         Path(args[-1]).write_bytes(b"half a movie")
         raise KeyboardInterrupt
 
-    recording = _FakeRecording(interrupted, stuck_finishing=True)
+    recording = _FakeRecording(interrupted, **how)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
     with pytest.raises(KeyboardInterrupt):  # still the Ctrl-C
         macos.screen.record(target, 60)
-    assert recording.made[0][1].signals[-1] == "kill"
-    assert target.read_bytes() == b"yesterday"  # the killed one is incomplete: dropped
+    if "exit_status" not in how:
+        assert recording.made[0][1].signals[-1] == "kill"  # stopped for good, not left running
+    assert target.read_bytes() == b"yesterday"  # an unfinished movie is dropped
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 

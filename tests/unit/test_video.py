@@ -37,6 +37,10 @@ def test_trim_refuses_to_write_over_its_source_by_another_name(tmp_path):
         macos.video.trim(source, tmp_path / "link.mov", 1)
     with pytest.raises(ValueError, match="over its source"):
         macos.video.trim(source, tmp_path / "sub" / ".." / "clip.mov", 1)
+    # A folder that doesn't exist yet, which trim() would make before avconvert runs.
+    with pytest.raises(ValueError, match="over its source"):
+        macos.video.trim(source, tmp_path / "new" / ".." / "clip.mov", 1)
+    assert not (tmp_path / "new").exists()
 
 
 def test_video_argument_checks(tmp_path):

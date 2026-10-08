@@ -592,7 +592,7 @@ def install_from_dmg(
         target = target_folder / source.name
         if target.exists() and not replace:
             raise FileExistsError(str(target))
-        if target.exists() and get(str(target)) is not None:
+        if target.exists() and get(str(target.absolute())) is not None:  # a path, never taken for an app's name
             # Swapped out from under it, a running app crashes, or saves into the old copy.
             raise MacOSError("{} is running: quit it first".format(target.stem))
         # Copied beside it first, then swapped in: a failed copy leaves the installed app as it was.

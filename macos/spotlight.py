@@ -66,7 +66,7 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
     # first, and mdfind blocks (so this would too) once a pipe nobody reads
     # holds 64 KB, which its locale chatter and warnings can reach.
     command = ["mdfind", "-0", *args]
-    errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")  # as run() reads output
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
     except FileNotFoundError:

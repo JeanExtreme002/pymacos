@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Iterator, List, Optional, Sequence
 
 from . import _cf
 from ._system import framework, require_macos
@@ -270,15 +270,23 @@ def _color_space_model() -> Any:
     return function
 
 
-@lru_cache(maxsize=None)
+_CICONTEXT: List[int] = []
+_CICONTEXT_LOCK = threading.Lock()
+
+
 def cicontext() -> int:
     """
     The ``CIContext`` every render goes through, made once and kept for the process.
 
     Making one is costly (it sets up a GPU pipeline), and one context is safe
-    to use from several threads at once. Needs CoreImage loaded.
+    to use from several threads at once. Made under a lock: two first renders
+    at once would otherwise each make one, and leak the one not kept.
+    Needs CoreImage loaded.
     """
-    return int(send(send(cls("CIContext"), "contextWithOptions:", None, argtypes=(id,)), "retain"))
+    with _CICONTEXT_LOCK:
+        if not _CICONTEXT:
+            _CICONTEXT.append(int(send(send(cls("CIContext"), "contextWithOptions:", None, argtypes=(id,)), "retain")))
+        return _CICONTEXT[0]
 
 
 def ciimage_cgimage(image: int) -> int:

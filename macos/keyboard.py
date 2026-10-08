@@ -234,6 +234,11 @@ def _current_layout_id() -> str:
     return ""
 
 
+def _keyboard_type() -> int:
+    """The physical keyboard (ANSI, ISO, JIS) in use: a global any thread may read, unlike the layout."""
+    return int(_text_input().LMGetKbdType())
+
+
 def _layout() -> Dict[str, Tuple[int, bool]]:
     """
     What each key of the current keyboard layout types: ``{"a": (0, False), "?": (44, True)}``.
@@ -246,11 +251,16 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
     """
     if threading.current_thread() is not threading.main_thread():
         current = _current_layout_id()
+        if not current and _LAST_READ:
+            current = _LAST_READ[0]  # never switched since the account was made: still the one the main thread read
         if current in _LAYOUTS:
+            read_for = _KEYBOARD_TYPES.get(current)
+            if read_for is not None and read_for != _keyboard_type():
+                raise MacOSError(
+                    "a different kind of keyboard is in use since the main thread read the layout, and its keys "
+                    "sit elsewhere: call macos.keyboard.layout() from the main thread again"
+                )
             return _LAYOUTS[current]
-        if not current and _LAST_READ and _LAST_READ[0] in _LAYOUTS:
-            # Never switched since the account was made: it's still the one the main thread read.
-            return _LAYOUTS[_LAST_READ[0]]
         if current in _US_COMPATIBLE:
             return _us_layout()
         raise MacOSError(

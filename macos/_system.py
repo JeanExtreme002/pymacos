@@ -136,10 +136,12 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
             process.send_signal(signal.SIGINT)  # the only one it gets: it's in a session of its own
         try:
             process.communicate(timeout=grace)
-        except subprocess.TimeoutExpired:
+        except BaseException:  # out of time, or a second Ctrl-C: it's stopped for good, its file unfinished
             process.kill()
             process.communicate()
             raise UnfinishedInterrupt(*interrupt.args) from interrupt
+        if process.returncode != 0:
+            raise UnfinishedInterrupt(*interrupt.args) from interrupt  # it ended, but not cleanly: can't trust the file
         raise
     if process.returncode != 0:
         raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))

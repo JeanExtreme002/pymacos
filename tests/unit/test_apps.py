@@ -333,6 +333,18 @@ def test_install_from_dmg_refuses_to_replace_a_running_app(monkeypatch, tmp_path
     assert unmounted  # the image is unmounted all the same
 
 
+def test_install_from_dmg_checks_the_copy_it_replaces_not_an_app_of_that_name(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, _ = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    asked = []
+    monkeypatch.setattr(apps, "get", lambda name: asked.append(name))
+    monkeypatch.chdir(tmp_path / "Applications")
+
+    apps.install_from_dmg(tmp_path / "Tool.dmg", destination=".", replace=True)
+    assert asked == [str(installed)]  # "Tool.app" alone would be any running app called Tool
+
+
 def test_install_from_dmg_warns_when_the_old_copy_stays(monkeypatch, tmp_path):
     from macos import apps
 

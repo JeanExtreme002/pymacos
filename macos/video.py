@@ -319,9 +319,14 @@ def convert(
 
 
 def _same_file(first: Path, second: Path) -> bool:
-    """Whether two paths are the same file (through a link or another spelling, too)."""
+    """
+    Whether two paths are the same file (through a link or another spelling, too).
+
+    ``second`` is resolved first, so ``sub/../clip.mov`` is ``clip.mov`` even while ``sub``
+    doesn't exist yet (the output's folders are made later).
+    """
     try:
-        return first == second or os.path.samefile(str(first), str(second))
+        return first == second or os.path.samefile(str(first), os.path.realpath(str(second)))
     except OSError:  # one of them doesn't exist
         return False
 

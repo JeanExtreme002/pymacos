@@ -437,3 +437,17 @@ def test_a_layout_read_for_one_keyboard_is_read_again_for_another(monkeypatch):
     assert macos.keyboard._layout() is iso  # the same keyboard: the table already read
     kind[0] = 40  # an ANSI keyboard plugged in
     assert macos.keyboard._layout() is not iso
+
+
+def test_a_worker_refuses_a_layout_read_for_another_kind_of_keyboard(monkeypatch):
+    azerty = {"a": (12, False), "q": (0, False)}
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_KEYBOARD_TYPES", {"com.apple.keylayout.French": 41})  # read on ISO
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
+    kind = [41]
+    monkeypatch.setattr(macos.keyboard, "_keyboard_type", lambda: kind[0])
+
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 12, False)
+    kind[0] = 40  # an ANSI keyboard now: some keys sit elsewhere
+    error = _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a"))
+    assert isinstance(error, macos.MacOSError) and "layout() from the main thread again" in str(error)

@@ -26,7 +26,11 @@ class _FakeMdfind:
         )
         self.stderr = kwargs["stderr"]
         assert self.stderr is not subprocess.PIPE  # read only after stdout's end: a full pipe would hang mdfind
-        self.stderr.write(self.stderr_text)
+        if isinstance(self.stderr_text, bytes):  # what mdfind wrote, as it wrote it: not always UTF-8
+            self.stderr.flush()
+            self.stderr.buffer.write(self.stderr_text)
+        else:
+            self.stderr.write(self.stderr_text)
         self.returncode = None
         self.killed = False
         return self
@@ -106,6 +110,13 @@ def test_spotlight_failure_is_a_command_error(mdfind):
     mdfind([], returncode=2, stderr="boom")
 
     with pytest.raises(macos.CommandError, match="boom"):
+        macos.spotlight.search("x")
+
+
+def test_a_diagnostic_that_isnt_utf8_is_still_a_command_error(mdfind):
+    mdfind([], returncode=2, stderr=b"mdfind: no index on Caf\xe9")  # Latin-1, from an old volume's name
+
+    with pytest.raises(macos.CommandError, match="no index on Caf\ufffd"):
         macos.spotlight.search("x")
 
 
