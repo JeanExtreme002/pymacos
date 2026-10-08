@@ -199,12 +199,11 @@ _US_COMPATIBLE = frozenset(
 # The same layouts by the number the preferences list enabled layouts with ("KeyboardLayout ID").
 _US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15})
 
-# The layouts read on the main thread, by input source ID: other threads use them.
-_LAYOUTS: Dict[str, Dict[str, Tuple[int, bool]]] = {}
+# The layouts read on the main thread, by input source ID, for other threads: each with the
+# physical keyboard (ANSI, ISO, JIS) it was read for, since keys sit elsewhere on another one.
+_LAYOUTS: Dict[str, Tuple[Optional[int], Dict[str, Tuple[int, bool]]]] = {}
 # The ID of the layout the main thread read last: the one in use when the preferences don't name it.
 _LAST_READ: List[str] = []
-# The physical keyboard (ANSI, ISO, JIS) each of _LAYOUTS was read for: its keys sit elsewhere on another.
-_KEYBOARD_TYPES: Dict[str, int] = {}
 
 _HITOOLBOX = "com.apple.HIToolbox"
 
@@ -255,13 +254,13 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
         if not current and _LAST_READ:
             current = _LAST_READ[0]  # never switched since the account was made: still the one the main thread read
         if current in _LAYOUTS:
-            read_for = _KEYBOARD_TYPES.get(current)
+            read_for, table = _LAYOUTS[current]
             if read_for is not None and read_for != _keyboard_type():
                 raise MacOSError(
                     "a different kind of keyboard is in use since the main thread read the layout, and its keys "
                     "sit elsewhere: call macos.keyboard.layout() from the main thread again"
                 )
-            return _LAYOUTS[current]
+            return table
         if current in _US_COMPATIBLE:
             return _us_layout()
         raise MacOSError(
@@ -278,8 +277,8 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
         if identifier:
             _LAST_READ[:] = [identifier]
         keyboard_type = carbon.LMGetKbdType()
-        if identifier in _LAYOUTS and _KEYBOARD_TYPES.get(identifier) == keyboard_type:
-            return _LAYOUTS[identifier]
+        if identifier in _LAYOUTS and _LAYOUTS[identifier][0] == keyboard_type:
+            return _LAYOUTS[identifier][1]
         key = ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData").value
         data = carbon.TISGetInputSourceProperty(source, key)
         if not data:
@@ -304,8 +303,7 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
         if not found:
             return _us_layout()
         if identifier:
-            _LAYOUTS[identifier] = found
-            _KEYBOARD_TYPES[identifier] = keyboard_type
+            _LAYOUTS[identifier] = (keyboard_type, found)
         return found
     finally:
         _cf.release(source)

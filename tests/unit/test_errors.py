@@ -43,3 +43,23 @@ def test_error_messages():
 def test_permission_error_is_also_the_builtin():
     assert issubclass(macos.PermissionDeniedError, PermissionError)
     assert issubclass(macos.AppNotFoundError, LookupError)
+
+
+def test_run_bytes_hands_over_the_output_as_written(fake_run):
+    from macos import _system
+
+    fake_run.stdout = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>Caf\xe9\r\n"  # not UTF-8, CRLF kept
+    assert _system.run_bytes(["mdls", "-plist", "-", "x"]) == fake_run.stdout
+    assert "text" not in fake_run.calls[-1]  # bytes from the command, never decoded on the way
+
+    fake_run.returncode, fake_run.stderr = 1, b"mdls: no such file"
+    with pytest.raises(macos.CommandError, match="no such file"):
+        _system.run_bytes(["mdls", "x"])
+
+
+def test_run_decodes_bytes_whichever_way_it_was_asked(fake_run):
+    from macos import _system
+
+    fake_run.stdout = "Caf\xe9".encode("utf-8")  # bytes, even where text was asked for
+    assert _system.run(["sw_vers"]) == "Café"  # decoded: never the "b'...'" str() would make of it
+    assert _system.run(["ls"], exact_newlines=True) == "Café"

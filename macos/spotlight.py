@@ -21,7 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from ._system import require_macos, run
+from ._system import require_macos, run_bytes
 from .errors import CommandError, NotSupportedError
 
 __all__ = ["search", "search_name", "metadata"]
@@ -158,6 +158,5 @@ def metadata(path: PathLike) -> Dict[str, Any]:
     if not os.path.lexists(target):
         raise FileNotFoundError(str(target))
 
-    # exact_newlines: the plist is decoded as bytes, as written, then parsed.
-    output = run(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT, exact_newlines=True)
-    return dict(plistlib.loads(os.fsencode(output)))
+    # The plist as mdls wrote it, in bytes: plistlib reads its encoding from its header.
+    return dict(plistlib.loads(run_bytes(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT)))

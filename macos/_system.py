@@ -14,7 +14,7 @@ import threading
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar, Union
 
 from .errors import CommandError, CommandTimeoutError, NotSupportedError, PermissionDeniedError
 
@@ -80,27 +80,35 @@ def run(
     :func:`os.fsdecode` keeps them (surrogate escapes), so a file name read
     back still opens the same file.
     """
-    require_macos()
-
     if exact_newlines:
-        options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
+        output = _completed(args, None if input is None else input.encode("utf-8"), timeout)
     else:
-        options = {"input": input, "text": True, "encoding": "utf-8", "errors": "replace"}
+        output = _completed(args, input, timeout, text=True, encoding="utf-8", errors="replace")
+    # Bytes when exact_newlines asked for them (and from some test doubles): decoded the same way either way.
+    return output.decode("utf-8", "surrogateescape") if isinstance(output, bytes) else output
+
+
+def run_bytes(args: Sequence[str], *, timeout: Optional[float] = None) -> bytes:
+    """As :func:`run`, but the standard output as the command wrote it, in bytes: for a plist or a file to parse."""
+    output = _completed(args, None, timeout)
+    return output if isinstance(output, bytes) else output.encode("utf-8", "surrogateescape")  # text: a test double
+
+
+def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **options: Any) -> Union[str, bytes]:
+    """Run the command for :func:`run` and :func:`run_bytes`, and return its standard output, or raise what went wrong."""
+    require_macos()
     try:
-        result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
+        result = subprocess.run(list(args), capture_output=True, timeout=timeout, input=input, **options)
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     except subprocess.TimeoutExpired:
         raise CommandTimeoutError(args, timeout or 0) from None
-
-    stdout, stderr = result.stdout, result.stderr
-    if isinstance(stdout, bytes):
-        stdout = stdout.decode("utf-8", "surrogateescape")
+    stderr = result.stderr
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
         raise CommandError(args, result.returncode, stderr)
-    return stdout
+    return result.stdout
 
 
 def _terminal_interrupted_us() -> bool:

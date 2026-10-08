@@ -140,7 +140,7 @@ def test_shortcuts_off_the_main_thread_use_a_us_keyboard_on_a_us_layout(monkeypa
 
 def test_shortcuts_off_the_main_thread_use_the_layout_the_main_thread_read(monkeypatch):
     azerty = {"a": (12, False), "q": (0, False)}
-    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": (None, azerty)})
     monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
 
     assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 12, False)
@@ -208,7 +208,7 @@ def test_a_layout_switch_shows_at_the_very_next_key(monkeypatch):
 def test_an_unnamed_layout_off_the_main_thread_is_the_one_the_main_thread_read(monkeypatch):
     # A French-only account that never switched layouts doesn't save the ID: layout() on the main thread is enough.
     azerty = {"a": (12, False), "q": (0, False)}
-    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": (None, azerty)})
     monkeypatch.setattr(macos.keyboard, "_LAST_READ", ["com.apple.keylayout.French"])
     monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "")
 
@@ -431,8 +431,7 @@ def test_a_layout_read_for_one_keyboard_is_read_again_for_another(monkeypatch):
     monkeypatch.setattr(macos.keyboard._cf, "lib", lambda: None)
     monkeypatch.setattr(macos.keyboard._cf, "release", lambda ref: None)
     monkeypatch.setattr(macos.keyboard.ctypes.c_void_p, "in_dll", lambda library, name: SimpleNamespace(value=1))
-    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": iso})
-    monkeypatch.setattr(macos.keyboard, "_KEYBOARD_TYPES", {"com.apple.keylayout.French": 41})
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": (41, iso)})
     monkeypatch.setattr(macos.keyboard, "_LAST_READ", [])
 
     assert macos.keyboard._layout() is iso  # the same keyboard: the table already read
@@ -442,8 +441,7 @@ def test_a_layout_read_for_one_keyboard_is_read_again_for_another(monkeypatch):
 
 def test_a_worker_refuses_a_layout_read_for_another_kind_of_keyboard(monkeypatch):
     azerty = {"a": (12, False), "q": (0, False)}
-    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
-    monkeypatch.setattr(macos.keyboard, "_KEYBOARD_TYPES", {"com.apple.keylayout.French": 41})  # read on ISO
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": (41, azerty)})  # read on ISO
     monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
     kind = [41]
     monkeypatch.setattr(macos.keyboard, "_keyboard_type", lambda: kind[0])
