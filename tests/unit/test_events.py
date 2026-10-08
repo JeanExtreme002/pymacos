@@ -220,16 +220,19 @@ def test_stop_reaches_every_run_and_wait():
         assert not later.stop.is_set()  # a stop() is for the calls in progress only
 
 
-def test_a_backlog_of_events_doesnt_outlast_the_timeout(monkeypatch):
+def test_at_the_timeout_queued_events_come_but_no_later_ones(monkeypatch):
     from macos import _events
 
     clock = [0.0]
     monkeypatch.setattr(_events.time, "monotonic", lambda: clock[0])
     listener = _events.Listener()
-    listener.pending.extend(range(10))  # queued by the tap's thread while callbacks ran
+    listener.pending.extend(range(4))  # queued by the tap's thread while callbacks ran
 
     handled = []
     for item in listener.drain(timeout=1.0):
         handled.append(item)
-        clock[0] += 0.4  # each callback takes 0.4 s
-    assert handled == [0, 1, 2]  # past the second, the rest of the backlog isn't started
+        clock[0] += 0.4  # each callback takes 0.4 s...
+        listener.pending.append(100 + item)  # ...while one more event comes in
+    # Everything queued by the time it ran out comes, none of what kept coming after: no event is lost,
+    # and a steady stream can't keep it going past the timeout.
+    assert handled == [0, 1, 2, 3, 100, 101, 102]

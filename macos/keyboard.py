@@ -192,11 +192,12 @@ def _us_layout() -> Dict[str, Tuple[int, bool]]:
 # Layouts whose keys type what a US keyboard's do: away from the main thread,
 # where macOS won't hand the layout over, the US table is right for these only.
 _US_COMPATIBLE = frozenset(
-    "com.apple.keylayout." + name for name in ("US", "ABC", "USExtended", "USInternational-PC", "Australian")
+    # Not US International: its ' " ` ~ ^ are dead keys, which type nothing until the next key.
+    "com.apple.keylayout." + name for name in ("US", "ABC", "USExtended", "Australian")
 )
 
 # The same layouts by the number the preferences list enabled layouts with ("KeyboardLayout ID").
-_US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15000, 15})
+_US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15})
 
 # The layouts read on the main thread, by input source ID: other threads use them.
 _LAYOUTS: Dict[str, Dict[str, Tuple[int, bool]]] = {}

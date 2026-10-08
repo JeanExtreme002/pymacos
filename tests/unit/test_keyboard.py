@@ -185,7 +185,8 @@ def test_the_layout_in_use_is_read_from_the_preferences(monkeypatch):
     "enabled, expected",
     [
         ([_keyboard_layout(0), {"InputSourceKind": "Non Keyboard Input Method"}], "com.apple.keylayout.US"),
-        ([_keyboard_layout(252), _keyboard_layout(15000)], "com.apple.keylayout.US"),  # ABC, US International
+        ([_keyboard_layout(252), _keyboard_layout(-2)], "com.apple.keylayout.US"),  # ABC, US Extended
+        ([_keyboard_layout(0), _keyboard_layout(15000)], ""),  # US International: its quotes are dead keys
         ([_keyboard_layout(0), _keyboard_layout(1)], ""),  # US and French: either may be in use
         ([], ""),
         (None, ""),

@@ -313,6 +313,9 @@ def ciimage_cgimage(image: int) -> int:
         )
     else:
         rendered = send(context, "createCGImage:fromRect:", image, extent, argtypes=(id, CGRect), restype=ctypes.c_void_p)
+    # The context is kept for good, its intermediate buffers need not be: sized for the largest image
+    # drawn so far, they would hold that memory for the rest of the process.
+    send(context, "clearCaches", restype=None)
     if not rendered:
         raise ValueError("the image could not be drawn")
     return int(rendered)

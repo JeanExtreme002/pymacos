@@ -167,7 +167,13 @@ class Listener:
             self.check()
             while self.pending and not self.stop.is_set():
                 if deadline is not None and time.monotonic() >= deadline:
-                    return  # out of time: a backlog queued while callbacks ran doesn't buy more
+                    # Out of time: what was queued by now still comes (it happened within the wait),
+                    # but nothing queued later, so a steady stream can't keep it going for good.
+                    for _ in range(len(self.pending)):
+                        if self.stop.is_set():
+                            return
+                        yield self.pending.popleft()
+                    return
                 yield self.pending.popleft()
             if self.stop.is_set():
                 return

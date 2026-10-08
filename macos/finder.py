@@ -689,10 +689,13 @@ def _changed_since(
     deadline: Optional[float],
 ) -> Optional[Event]:
     """
-    A file in ``folder`` matching ``pattern``, made or changed since ``since``, as an :class:`Event`; or ``None``.
+    The file in ``folder`` matching ``pattern`` changed last since ``since``, as an :class:`Event`; or ``None``.
 
-    Gives up, with ``None``, at ``deadline`` (``time.monotonic()``): a large folder never outlasts the wait's timeout.
+    Its contents' time (mtime) is what counts, not ctime: opening a file in Preview, tagging it or
+    any extended attribute moves ctime, and an old file isn't the change waited for. Gives up,
+    with ``None``, at ``deadline`` (``time.monotonic()``): a large folder never outlasts the wait's timeout.
     """
+    latest: Optional[Tuple[float, Event]] = None
     for root, folders, files in os.walk(str(folder)):
         for name in files + folders:
             if deadline is not None and time.monotonic() >= deadline:
@@ -704,14 +707,15 @@ def _changed_since(
                 info = os.lstat(str(changed))
             except OSError:
                 continue  # gone meanwhile
-            modified = _changed_at_or_after(info.st_mtime, info.st_mtime_ns, since)
-            if modified or _changed_at_or_after(info.st_ctime, info.st_ctime_ns, since):
-                birth = getattr(info, "st_birthtime", None)
-                made = birth is not None and _changed_at_or_after(birth, int(birth * 1e9), since)
-                return Event(changed, "created" if made else "modified", name in folders)
+            if not _changed_at_or_after(info.st_mtime, info.st_mtime_ns, since):
+                continue
+            birth = getattr(info, "st_birthtime", None)
+            made = birth is not None and _changed_at_or_after(birth, int(birth * 1e9), since)
+            if latest is None or info.st_mtime > latest[0]:
+                latest = (info.st_mtime, Event(changed, "created" if made else "modified", name in folders))
         if not recursive:
             break
-    return None
+    return None if latest is None else latest[1]
 
 
 _SELECTION = """

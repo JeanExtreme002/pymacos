@@ -6,6 +6,7 @@ commands and loading system frameworks.
 """
 
 import ctypes
+import os
 import signal
 import subprocess
 import sys
@@ -102,6 +103,26 @@ def run(
     return stdout
 
 
+def _terminal_interrupted_us() -> bool:
+    """
+    Whether a Ctrl-C would have come from this process's terminal, to its whole foreground process group.
+
+    True when this process group is the terminal's foreground one: the terminal sent SIGINT to every
+    process in it, the commands this one started included. False with no terminal (a service, an IDE
+    without one) or in the background, where an interrupt can only have come from elsewhere.
+    """
+    try:
+        terminal = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+    except OSError:
+        return False
+    try:
+        return os.tcgetpgrp(terminal) == os.getpgrp()
+    except OSError:
+        return False
+    finally:
+        os.close(terminal)
+
+
 class UnfinishedInterrupt(KeyboardInterrupt):
     """Ctrl-C, after which the command didn't finish in its grace time and was killed: what it wrote is incomplete."""
 
@@ -111,18 +132,19 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     Run a command that saves its work when told to stop (``screencapture -v``), letting it finish on Ctrl-C.
 
     ``subprocess.run`` kills the command a quarter of a second after Ctrl-C,
-    which cuts a movie being written short. Here it runs in a session of its
-    own, so a terminal's Ctrl-C reaches Python only; Python then asks it to
-    stop, once (SIGINT), and gives it ``grace`` seconds to finish its file
-    before ``KeyboardInterrupt`` goes on. When it doesn't finish in time, it is
+    which cuts a movie being written short. Here it's asked to stop, once
+    (SIGINT), and given ``grace`` seconds to finish its file before
+    ``KeyboardInterrupt`` goes on. When it doesn't finish in time, it is
     killed and :class:`UnfinishedInterrupt` (a ``KeyboardInterrupt``) says its
     file is incomplete. Otherwise it is as :func:`run`, minus the output.
+
+    It stays in Python's process group, not a session of its own: closing the
+    terminal, or an IDE stopping the script, ends it too, rather than leave the
+    screen recording with nobody to stop it.
     """
     require_macos()
     try:
-        process = subprocess.Popen(
-            list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
-        )
+        process = subprocess.Popen(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     try:
@@ -132,8 +154,8 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
         process.communicate()
         raise CommandTimeoutError(args, timeout) from None
     except KeyboardInterrupt as interrupt:
-        if process.poll() is None:
-            process.send_signal(signal.SIGINT)  # the only one it gets: it's in a session of its own
+        if process.poll() is None and not _terminal_interrupted_us():
+            process.send_signal(signal.SIGINT)  # a Ctrl-C the terminal sent reached it already: never twice
         try:
             process.communicate(timeout=grace)
         except BaseException:  # out of time, or a second Ctrl-C: it's stopped for good, its file unfinished

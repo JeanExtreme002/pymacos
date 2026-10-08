@@ -146,7 +146,7 @@ class _FakeRecording:
         self.made = []
 
     def __call__(self, args, **kwargs):
-        assert kwargs["start_new_session"]  # a terminal's Ctrl-C reaches Python alone: one SIGINT, from it
+        assert not kwargs.get("start_new_session")  # in Python's group: it ends with it, never left recording
         recording = self
 
         class Process:
@@ -234,6 +234,7 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     recording = _FakeRecording(interrupted)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: False)  # no terminal sent it one
     with pytest.raises(KeyboardInterrupt):  # the script still stops, as asked
         macos.screen.record(target, 60)
     process = recording.made[0][1]
@@ -241,6 +242,20 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     assert process.signals == [signal.SIGINT] and process.calls[1] == macos.screen._FINISH_GRACE
     assert target.read_bytes() == (b"movie so far" if finished else b"yesterday")
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
+def test_a_ctrl_c_from_the_terminal_isnt_sent_to_screencapture_twice(fake_run, monkeypatch, tmp_path):
+    def interrupted(args, timeout):
+        Path(args[-1]).write_bytes(b"movie so far")
+        raise KeyboardInterrupt
+
+    recording = _FakeRecording(interrupted)
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: True)  # it got the terminal's SIGINT too
+    with pytest.raises(KeyboardInterrupt):
+        macos.screen.record(tmp_path / "demo.mov", 60)
+    assert recording.made[0][1].signals == []  # only waited for: a second SIGINT may cut its finishing short
 
 
 @pytest.mark.parametrize(

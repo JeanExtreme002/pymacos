@@ -370,3 +370,19 @@ def test_a_rescan_gives_up_at_the_wait_s_deadline(tmp_path, monkeypatch):
         (tmp_path / "file{}.pdf".format(index)).write_bytes(b"%PDF")
     assert finder._changed_since(tmp_path, 0, "*.pdf", True, time.monotonic() - 1) is None  # out of time: no look
     assert finder._changed_since(tmp_path, 0, "*.pdf", True, None) is not None
+
+
+def test_a_rescan_reports_the_latest_new_file_not_one_only_opened(tmp_path):
+    import os
+    import time
+
+    since = time.time() - 5
+    opened = tmp_path / "old.pdf"
+    opened.write_bytes(b"%PDF")
+    os.utime(str(opened), (since - 100, since - 100))  # its contents are old: only its ctime is new
+    for name, age in (("first.pdf", 4), ("second.pdf", 1)):
+        (tmp_path / name).write_bytes(b"%PDF")
+        os.utime(str(tmp_path / name), (since + 5 - age, since + 5 - age))
+
+    found = finder._changed_since(tmp_path, since, "*.pdf", True, None)
+    assert found is not None and found.path.name == "second.pdf"  # the latest of the two that changed
