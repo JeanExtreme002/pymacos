@@ -166,16 +166,20 @@ def test_only_metadata_a_format_drops_entirely_counts_as_lost():
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
-def test_a_location_a_format_cant_hold_is_refused(tmp_path):
+def test_a_location_a_format_cant_hold_is_refused(tmp_path, monkeypatch):
     from tests.helpers import rgb_png
 
     frame = tmp_path / "frame.png"
     frame.write_bytes(rgb_png(8, 8, lambda x, y: (200, 30, 30)))
-    still = macos.image.convert(frame, tmp_path / "still.gif")
+    still = macos.image.convert(frame, tmp_path / "still.png")
     before = still.read_bytes()
+    # A format with nowhere for a location: what's written back holds no {GPS} at all. (Which formats
+    # those are changes with macOS: GIF dropped it on some versions and keeps it on others.)
+    monkeypatch.setattr(macos.image, "metadata", lambda path: {})
     with pytest.raises(ValueError, match=r"\{GPS\}"):
         macos.image.set_location(still, 10, 20)
     assert still.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["frame.png", "still.png"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
