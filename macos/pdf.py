@@ -1457,9 +1457,14 @@ def set_bookmarks(
             outline = _objc.send(_objc.send(_objc.cls("PDFOutline"), "alloc"), "init")
             _objc.send(outline, "autorelease")
             _objc.send(outline, "setLabel:", _objc.nsstring(entry.title), argtypes=(_objc.id,), restype=None)
-            # Opens at the top of the page's visible part: the crop box, as everything else here goes by.
+            # Opens at the top-left corner of the page as it's shown: its visible part (the crop box),
+            # turned by its rotation, back into the page's own coordinates.
             bounds = _objc.send(page, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
-            top = _objc.CGPoint(bounds.origin.x, bounds.origin.y + bounds.size.height)
+            rotation = int(_objc.send(page, "rotation", restype=ctypes.c_long))
+            width, height = bounds.size.width, bounds.size.height
+            shown_height = height if rotation % 180 == 0 else width
+            x, y, _, _ = _unrotated((0, shown_height, 0, 0), width, height, rotation)
+            top = _objc.CGPoint(bounds.origin.x + x, bounds.origin.y + y)
             destination = _objc.send(
                 _objc.send(_objc.cls("PDFDestination"), "alloc"),
                 "initWithPage:atPoint:",

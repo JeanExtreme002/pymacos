@@ -345,6 +345,21 @@ def test_install_from_dmg_checks_the_copy_it_replaces_not_an_app_of_that_name(mo
     assert asked == [str(installed)]  # "Tool.app" alone would be any running app called Tool
 
 
+def test_install_from_dmg_knows_the_running_app_spelled_another_way(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, _ = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    (tmp_path / "Volume" / "Tool.app").rename(tmp_path / "Volume" / "tool.app")  # the image spells it in lower case
+    if not (installed.parent / "tool.app").exists():
+        pytest.skip("this disk tells names apart by case: the two are different apps on it")
+    # Running apps are known by the path as the disk spells it.
+    monkeypatch.setattr(apps, "get", lambda path: apps.App("Tool", None, 42, path) if path == str(installed) else None)
+
+    with pytest.raises(macos.MacOSError, match="is running: quit it first"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", replace=True)
+    assert (installed / "Contents" / "old").read_text() == "old version"
+
+
 def test_install_from_dmg_warns_when_the_old_copy_stays(monkeypatch, tmp_path):
     from macos import apps
 

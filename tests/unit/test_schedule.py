@@ -380,9 +380,12 @@ def test_schedule_jobs_skip_a_plist_edited_into_nonsense(fake_run, home):
         plistlib.dumps({"Label": "pymacos.odd", "StartCalendarInterval": ["09:00"], "WatchPaths": "/tmp"})
     )
     (agents / "pymacos.logs.plist").write_bytes(plistlib.dumps({"Label": "pymacos.logs", "StandardOutPath": ["a", "b"]}))
+    infinite = {"Label": "pymacos.forever", "StartCalendarInterval": {"Hour": float("inf")}}
+    (agents / "pymacos.forever.plist").write_bytes(plistlib.dumps(infinite))
 
     found = {job.name: job for job in macos.schedule.jobs()}
-    assert set(found) == {"backup", "odd"}  # the list, the day that isn't a number and the log list are skipped
+    # The list, the day that isn't a number, the infinite hour and the log list are skipped.
+    assert set(found) == {"backup", "odd"}
     assert found["odd"].at == () and found["odd"].when_changed == () and found["odd"].script == Path()
 
 

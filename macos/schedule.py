@@ -369,7 +369,7 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         listed_paths = data.get("WatchPaths")
         watched: List[Any] = listed_paths if isinstance(listed_paths, list) else []
         log = Path(data.get("StandardOutPath", str(_log(name))))
-    except (TypeError, ValueError):  # a time or a day that isn't a number, a log path that isn't text
+    except (TypeError, ValueError, OverflowError):  # a time or a day that isn't a (finite) number, a log path that isn't text
         return None
     running, status = _state(name)
     return Job(

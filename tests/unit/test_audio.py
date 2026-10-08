@@ -342,6 +342,28 @@ def test_ctrl_c_before_any_sound_keeps_the_old_file(monkeypatch, tmp_path, recor
     assert [path.name for path in tmp_path.iterdir()] == ["memo.m4a"]
 
 
+@pytest.mark.parametrize("record", ["record", "record_until_silence"])
+def test_a_recording_that_captured_no_sound_is_a_failure(monkeypatch, tmp_path, record):
+    from contextlib import nullcontext
+
+    from macos import _capture
+
+    def send(receiver, selector, *args, **kwargs):
+        return 0.0 if selector == "currentTime" else (-60.0 if selector == "averagePowerForChannel:" else True)
+
+    target = tmp_path / "memo.m4a"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: path.write_bytes(b"header") or 1)
+    monkeypatch.setattr(macos.audio._objc, "send", send)
+    monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(macos.audio.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(macos.MacOSError, match="wasn't saved"):  # ran its course, but recorded nothing
+        getattr(macos.audio, record)(target, 1)
+    assert target.read_bytes() == b"yesterday"
+
+
 def test_audio_argument_checks(tmp_path):
     with pytest.raises(ValueError, match="0.0 to 1.0"):
         macos.audio.set_input_volume(1.5)

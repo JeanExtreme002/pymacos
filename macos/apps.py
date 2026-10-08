@@ -592,6 +592,12 @@ def install_from_dmg(
         target = target_folder / source.name
         if target.exists() and not replace:
             raise FileExistsError(str(target))
+        if target.exists():
+            # Spelled as the disk has it: on a disk that ignores case, "tool.app" from the image is
+            # the installed "Tool.app", which running apps are known by.
+            names = {entry.name: entry for entry in target_folder.iterdir()}
+            if target.name not in names:
+                target = next((entry for name, entry in names.items() if name.lower() == target.name.lower()), target)
         if target.exists() and get(str(target.absolute())) is not None:  # a path, never taken for an app's name
             # Swapped out from under it, a running app crashes, or saves into the old copy.
             raise MacOSError("{} is running: quit it first".format(target.stem))

@@ -460,10 +460,11 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
             time.sleep(seconds)
         except KeyboardInterrupt as error:
             interrupted.append(error)  # stopped on purpose: what was recorded is kept, then Ctrl-C goes on
-            heard = _recorded_seconds(recorder)
         finally:
+            heard = _recorded_seconds(recorder)  # before stop(), which resets it
             _objc.send(recorder, "stop", restype=None)
-        if not temporary.exists() or (interrupted and heard <= 0):
+        # No sound recorded (the file holds prepareToRecord's header at most): never over the old file.
+        if not temporary.exists() or heard <= 0:
             if interrupted:
                 raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
             raise MacOSError("the recording wasn't saved")
@@ -1206,10 +1207,10 @@ def record_until_silence(
                     break
         except KeyboardInterrupt as error:
             interrupted.append(error)  # stopped on purpose, as in record(): what was recorded is kept
-            heard = _recorded_seconds(recorder)
         finally:
+            heard = _recorded_seconds(recorder)  # before stop(), which resets it
             _objc.send(recorder, "stop", restype=None)
-        if not temporary.exists() or (interrupted and heard <= 0):
+        if not temporary.exists() or heard <= 0:  # no sound recorded, as in record()
             if interrupted:
                 raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
             raise MacOSError("the recording wasn't saved")

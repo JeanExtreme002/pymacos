@@ -507,17 +507,22 @@ def test_redrawn_pages_keep_the_crop_box(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes outlines with PDFKit")
-def test_bookmarks_open_at_the_top_of_the_visible_part(tmp_path):
+@pytest.mark.parametrize(
+    "rotate, corner",
+    # The corner, in the page's own coordinates, that shows at the top-left once the page is turned.
+    [(0, (100, 400)), (90, (100, 100)), (180, (400, 100)), (270, (400, 400))],
+)
+def test_bookmarks_open_at_the_top_of_the_visible_part(tmp_path, rotate, corner):
     import ctypes
 
     from macos import _objc
     from tests.helpers import pdf_with_text
 
     cropped = tmp_path / "cropped.pdf"
-    cropped.write_bytes(pdf_with_text([("VISIBLE", 150, 150)], crop=(100, 100, 400, 400)))
+    cropped.write_bytes(pdf_with_text([("VISIBLE", 150, 150)], rotate=rotate, crop=(100, 100, 400, 400)))
     marked = macos.pdf.set_bookmarks(cropped, [("Start", 1)], tmp_path / "marked.pdf")
 
     with macos.pdf._open(marked, None) as document:
         child = _objc.send(_objc.send(document, "outlineRoot"), "childAtIndex:", 0, argtypes=(ctypes.c_ulong,))
         point = _objc.send(_objc.send(child, "destination"), "point", restype=_objc.CGPoint)
-    assert (point.x, point.y) == (100, 400)  # the crop box's top-left corner, not the Letter page's (0, 792)
+    assert (point.x, point.y) == corner  # of the crop box as it shows, not the Letter page's (0, 792)
