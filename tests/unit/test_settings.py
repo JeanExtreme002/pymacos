@@ -826,14 +826,19 @@ def test_defaults_delete_checks_the_domain(fake_run):
 
 
 def test_control_center_restart_only_overlooks_it_not_running(monkeypatch):
-    def killall(status):
+    def killall(status, message):
         def run(args, **kwargs):
-            raise macos.CommandError(args, status, "killall: permission denied" if status != 1 else "")
+            raise macos.CommandError(args, status, message)
 
         return run
 
-    monkeypatch.setattr(_system, "run", killall(1))  # no process: it reads the settings when it starts
+    # No process: it reads the settings when it starts.
+    monkeypatch.setattr(_system, "run", killall(1, "No matching processes belonging to you were found"))
     system._restart_control_center()
-    monkeypatch.setattr(_system, "run", killall(2))
+    # The same status 1 when it found one it couldn't signal: that restart failed.
+    monkeypatch.setattr(_system, "run", killall(1, "kill: 812: Operation not permitted"))
+    with pytest.raises(macos.CommandError, match="not permitted"):
+        system._restart_control_center()
+    monkeypatch.setattr(_system, "run", killall(2, "killall: permission denied"))
     with pytest.raises(macos.CommandError, match="permission denied"):
         system._restart_control_center()

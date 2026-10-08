@@ -368,7 +368,8 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         days = tuple(dict.fromkeys(_WEEKDAYS[int(entry["Weekday"]) % 7] for entry in calendar if "Weekday" in entry))
         listed_paths = data.get("WatchPaths")
         watched: List[Any] = listed_paths if isinstance(listed_paths, list) else []
-    except (TypeError, ValueError):  # a time or a day that isn't a number
+        log = Path(data.get("StandardOutPath", str(_log(name))))
+    except (TypeError, ValueError):  # a time or a day that isn't a number, a log path that isn't text
         return None
     running, status = _state(name)
     return Job(
@@ -382,7 +383,7 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         when_changed=tuple(Path(path) for path in watched if isinstance(path, str)),
         at_mount=bool(data.get("StartOnMount")),
         paused=name in paused,
-        log=Path(data.get("StandardOutPath", str(_log(name)))),
+        log=log,
         running=running,
         last_exit_status=status,
     )

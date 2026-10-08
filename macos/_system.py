@@ -102,19 +102,27 @@ def run(
     return stdout
 
 
+class UnfinishedInterrupt(KeyboardInterrupt):
+    """Ctrl-C, after which the command didn't finish in its grace time and was killed: what it wrote is incomplete."""
+
+
 def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None:
     """
     Run a command that saves its work when told to stop (``screencapture -v``), letting it finish on Ctrl-C.
 
     ``subprocess.run`` kills the command a quarter of a second after Ctrl-C,
-    which cuts a movie being written short. Here it's asked to stop (SIGINT,
-    which Ctrl-C in a terminal sends it too) and given ``grace`` seconds to
-    finish its file, then ``KeyboardInterrupt`` goes on. Otherwise it is as
-    :func:`run`, minus the output.
+    which cuts a movie being written short. Here it runs in a session of its
+    own, so a terminal's Ctrl-C reaches Python only; Python then asks it to
+    stop, once (SIGINT), and gives it ``grace`` seconds to finish its file
+    before ``KeyboardInterrupt`` goes on. When it doesn't finish in time, it is
+    killed and :class:`UnfinishedInterrupt` (a ``KeyboardInterrupt``) says its
+    file is incomplete. Otherwise it is as :func:`run`, minus the output.
     """
     require_macos()
     try:
-        process = subprocess.Popen(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
+        )
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     try:
@@ -123,14 +131,15 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
         process.kill()
         process.communicate()
         raise CommandTimeoutError(args, timeout) from None
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as interrupt:
         if process.poll() is None:
-            process.send_signal(signal.SIGINT)  # not always sent already: an interrupt raised in code, no terminal
+            process.send_signal(signal.SIGINT)  # the only one it gets: it's in a session of its own
         try:
             process.communicate(timeout=grace)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
+            raise UnfinishedInterrupt(*interrupt.args) from interrupt
         raise
     if process.returncode != 0:
         raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
@@ -178,7 +187,9 @@ def killall(process: str) -> None:
     try:
         run(["killall", process], timeout=10)  # killall only signals: never long
     except CommandError as error:
-        if error.returncode != 1:  # 1: no process had the name
+        # 1 also means a process it found couldn't be signalled ("Operation not permitted"): only "no
+        # matching processes" (in English: killall isn't localized) is a process that isn't running.
+        if error.returncode != 1 or "No matching processes" not in error.stderr:
             raise
 
 

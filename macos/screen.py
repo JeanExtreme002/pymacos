@@ -27,7 +27,7 @@ from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _files, _objc, defaults
-from ._system import framework, killall, private_framework, run as _run, run_to_the_end
+from ._system import framework, killall, private_framework, run as _run, run_to_the_end, UnfinishedInterrupt
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -879,6 +879,8 @@ def record(
             run_to_the_end([*args, str(staged)], timeout=max(1, round(seconds)) + 60, grace=_FINISH_GRACE)
         except CommandTimeoutError:
             raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
+        except UnfinishedInterrupt:
+            raise  # killed while it ended the movie: the file is incomplete, so the old one stays
         except KeyboardInterrupt as error:
             # screencapture was told to end the movie, and given the time to: kept, then Ctrl-C goes on.
             interrupted.append(error)

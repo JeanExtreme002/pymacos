@@ -166,6 +166,8 @@ class Listener:
         while True:
             self.check()
             while self.pending and not self.stop.is_set():
+                if deadline is not None and time.monotonic() >= deadline:
+                    return  # out of time: a backlog queued while callbacks ran doesn't buy more
                 yield self.pending.popleft()
             if self.stop.is_set():
                 return

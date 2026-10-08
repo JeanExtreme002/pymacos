@@ -138,11 +138,13 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
 class _FakeRecording:
     """``subprocess.Popen`` for screencapture: ``record(args, timeout)`` plays what it does while recording."""
 
-    def __init__(self, record):
+    def __init__(self, record, stuck_finishing=False):
         self.record = record
+        self.stuck_finishing = stuck_finishing  # after Ctrl-C, it doesn't finish the movie in time
         self.made = []
 
     def __call__(self, args, **kwargs):
+        assert kwargs["start_new_session"]  # a terminal's Ctrl-C reaches Python alone: one SIGINT, from it
         recording = self
 
         class Process:
@@ -154,6 +156,8 @@ class _FakeRecording:
                 Process.calls.append(timeout)
                 if len(Process.calls) == 1:
                     recording.record(args, timeout)
+                elif len(Process.calls) == 2 and recording.stuck_finishing:
+                    raise subprocess.TimeoutExpired(args, timeout)
                 self.returncode = 0
                 return None, b""
 
@@ -232,6 +236,24 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     # Asked to stop, then waited for to finish the file, never killed: subprocess.run would kill it at once.
     assert process.signals == [signal.SIGINT] and process.calls[1] == macos.screen._FINISH_GRACE
     assert target.read_bytes() == (b"movie so far" if finished else b"yesterday")
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
+def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_run, monkeypatch, tmp_path):
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+
+    def interrupted(args, timeout):
+        Path(args[-1]).write_bytes(b"half a movie")
+        raise KeyboardInterrupt
+
+    recording = _FakeRecording(interrupted, stuck_finishing=True)
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    with pytest.raises(KeyboardInterrupt):  # still the Ctrl-C
+        macos.screen.record(target, 60)
+    assert recording.made[0][1].signals[-1] == "kill"
+    assert target.read_bytes() == b"yesterday"  # the killed one is incomplete: dropped
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
