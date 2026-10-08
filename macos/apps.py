@@ -519,7 +519,14 @@ def _set_default_with_workspace(workspace: int, path: str, type_name: str, app: 
     content_type = _objc.send(_objc.cls("UTType"), "typeWithIdentifier:", _objc.nsstring(type_name), argtypes=(_objc.id,))
     if not content_type:
         raise ValueError("{!r} isn't a kind of file macOS knows".format(kind))
-    with _default_call:
+    # One deadline for both waits: for another call's confirmation to end, then for this one's.
+    deadline = time.monotonic() + timeout
+    late = MacOSError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
+    if not _default_call.acquire(timeout=max(0.0, timeout)):
+        raise late
+    try:
+        if time.monotonic() >= deadline:
+            raise late  # out of time before asking: the change is never made, nor asked about
         with _default_state:
             del _default_answers[:]
             generation = _default_generation[0]
@@ -534,15 +541,17 @@ def _set_default_with_workspace(workspace: int, path: str, type_name: str, app: 
                 restype=None,
             )
             # Since macOS 26 the user is asked to confirm: the handler comes with their answer.
-            answered = _objc.run_until(lambda: bool(_default_answers), timeout)
+            answered = _objc.run_until(lambda: bool(_default_answers), max(0.0, deadline - time.monotonic()))
         except BaseException:
             _retire_default_handler()  # its answer may still come: it must not pass for the next call's
             raise
         if not answered:
             _retire_default_handler()
-            raise MacOSError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
+            raise late
         with _default_state:
             message = _default_answers.pop(0)
+    finally:
+        _default_call.release()
     if message:
         raise MacOSError("could not make {} the default for {!r}: {}".format(app, kind, message))
 

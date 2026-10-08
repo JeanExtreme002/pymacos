@@ -413,3 +413,24 @@ def test_setting_a_default_app_reuses_one_completion_block(monkeypatch):
     answer["now"] = True
     apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 5)
     assert len(made) == 2  # a new block after the timeout only
+
+
+def test_waiting_for_another_default_app_change_counts_against_the_timeout(monkeypatch):
+    import threading
+
+    from macos import apps
+
+    sent = []
+    monkeypatch.setattr(apps, "framework", lambda name: None)
+    monkeypatch.setattr(apps._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(apps._objc, "nsstring", lambda text: 1)
+    monkeypatch.setattr(apps._objc, "send", lambda receiver, selector, *args, **kwargs: sent.append(selector) or 1)
+    monkeypatch.setattr(apps, "_default_call", threading.Lock())
+
+    apps._default_call.acquire()  # another call, waiting for the user to confirm its change
+    try:
+        with pytest.raises(macos.MacOSError, match="within 0.2 seconds"):
+            apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 0.2)
+    finally:
+        apps._default_call.release()
+    assert not any(selector.startswith("setDefaultApplication") for selector in sent)  # never asked: out of time
