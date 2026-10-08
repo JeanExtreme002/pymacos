@@ -72,11 +72,18 @@ def replacing(target: Path) -> Iterator[Path]:
     any new file (0o666 less the umask): not the private 0o600 of a
     temporary file. On an error, or when nothing was written, ``target`` is
     left as it was and the temporary folder goes.
+
+    A symbolic link at ``target`` stays one: the file it points to is the one
+    replaced. The temporary file keeps ``target``'s own name all the same, so
+    the format the caller chose by it doesn't change.
     """
+    name = target.name
+    if os.path.islink(str(target)):
+        target = Path(os.path.realpath(str(target)))
     target.parent.mkdir(parents=True, exist_ok=True)
     folder = tempfile.mkdtemp(prefix=".{}-".format(target.stem[:40] or "file"), dir=str(target.parent))
     try:
-        temporary = Path(folder) / target.name
+        temporary = Path(folder) / name
         yield temporary
         if not temporary.exists():
             raise MacOSError("could not write {}".format(target))

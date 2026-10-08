@@ -6,6 +6,7 @@ commands and loading system frameworks.
 """
 
 import ctypes
+import signal
 import subprocess
 import sys
 import threading
@@ -99,6 +100,40 @@ def run(
     if result.returncode != 0:
         raise CommandError(args, result.returncode, stderr)
     return stdout
+
+
+def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None:
+    """
+    Run a command that saves its work when told to stop (``screencapture -v``), letting it finish on Ctrl-C.
+
+    ``subprocess.run`` kills the command a quarter of a second after Ctrl-C,
+    which cuts a movie being written short. Here it's asked to stop (SIGINT,
+    which Ctrl-C in a terminal sends it too) and given ``grace`` seconds to
+    finish its file, then ``KeyboardInterrupt`` goes on. Otherwise it is as
+    :func:`run`, minus the output.
+    """
+    require_macos()
+    try:
+        process = subprocess.Popen(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+    try:
+        _, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise CommandTimeoutError(args, timeout) from None
+    except KeyboardInterrupt:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)  # not always sent already: an interrupt raised in code, no terminal
+        try:
+            process.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        raise
+    if process.returncode != 0:
+        raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
 
 
 def applescript(app: str, script: str, *args: str, input: Optional[str] = None) -> str:

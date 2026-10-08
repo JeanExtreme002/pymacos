@@ -27,7 +27,7 @@ from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _files, _objc, defaults
-from ._system import framework, killall, private_framework, run as _run
+from ._system import framework, killall, private_framework, run as _run, run_to_the_end
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -875,11 +875,12 @@ def record(
     interrupted: List[BaseException] = []
     with _files.replacing(target) as staged:
         try:
-            _run([*args, str(staged)], timeout=max(1, round(seconds)) + 60)  # screencapture has hung on some Macs, VMs among them
+            # A minute past the recording: screencapture has hung on some Macs, VMs among them.
+            run_to_the_end([*args, str(staged)], timeout=max(1, round(seconds)) + 60, grace=_FINISH_GRACE)
         except CommandTimeoutError:
             raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
         except KeyboardInterrupt as error:
-            # Ctrl-C reaches screencapture too, which ends the movie there: kept, then Ctrl-C goes on.
+            # screencapture was told to end the movie, and given the time to: kept, then Ctrl-C goes on.
             interrupted.append(error)
         try:
             written = staged.stat().st_size
@@ -892,6 +893,9 @@ def record(
     if interrupted:
         raise interrupted[0]
     return target
+
+
+_FINISH_GRACE = 10.0  # seconds screencapture gets, after Ctrl-C, to finish the movie
 
 
 def screensaver_delay() -> Optional[float]:

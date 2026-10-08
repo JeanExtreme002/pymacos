@@ -349,3 +349,24 @@ def test_wait_for_change_looks_through_the_folder_when_macos_lost_track(monkeypa
     found = macos.finder.wait_for_change(tmp_path, pattern="*.pdf", timeout=1)
     made = "created" if sys.platform == "darwin" else "modified"  # only macOS file systems record a file's birth
     assert found == finder.Event(tmp_path / "report.pdf", made, False)
+
+
+def test_a_rescan_skips_files_from_before_the_wait_but_allows_for_coarse_disks():
+    since = 1_700_000_000.5
+    second = 1_000_000_000
+    # Saved a second before the wait, on a disk that keeps fractions: not a change made during it.
+    assert not finder._changed_at_or_after(since - 1.0, int((since - 1.0) * second) + 123, since)
+    # A few milliseconds behind the clock, as file systems lag it: still during the wait.
+    assert finder._changed_at_or_after(since - 0.004, int((since - 0.004) * second) + 7, since)
+    # FAT keeps whole seconds, rounded down: the second the wait began in may hold a change made during it.
+    assert finder._changed_at_or_after(float(int(since)), int(since) * second, since)
+    assert not finder._changed_at_or_after(float(int(since) - 3), (int(since) - 3) * second, since)
+
+
+def test_a_rescan_gives_up_at_the_wait_s_deadline(tmp_path, monkeypatch):
+    import time
+
+    for index in range(5):
+        (tmp_path / "file{}.pdf".format(index)).write_bytes(b"%PDF")
+    assert finder._changed_since(tmp_path, 0, "*.pdf", True, time.monotonic() - 1) is None  # out of time: no look
+    assert finder._changed_since(tmp_path, 0, "*.pdf", True, None) is not None

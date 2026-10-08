@@ -656,27 +656,47 @@ def wait_for_change(
     track of what changed (a ``'rescan'`` in :func:`watch`), the folder is
     looked through for a matching file made or changed since the wait began.
     """
-    # Some disks keep file times to the second or two (FAT), and some systems a little behind
-    # the clock: a file written just after the wait began may carry a time just before it.
-    since = time.time() - _TIME_SLACK
+    since = time.time()
+    deadline = None if timeout is None else time.monotonic() + timeout
     if pattern is not None and not isinstance(pattern, str):
         pattern = tuple(pattern)  # read twice: by watch() and by the look through the folder
     for event in watch(path, pattern=pattern, recursive=recursive, timeout=timeout):
         if event.kind != "rescan":
             return event
-        found = _changed_since(event.path, since, pattern, recursive)
+        found = _changed_since(event.path, since, pattern, recursive, deadline)
         if found is not None:
             return found
     return None
 
 
-_TIME_SLACK = 2.0  # seconds
+# How far before the wait began a file's time may be and still count as changed during it.
+# A disk that keeps whole seconds (FAT, exFAT keep two) rounds a time down by up to that;
+# others keep fractions, and only lag the clock by a few milliseconds.
+_COARSE_SLACK = 2.0
+_FINE_SLACK = 0.05
 
 
-def _changed_since(folder: Path, since: float, pattern: Union[str, Sequence[str], None], recursive: bool) -> Optional[Event]:
-    """A file in ``folder`` matching ``pattern``, made or changed at ``since`` or later, as an :class:`Event`; or ``None``."""
+def _changed_at_or_after(seconds: float, nanoseconds: int, since: float) -> bool:
+    coarse = nanoseconds % 1_000_000_000 == 0  # a time in whole seconds: the disk keeps no finer
+    return seconds >= since - (_COARSE_SLACK if coarse else _FINE_SLACK)
+
+
+def _changed_since(
+    folder: Path,
+    since: float,
+    pattern: Union[str, Sequence[str], None],
+    recursive: bool,
+    deadline: Optional[float],
+) -> Optional[Event]:
+    """
+    A file in ``folder`` matching ``pattern``, made or changed since ``since``, as an :class:`Event`; or ``None``.
+
+    Gives up, with ``None``, at ``deadline`` (``time.monotonic()``): a large folder never outlasts the wait's timeout.
+    """
     for root, folders, files in os.walk(str(folder)):
         for name in files + folders:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
             if not _matches(name, pattern):
                 continue
             changed = Path(root) / name
@@ -684,8 +704,10 @@ def _changed_since(folder: Path, since: float, pattern: Union[str, Sequence[str]
                 info = os.lstat(str(changed))
             except OSError:
                 continue  # gone meanwhile
-            if info.st_mtime >= since or info.st_ctime >= since:
-                made = getattr(info, "st_birthtime", 0) >= since
+            modified = _changed_at_or_after(info.st_mtime, info.st_mtime_ns, since)
+            if modified or _changed_at_or_after(info.st_ctime, info.st_ctime_ns, since):
+                birth = getattr(info, "st_birthtime", None)
+                made = birth is not None and _changed_at_or_after(birth, int(birth * 1e9), since)
                 return Event(changed, "created" if made else "modified", name in folders)
         if not recursive:
             break
