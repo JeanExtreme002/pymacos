@@ -126,8 +126,9 @@ only one layout matches. macOS allows these three on the main thread only:
 elsewhere they raise {class}`~macos.errors.MacOSError`.
 
 The same restriction decides which key types each character in
-{func}`~macos.keyboard.press`, {func}`~macos.keyboard.type` and the
-[Hotkeys](hotkeys.md) shortcuts. On another thread, they use the layout the main
+{func}`~macos.keyboard.press` and the [Hotkeys](hotkeys.md) shortcuts.
+({func}`~macos.keyboard.type` doesn't depend on it: it sends the text itself,
+and works on any thread with any layout.) On another thread, they use the layout the main
 thread last read, or the US positions when the layout in use is US-compatible
 (US, ABC...). With any other layout they raise
 {class}`~macos.errors.MacOSError` instead of pressing the wrong keys: on an
