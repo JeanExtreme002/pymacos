@@ -80,27 +80,33 @@ def run(
     :func:`os.fsdecode` keeps them (surrogate escapes), so a file name read
     back still opens the same file.
     """
-    require_macos()
-
     if exact_newlines:
-        options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
-    else:
-        options = {"input": input, "text": True, "encoding": "utf-8", "errors": "replace"}
+        output = _completed(args, None if input is None else input.encode("utf-8"), timeout)
+        return output.decode("utf-8", "surrogateescape") if isinstance(output, bytes) else output
+    options: Dict[str, Any] = {"text": True, "encoding": "utf-8", "errors": "replace"}
+    return str(_completed(args, input, timeout, **options))
+
+
+def run_bytes(args: Sequence[str], *, timeout: Optional[float] = None) -> bytes:
+    """As :func:`run`, but the standard output as the command wrote it, in bytes: for a plist or a file to parse."""
+    return bytes(_completed(args, None, timeout))
+
+
+def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **options: Any) -> Any:
+    """Run the command for :func:`run` and :func:`run_bytes`, and return its standard output, or raise what went wrong."""
+    require_macos()
     try:
-        result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
+        result = subprocess.run(list(args), capture_output=True, timeout=timeout, input=input, **options)
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     except subprocess.TimeoutExpired:
         raise CommandTimeoutError(args, timeout or 0) from None
-
-    stdout, stderr = result.stdout, result.stderr
-    if isinstance(stdout, bytes):
-        stdout = stdout.decode("utf-8", "surrogateescape")
+    stderr = result.stderr
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
         raise CommandError(args, result.returncode, stderr)
-    return stdout
+    return result.stdout
 
 
 def _terminal_interrupted_us() -> bool:
