@@ -14,7 +14,7 @@ import threading
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar, Union
 
 from .errors import CommandError, CommandTimeoutError, NotSupportedError, PermissionDeniedError
 
@@ -82,17 +82,19 @@ def run(
     """
     if exact_newlines:
         output = _completed(args, None if input is None else input.encode("utf-8"), timeout)
-        return output.decode("utf-8", "surrogateescape") if isinstance(output, bytes) else output
-    options: Dict[str, Any] = {"text": True, "encoding": "utf-8", "errors": "replace"}
-    return str(_completed(args, input, timeout, **options))
+    else:
+        output = _completed(args, input, timeout, text=True, encoding="utf-8", errors="replace")
+    # Bytes when exact_newlines asked for them (and from some test doubles): decoded the same way either way.
+    return output.decode("utf-8", "surrogateescape") if isinstance(output, bytes) else output
 
 
 def run_bytes(args: Sequence[str], *, timeout: Optional[float] = None) -> bytes:
     """As :func:`run`, but the standard output as the command wrote it, in bytes: for a plist or a file to parse."""
-    return bytes(_completed(args, None, timeout))
+    output = _completed(args, None, timeout)
+    return output if isinstance(output, bytes) else output.encode("utf-8", "surrogateescape")  # text: a test double
 
 
-def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **options: Any) -> Any:
+def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **options: Any) -> Union[str, bytes]:
     """Run the command for :func:`run` and :func:`run_bytes`, and return its standard output, or raise what went wrong."""
     require_macos()
     try:
