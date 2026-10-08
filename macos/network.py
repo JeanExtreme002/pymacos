@@ -23,10 +23,9 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import _cf, _libc, _objc
+from . import _cf, _libc, _objc, _sc
 from ._libc import IfAddrs as _IfAddrs
 from ._system import framework, require_macos, run as _run
 from .errors import CommandError, MacOSError, NotSupportedError
@@ -58,26 +57,6 @@ _REACHABLE = 1 << 1  # kSCNetworkReachabilityFlagsReachable
 _CONNECTION_REQUIRED = 1 << 2  # kSCNetworkReachabilityFlagsConnectionRequired
 
 
-class _SockaddrIn(ctypes.Structure):
-    _fields_ = [
-        ("sin_len", ctypes.c_uint8),
-        ("sin_family", ctypes.c_uint8),
-        ("sin_port", ctypes.c_uint16),
-        ("sin_addr", ctypes.c_uint32),
-        ("sin_zero", ctypes.c_char * 8),
-    ]
-
-
-@lru_cache(maxsize=None)
-def _configuration() -> ctypes.CDLL:
-    config = framework("SystemConfiguration")
-    config.SCNetworkReachabilityCreateWithAddress.argtypes = (ctypes.c_void_p, ctypes.POINTER(_SockaddrIn))
-    config.SCNetworkReachabilityCreateWithAddress.restype = ctypes.c_void_p
-    config.SCNetworkReachabilityGetFlags.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
-    config.SCNetworkReachabilityGetFlags.restype = ctypes.c_bool
-    return config
-
-
 def is_online() -> bool:
     """
     Whether the Mac has a network connection that can reach the internet.
@@ -86,9 +65,9 @@ def is_online() -> bool:
     show "you're offline". A captive portal (hotel Wi-Fi login page) still
     counts as online.
     """
-    config = _configuration()
+    config = _sc.lib()
     # 0.0.0.0 stands for "any address": is there a route out at all?
-    anywhere = _SockaddrIn(ctypes.sizeof(_SockaddrIn), socket.AF_INET, 0, 0, b"")
+    anywhere = _sc.SockaddrIn(ctypes.sizeof(_sc.SockaddrIn), socket.AF_INET, 0, 0, b"")
     target = config.SCNetworkReachabilityCreateWithAddress(None, ctypes.byref(anywhere))
     if not target:
         return False
@@ -99,10 +78,13 @@ def is_online() -> bool:
     return bool(flags.value & _REACHABLE) and not flags.value & _CONNECTION_REQUIRED
 
 
+_QUICK = 30.0  # seconds for route, ipconfig and networksetup, which answer at once unless wedged
+
+
 def interface() -> Optional[str]:
     """The network interface internet traffic goes through, e.g. ``'en0'``, or ``None`` when offline."""
     try:
-        output = _run(["route", "-n", "get", "default"])
+        output = _run(["route", "-n", "get", "default"], timeout=_QUICK)
     except CommandError:  # no default route
         return None
     found = re.search(r"interface:\s*(\S+)", output)
@@ -115,14 +97,34 @@ def ip() -> Optional[str]:
     if name is None:
         return None
     try:
-        address = _run(["ipconfig", "getifaddr", name]).strip()
+        address = _run(["ipconfig", "getifaddr", name], timeout=_QUICK).strip()
     except CommandError:  # the interface has no IPv4 address (e.g. a VPN tunnel)
         return None
     return address or None
 
 
+def _corewlan_device() -> Optional[str]:
+    """The Wi-Fi interface CoreWLAN knows, or ``None`` when it names none."""
+    require_macos()
+    framework("CoreWLAN")
+    with _objc.autorelease_pool():
+        client = _objc.send(_objc.cls("CWWiFiClient"), "sharedWiFiClient")
+        interface = _objc.send(client, "interface") if client else None
+        return _objc.pystring(_objc.send(interface, "interfaceName")) if interface else None
+
+
 def _wifi_device() -> str:
-    ports = _run(["networksetup", "-listallhardwareports"])
+    """
+    The Wi-Fi interface's BSD name, such as ``'en0'``.
+
+    Asked of CoreWLAN, which names it in any language: ``networksetup`` lists
+    ports by their localized name ("WLAN" on a German Mac), so its list is
+    only read when CoreWLAN has no answer.
+    """
+    name = _corewlan_device()
+    if name:
+        return name
+    ports = _run(["networksetup", "-listallhardwareports"], timeout=_QUICK)
     found = re.search(r"Hardware Port: (?:Wi-Fi|AirPort)\s*\nDevice: (\S+)", ports)
     if not found:
         raise NotSupportedError("this Mac has no Wi-Fi")
@@ -131,13 +133,13 @@ def _wifi_device() -> str:
 
 def wifi_power() -> bool:
     """Whether Wi-Fi is turned on. Raises :class:`~macos.errors.NotSupportedError` on a Mac without Wi-Fi."""
-    output = _run(["networksetup", "-getairportpower", _wifi_device()])
+    output = _run(["networksetup", "-getairportpower", _wifi_device()], timeout=_QUICK)
     return output.strip().lower().endswith("on")
 
 
 def set_wifi_power(on: bool) -> None:
     """Turn Wi-Fi on or off, like the switch in Control Center."""
-    _run(["networksetup", "-setairportpower", _wifi_device(), "on" if on else "off"])
+    _run(["networksetup", "-setairportpower", _wifi_device(), "on" if on else "off"], timeout=_QUICK)
 
 
 # --- Speed test -------------------------------------------------------------------
@@ -338,14 +340,7 @@ class NetworkInterface:
 
 
 def _display_names() -> Dict[str, str]:
-    sc = framework("SystemConfiguration")
-    pointer = ctypes.c_void_p
-    sc.SCNetworkInterfaceCopyAll.argtypes = ()
-    sc.SCNetworkInterfaceCopyAll.restype = pointer
-    sc.SCNetworkInterfaceGetBSDName.argtypes = (pointer,)
-    sc.SCNetworkInterfaceGetBSDName.restype = pointer
-    sc.SCNetworkInterfaceGetLocalizedDisplayName.argtypes = (pointer,)
-    sc.SCNetworkInterfaceGetLocalizedDisplayName.restype = pointer
+    sc = _sc.lib()
     names = {}
     with _cf.owned(sc.SCNetworkInterfaceCopyAll()) as every:
         for item in _cf.items(every):
@@ -417,12 +412,7 @@ def interfaces() -> List[NetworkInterface]:
 
 
 def _dynamic_store(key: str) -> Any:
-    sc = framework("SystemConfiguration")
-    pointer = ctypes.c_void_p
-    sc.SCDynamicStoreCreate.argtypes = (pointer, pointer, pointer, pointer)
-    sc.SCDynamicStoreCreate.restype = pointer
-    sc.SCDynamicStoreCopyValue.argtypes = (pointer, pointer)
-    sc.SCDynamicStoreCopyValue.restype = pointer
+    sc = _sc.lib()
     with _cf.owned(_cf.string("pymacos")) as name:
         store = sc.SCDynamicStoreCreate(None, name, None, None)
     if not store:
@@ -469,10 +459,7 @@ def proxies() -> Proxies:
         macos.network.proxies()   # Proxies(http=None, https='proxy.example.com:8080', socks=None, ...)
     """
     require_macos()
-    sc = framework("SystemConfiguration")
-    sc.SCDynamicStoreCopyProxies.argtypes = (ctypes.c_void_p,)
-    sc.SCDynamicStoreCopyProxies.restype = ctypes.c_void_p
-    with _cf.owned(sc.SCDynamicStoreCopyProxies(None)) as settings:
+    with _cf.owned(_sc.lib().SCDynamicStoreCopyProxies(None)) as settings:
         found = _cf.to_python(settings) if settings else {}
     return _proxies(found if isinstance(found, dict) else {})
 

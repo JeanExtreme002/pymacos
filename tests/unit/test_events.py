@@ -164,7 +164,7 @@ def test_watchers_close_what_they_made_when_they_fail(monkeypatch):
         def SCDynamicStoreCreate(self, *args):
             return 0  # configd unreachable
 
-    monkeypatch.setattr(events, "_configuration", Store)
+    monkeypatch.setattr(events._sc, "lib", Store)
     monkeypatch.setattr(events._cf, "string", lambda text: 1)
     with pytest.raises(macos.MacOSError, match="could not watch the network"):
         events._NetworkWatch(_events.Listener())
@@ -184,7 +184,7 @@ def test_watchers_close_what_they_made_when_they_fail(monkeypatch):
         def IONotificationPortDestroy(self, port):
             self.destroyed.append(port)
 
-    monkeypatch.setattr(events, "_io_registry", Ports)
+    monkeypatch.setattr(events._iokit, "lib", Ports)
     with pytest.raises(macos.MacOSError, match="IOReturn 0xe00002c7"):
         events._USBWatch(_events.Listener())
     assert Ports.destroyed == [9]
@@ -218,3 +218,21 @@ def test_stop_reaches_every_run_and_wait():
     later = _events.Listener()
     with events._listeners.listening(later):
         assert not later.stop.is_set()  # a stop() is for the calls in progress only
+
+
+def test_at_the_timeout_queued_events_come_but_no_later_ones(monkeypatch):
+    from macos import _events
+
+    clock = [0.0]
+    monkeypatch.setattr(_events.time, "monotonic", lambda: clock[0])
+    listener = _events.Listener()
+    listener.pending.extend(range(4))  # queued by the tap's thread while callbacks ran
+
+    handled = []
+    for item in listener.drain(timeout=1.0):
+        handled.append(item)
+        clock[0] += 0.4  # each callback takes 0.4 s...
+        listener.pending.append(100 + item)  # ...while one more event comes in
+    # Everything queued by the time it ran out comes, none of what kept coming after: no event is lost,
+    # and a steady stream can't keep it going past the timeout.
+    assert handled == [0, 1, 2, 3, 100, 101, 102]

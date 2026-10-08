@@ -93,7 +93,9 @@ for event in macos.finder.watch("~/Downloads"):
 `event.kind` is `'created'`, `'modified'`, `'deleted'` or `'renamed'` (the new
 name of a moved or renamed item), and `event.is_dir` tells folders apart.
 `pattern="*.pdf"` (or a list of patterns) keeps only the files whose name
-matches.
+matches. Under heavy load macOS may lose track of what changed: then a
+`'rescan'` event, whatever the pattern, names the folder to look through
+again: `wait_for_change` then looks there for a matching file changed since it began waiting.
 Subfolders are watched too, unless `recursive=False`. It goes on until you
 `break` out of the loop, or `timeout` seconds pass. To wait for one change,
 such as a download finishing:

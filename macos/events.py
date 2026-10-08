@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import _cf, _events, _objc, apps
+from . import _cf, _events, _iokit, _objc, _sc, apps
 from ._system import framework
 from .errors import MacOSError
 
@@ -216,25 +216,10 @@ def _handle(self: int, selector: int, notification: int) -> None:
         listener.pending.append(event)
 
 
-_PowerCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
-
-
-@lru_cache(maxsize=None)
-def _iokit() -> ctypes.CDLL:
-    io = framework("IOKit")
-    io.IOPSCopyPowerSourcesInfo.argtypes = ()
-    io.IOPSCopyPowerSourcesInfo.restype = ctypes.c_void_p
-    io.IOPSGetProvidingPowerSourceType.argtypes = (ctypes.c_void_p,)
-    io.IOPSGetProvidingPowerSourceType.restype = ctypes.c_void_p
-    io.IOPSNotificationCreateRunLoopSource.argtypes = (_PowerCallback, ctypes.c_void_p)
-    io.IOPSNotificationCreateRunLoopSource.restype = ctypes.c_void_p
-    return io
-
-
 def _on_charger() -> bool:
     """Whether the Mac runs on its charger (or on mains power, without a battery)."""
-    with _cf.owned(_iokit().IOPSCopyPowerSourcesInfo()) as info:
-        return _cf.to_str(_iokit().IOPSGetProvidingPowerSourceType(info)) != "Battery Power"
+    with _cf.owned(_iokit.lib().IOPSCopyPowerSourcesInfo()) as info:
+        return _cf.to_str(_iokit.lib().IOPSGetProvidingPowerSourceType(info)) != "Battery Power"
 
 
 class _Watch:
@@ -280,9 +265,9 @@ class _PowerWatch(_Watch):
 
     def start(self) -> None:
         self.plugged = _on_charger()
-        self.callback = _PowerCallback(self.changed)  # kept alive while the source is scheduled
+        self.callback = _iokit.POWER_CALLBACK(self.changed)  # kept alive while the source is scheduled
         self.source = _cf.RunLoopSource(
-            _iokit().IOPSNotificationCreateRunLoopSource(self.callback, None), owned=True, what="watch the power source"
+            _iokit.lib().IOPSNotificationCreateRunLoopSource(self.callback, None), owned=True, what="watch the power source"
         )
 
     def changed(self, context: int) -> None:
@@ -295,23 +280,7 @@ class _PowerWatch(_Watch):
             self.emit("power_connected" if plugged else "power_disconnected")
 
 
-_Store = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _NETWORK_KEYS = ("State:/Network/Global/IPv4", "State:/Network/Global/IPv6")
-
-
-@lru_cache(maxsize=None)
-def _configuration() -> ctypes.CDLL:
-    sc = framework("SystemConfiguration")
-    pointer = ctypes.c_void_p
-    sc.SCDynamicStoreCreate.argtypes = (pointer, pointer, _Store, pointer)
-    sc.SCDynamicStoreCreate.restype = pointer
-    sc.SCDynamicStoreSetNotificationKeys.argtypes = (pointer, pointer, pointer)
-    sc.SCDynamicStoreSetNotificationKeys.restype = ctypes.c_bool
-    sc.SCDynamicStoreCreateRunLoopSource.argtypes = (pointer, pointer, ctypes.c_long)
-    sc.SCDynamicStoreCreateRunLoopSource.restype = pointer
-    sc.SCDynamicStoreCopyValue.argtypes = (pointer, pointer)
-    sc.SCDynamicStoreCopyValue.restype = pointer
-    return sc
 
 
 class _NetworkWatch(_Watch):
@@ -325,8 +294,8 @@ class _NetworkWatch(_Watch):
     store: Optional[int] = None
 
     def start(self) -> None:
-        sc = _configuration()
-        self.callback = _Store(self.changed)
+        sc = _sc.lib()
+        self.callback = _sc.STORE_CALLBACK(self.changed)
         with _cf.owned(_cf.string("pymacos.events")) as name:
             self.store = sc.SCDynamicStoreCreate(None, name, self.callback, None)
         if not self.store:
@@ -343,7 +312,7 @@ class _NetworkWatch(_Watch):
         values = []
         for key in _NETWORK_KEYS:
             with _cf.owned(_cf.string(key)) as name:
-                with _cf.owned(_configuration().SCDynamicStoreCopyValue(self.store, name)) as value:
+                with _cf.owned(_sc.lib().SCDynamicStoreCopyValue(self.store, name)) as value:
                     values.append(repr(_cf.to_python(value)) if value else None)
         return tuple(values)
 
@@ -362,36 +331,8 @@ class _NetworkWatch(_Watch):
         _cf.release(store)
 
 
-_Matched = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32)
-
-
-@lru_cache(maxsize=None)
-def _io_registry() -> ctypes.CDLL:
-    io = framework("IOKit")
-    pointer, handle = ctypes.c_void_p, ctypes.c_uint32
-    io.IONotificationPortCreate.argtypes = (handle,)
-    io.IONotificationPortCreate.restype = pointer
-    io.IONotificationPortGetRunLoopSource.argtypes = (pointer,)
-    io.IONotificationPortGetRunLoopSource.restype = pointer
-    io.IONotificationPortDestroy.argtypes = (pointer,)
-    io.IONotificationPortDestroy.restype = None
-    io.IOServiceMatching.argtypes = (ctypes.c_char_p,)
-    io.IOServiceMatching.restype = pointer
-    io.IOServiceAddMatchingNotification.argtypes = (pointer, ctypes.c_char_p, pointer, _Matched, pointer, ctypes.POINTER(handle))
-    io.IOServiceAddMatchingNotification.restype = ctypes.c_int
-    io.IOIteratorNext.argtypes = (handle,)
-    io.IOIteratorNext.restype = handle
-    io.IOObjectRelease.argtypes = (handle,)
-    io.IOObjectRelease.restype = ctypes.c_int
-    io.IORegistryEntryCreateCFProperty.argtypes = (handle, pointer, pointer, handle)
-    io.IORegistryEntryCreateCFProperty.restype = pointer
-    io.IORegistryEntryGetName.argtypes = (handle, ctypes.c_char_p)
-    io.IORegistryEntryGetName.restype = ctypes.c_int
-    return io
-
-
 def _device_name(device: int) -> Optional[str]:
-    io = _io_registry()
+    io = _iokit.lib()
     with _cf.owned(_cf.string("USB Product Name")) as key, _cf.owned(
         io.IORegistryEntryCreateCFProperty(device, key, None, 0)
     ) as name:
@@ -409,14 +350,14 @@ class _USBWatch(_Watch):
     port: Optional[int] = None
 
     def start(self) -> None:
-        io = _io_registry()
+        io = _iokit.lib()
         self.iterators: List[int] = []
         self.callbacks = []
         self.port = io.IONotificationPortCreate(0)
         if not self.port:
             raise MacOSError("could not watch the USB devices: IOKit gave no notification port")
         for kind, name in ((b"IOServiceFirstMatch", "usb_connected"), (b"IOServiceTerminate", "usb_disconnected")):
-            callback = _Matched(lambda refcon, iterator, name=name: self.matched(iterator, name))
+            callback = _iokit.MATCHED_CALLBACK(lambda refcon, iterator, name=name: self.matched(iterator, name))
             self.callbacks.append(callback)
             iterator = ctypes.c_uint32()
             # The matching dictionary is consumed by the call.
@@ -433,7 +374,7 @@ class _USBWatch(_Watch):
         )
 
     def drain(self, iterator: int, name: Optional[str]) -> None:
-        io = _io_registry()
+        io = _iokit.lib()
         while True:
             device = io.IOIteratorNext(iterator)
             if not device:
@@ -449,7 +390,7 @@ class _USBWatch(_Watch):
 
     def close(self) -> None:
         super().close()
-        io = _io_registry()
+        io = _iokit.lib()
         for iterator in getattr(self, "iterators", []):
             io.IOObjectRelease(iterator)
         self.iterators = []

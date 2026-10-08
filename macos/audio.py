@@ -431,6 +431,9 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
     the first time::
 
         macos.audio.record("memo.m4a", 30)
+
+    Ctrl-C stops the recording early and keeps what was recorded until then.
+    If the recording fails, a file already at ``path`` stays as it was.
     """
     if seconds <= 0:
         raise ValueError("seconds must be positive, not {}".format(seconds))
@@ -442,20 +445,37 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
             "can't record {!r} files; use one of {}".format(target.suffix, ", ".join(sorted(_RECORD_FORMATS)))
         )
     _capture.require_permission(_capture.AUDIO)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with _objc.autorelease_pool():
-        recorder = _recorder(target, channels)
+    # Recorded beside the target and moved over it once saved: prepareToRecord
+    # empties the file it's given, so a recording that fails would otherwise
+    # destroy the one that was there, or leave it to pass for the new one.
+    interrupted: List[BaseException] = []
+    with _files.replacing(target) as temporary, _objc.autorelease_pool():
+        recorder = _recorder(temporary, channels)
         if not _objc.send(recorder, "record", restype=_objc.BOOL):
             raise MacOSError("the microphone could not start recording")
         # Not recordForDuration: its stop is a run loop timer, which a
         # script never turns. Stop it ourselves, even on Ctrl-C.
+        heard = 0.0
         try:
             time.sleep(seconds)
+        except KeyboardInterrupt as error:
+            interrupted.append(error)  # stopped on purpose: what was recorded is kept, then Ctrl-C goes on
         finally:
+            heard = _recorded_seconds(recorder)  # before stop(), which resets it
             _objc.send(recorder, "stop", restype=None)
-    if not target.exists():
-        raise MacOSError("the recording wasn't saved")
+        # No sound recorded (the file holds prepareToRecord's header at most): never over the old file.
+        if not temporary.exists() or heard <= 0:
+            if interrupted:
+                raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
+            raise MacOSError("the recording wasn't saved")
+    if interrupted:
+        raise interrupted[0]
     return target
+
+
+def _recorded_seconds(recorder: int) -> float:
+    """How long a recorder still recording has recorded: 0 when it has no sound yet, only the file's header."""
+    return float(_objc.send(recorder, "currentTime", restype=ctypes.c_double) or 0)
 
 
 def input_level(seconds: float = 0.3) -> float:
@@ -563,14 +583,12 @@ def _core_media() -> ctypes.CDLL:
 
 def info(path: PathLike) -> AudioInfo:
     """Return the duration, sample rate, channels, codec and bitrate of an audio (or video) file's sound."""
-    from . import video
-
     source = _existing(path)
     framework("AVFoundation")
     media = _core_media()
     with _objc.autorelease_pool():
-        asset = video._asset(source)
-        tracks = video._tracks(asset, "soun")
+        asset = _media.asset(source)  # "not a video or sound": an audio file isn't a video
+        tracks = _media.tracks(asset, "soun")
         if not tracks:
             raise ValueError("{} has no sound".format(source))
         formats = list(_objc.nsarray(_objc.send(tracks[0], "formatDescriptions")))
@@ -633,7 +651,7 @@ def convert(source: PathLike, output: PathLike, *, quality: str = "high", lossle
 
 
 # Editing: decode to 16-bit PCM, change the samples, encode to the output's format. The samples go
-# through a WAV file on each side, read and written a piece at a time where the edit allows it (trim,
+# through a WAV file on each side, read and written a piece at a time where the edit allows it (trim, fade,
 # gain), so a long recording isn't held in memory whole, let alone several times over.
 
 _CHUNK_FRAMES = 1 << 16  # frames edited at a time: 256 KiB of 16-bit stereo
@@ -824,17 +842,26 @@ def fade(
     """
     if fade_in < 0 or fade_out < 0:
         raise ValueError("fade_in and fade_out must not be negative")
-    channels, rate, samples = _decode(_existing(source))
-    frames = len(samples) // channels
-    for seconds, at_start in ((fade_in, True), (fade_out, False)):
-        length = min(frames, int(seconds * rate))
-        for step in range(length):
-            factor = step / length
-            frame = step if at_start else frames - 1 - step
-            for channel in range(channels):
-                index = frame * channels + channel
-                samples[index] = int(samples[index] * factor)
-    return _encode(samples, channels, rate, output, quality, lossless)
+    _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
+    with _decoded(_existing(source)) as samples:
+        channels, frames = samples.channels, samples.frames
+        rising, falling = min(frames, int(fade_in * samples.rate)), min(frames, int(fade_out * samples.rate))
+        with _encoding_to(output, channels, samples.rate, quality, lossless) as write:
+            # A piece at a time, as gain() does: only the frames inside a fade are touched.
+            for first in range(0, frames, _CHUNK_FRAMES):
+                chunk = samples.read(_CHUNK_FRAMES)
+                end = first + len(chunk) // channels
+                fades = (
+                    (range(first, min(end, rising)), lambda frame: frame / rising),
+                    (range(max(first, frames - falling), end), lambda frame: (frames - 1 - frame) / falling),
+                )
+                for span, factor_at in fades:
+                    for frame in span:
+                        factor = factor_at(frame)
+                        for index in range((frame - first) * channels, (frame - first + 1) * channels):
+                            chunk[index] = int(chunk[index] * factor)
+                write(chunk)
+    return Path(output).expanduser().absolute()
 
 
 def _gain_table(factor: float) -> List[int]:
@@ -1155,11 +1182,13 @@ def record_until_silence(
             "can't record {!r} files; use one of {}".format(target.suffix, ", ".join(sorted(_RECORD_FORMATS)))
         )
     _capture.require_permission(_capture.AUDIO)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with _objc.autorelease_pool():
-        recorder = _recorder(target, channels, metering=True)
+    # Beside the target, moved over it once saved, as in record().
+    with _files.replacing(target) as temporary, _objc.autorelease_pool():
+        recorder = _recorder(temporary, channels, metering=True)
         if not _objc.send(recorder, "record", restype=_objc.BOOL):
             raise MacOSError("the microphone could not start recording")
+        interrupted: List[BaseException] = []
+        heard = 0.0
         try:
             started = time.monotonic()
             heard_at: Optional[float] = None
@@ -1176,8 +1205,15 @@ def record_until_silence(
                     break
                 if heard_at is not None and now - heard_at >= silence:
                     break
+        except KeyboardInterrupt as error:
+            interrupted.append(error)  # stopped on purpose, as in record(): what was recorded is kept
         finally:
+            heard = _recorded_seconds(recorder)  # before stop(), which resets it
             _objc.send(recorder, "stop", restype=None)
-    if not target.exists():
-        raise MacOSError("the recording wasn't saved")
+        if not temporary.exists() or heard <= 0:  # no sound recorded, as in record()
+            if interrupted:
+                raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
+            raise MacOSError("the recording wasn't saved")
+    if interrupted:
+        raise interrupted[0]
     return target

@@ -33,3 +33,30 @@ def test_objc_blocks_and_classes():
 
     assert _objc.run_until(lambda: True, 1) is True
     assert _objc.run_until(lambda: False, 0.1) is False
+
+
+def test_one_cicontext_is_made_even_for_first_renders_at_once(monkeypatch):
+    import threading
+    import time
+
+    from macos import _objc
+
+    made = []
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "contextWithOptions:":
+            time.sleep(0.05)  # long enough for the other thread to ask meanwhile
+            made.append(len(made) + 1)
+            return made[-1]
+        return receiver  # retain
+
+    monkeypatch.setattr(_objc, "_CICONTEXT", [])
+    monkeypatch.setattr(_objc, "send", send)
+    monkeypatch.setattr(_objc, "cls", lambda name: 0)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(_objc.cicontext())) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert made == [1] and got == [1, 1, 1, 1]  # one context, none made only to leak

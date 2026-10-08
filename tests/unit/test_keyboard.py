@@ -111,16 +111,177 @@ def test_hold_releases_the_keys_when_the_block_fails(fake_events):
     assert macos._events.held() == []
 
 
-def test_shortcuts_off_the_main_thread_use_a_us_keyboard():
+def _off_the_main_thread(function):
     import threading
 
-    parsed = []
-    worker = threading.Thread(target=lambda: parsed.extend(macos.keyboard._parse(keys) for keys in ("cmd+plus", "?", "a")))
+    result = []
+
+    def run():
+        try:
+            result.append(function())
+        except Exception as error:
+            result.append(error)
+
+    worker = threading.Thread(target=run)
     worker.start()
     worker.join()
+    return result[0]
+
+
+def test_shortcuts_off_the_main_thread_use_a_us_keyboard_on_a_us_layout(monkeypatch):
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {})
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.ABC")
+
+    parsed = _off_the_main_thread(lambda: [macos.keyboard._parse(keys) for keys in ("cmd+plus", "?", "a")])
 
     cmd = [(1 << 20, 55)]
     assert parsed == [(cmd, 24, True), ([], 44, True), ([], 0, False)]  # Shift+= types "+"
+
+
+def test_shortcuts_off_the_main_thread_use_the_layout_the_main_thread_read(monkeypatch):
+    azerty = {"a": (12, False), "q": (0, False)}
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
+
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 12, False)
+
+
+def test_shortcuts_off_the_main_thread_refuse_a_layout_never_read(monkeypatch):
+    # On AZERTY the US table's "a" is the Q key: Cmd+A would quit the app in front.
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {})
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
+
+    error = _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a"))
+
+    assert isinstance(error, macos.MacOSError)
+    assert "French" in str(error) and "main thread" in str(error)
+
+
+def _layout_preferences(monkeypatch, current, enabled):
+    import contextlib
+    from types import SimpleNamespace
+
+    saved = {"AppleCurrentKeyboardLayoutInputSourceID": current, "AppleEnabledInputSources": enabled}
+    cf = SimpleNamespace(
+        owned=contextlib.nullcontext,
+        string=lambda text: 1,
+        lib=lambda: SimpleNamespace(CFPreferencesAppSynchronize=lambda domain: True),
+    )
+    monkeypatch.setattr(macos.keyboard, "_cf", cf)
+    monkeypatch.setattr(macos.defaults, "read", lambda domain, key, default=None: saved[key] or default)
+    return saved
+
+
+def _keyboard_layout(number):
+    return {"InputSourceKind": "Keyboard Layout", "KeyboardLayout ID": number}
+
+
+def test_the_layout_in_use_is_read_from_the_preferences(monkeypatch):
+    _layout_preferences(monkeypatch, "com.apple.keylayout.French", [_keyboard_layout(1)])
+    assert macos.keyboard._current_layout_id() == "com.apple.keylayout.French"
+
+
+@pytest.mark.parametrize(
+    "enabled, expected",
+    [
+        ([_keyboard_layout(0), {"InputSourceKind": "Non Keyboard Input Method"}], "com.apple.keylayout.US"),
+        ([_keyboard_layout(252), _keyboard_layout(-2)], "com.apple.keylayout.US"),  # ABC, US Extended
+        ([_keyboard_layout(0), _keyboard_layout(15000)], ""),  # US International: its quotes are dead keys
+        ([_keyboard_layout(0), _keyboard_layout(1)], ""),  # US and French: either may be in use
+        ([], ""),
+        (None, ""),
+    ],
+)
+def test_an_unsaved_layout_is_taken_for_us_only_when_every_enabled_one_is(monkeypatch, enabled, expected):
+    _layout_preferences(monkeypatch, None, enabled)
+    assert macos.keyboard._current_layout_id() == expected
+
+
+def test_a_layout_switch_shows_at_the_very_next_key(monkeypatch):
+    # Not cached: Cmd+A pressed right after a switch to AZERTY must find the Q key, not the US A.
+    saved = _layout_preferences(monkeypatch, "com.apple.keylayout.US", None)
+    assert macos.keyboard._current_layout_id() == "com.apple.keylayout.US"
+    saved["AppleCurrentKeyboardLayoutInputSourceID"] = "com.apple.keylayout.French"
+    assert macos.keyboard._current_layout_id() == "com.apple.keylayout.French"
+
+
+def test_an_unnamed_layout_off_the_main_thread_is_the_one_the_main_thread_read(monkeypatch):
+    # A French-only account that never switched layouts doesn't save the ID: layout() on the main thread is enough.
+    azerty = {"a": (12, False), "q": (0, False)}
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_LAST_READ", ["com.apple.keylayout.French"])
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "")
+
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 12, False)
+
+    monkeypatch.setattr(macos.keyboard, "_LAST_READ", [])  # never read: still refused
+    assert isinstance(_off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")), macos.MacOSError)
+
+
+def test_press_releases_the_modifiers_down_when_a_post_fails(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+
+    def post(event):
+        fields = fake_events.events[event]
+        if fields["code"] == 8 and fields["down"]:
+            raise macos.MacOSError("the window server said no")
+        posted.append((fields["code"], fields["down"]))
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(macos.MacOSError):
+        macos.keyboard.press("cmd+shift+c")
+
+    # The C key may have gone down before the error: it's let up too. Nothing is left down.
+    assert posted == [(55, True), (56, True), (8, False), (56, False), (55, False)]
+
+
+def test_ctrl_c_between_a_key_down_and_up_lets_the_key_up(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+    interrupted = []
+
+    def post(event):
+        fields = fake_events.events[event]
+        if fields["code"] == 8 and not fields["down"] and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt  # in post()'s pause, after the key went down
+        posted.append((fields["code"], fields["down"]))
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(KeyboardInterrupt):
+        macos.keyboard.press("cmd+c")
+
+    assert posted == [(55, True), (8, True), (8, False), (55, False)]  # C doesn't stay down, nor Cmd
+
+
+def test_ctrl_c_while_one_modifier_is_let_up_still_lets_the_others_up(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+    interrupted = []
+
+    def post(event):
+        fields = fake_events.events[event]
+        posted.append((fields["code"], fields["down"]))
+        if fields["code"] == 56 and not fields["down"] and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt  # in the pause after Shift went up
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(KeyboardInterrupt):
+        macos.keyboard.press("cmd+shift+c")
+
+    assert posted == [(55, True), (56, True), (8, True), (8, False), (56, False), (55, False)]  # Cmd up too
+
+
+def test_type_presses_enter_once_for_each_line_ending(fake_events):
+    macos.keyboard.type("a\r\nb\rc\nd")
+
+    typed = [(event["code"], event["text"]) for event in fake_events.posted if event["down"]]
+    assert typed == [(0, "a"), (36, None), (0, "b"), (36, None), (0, "c"), (36, None), (0, "d")]
 
 
 def test_caps_lock(fake_events):
@@ -252,3 +413,42 @@ def test_backlight_ids_are_released(monkeypatch):
 def test_shortcut_keys_are_appkit_function_keys():
     keys = macos.keyboard._SHORTCUT_KEYS
     assert (keys["up"], keys["page_down"], keys["f1"]) == ("", "", "")
+
+
+def test_a_layout_read_for_one_keyboard_is_read_again_for_another(monkeypatch):
+    from types import SimpleNamespace
+
+    # ISO and ANSI keyboards put some keys elsewhere: a table read for one isn't the other's.
+    kind = [41]  # ISO
+    carbon = SimpleNamespace(
+        TISCopyCurrentKeyboardLayoutInputSource=lambda: 1,
+        LMGetKbdType=lambda: kind[0],
+        TISGetInputSourceProperty=lambda source, key: None,  # read again: no data, so the US table
+    )
+    iso = {"a": (12, False)}
+    monkeypatch.setattr(macos.keyboard, "_text_input", lambda: carbon)
+    monkeypatch.setattr(macos.keyboard, "_source_property", lambda source, name: "com.apple.keylayout.French")
+    monkeypatch.setattr(macos.keyboard._cf, "lib", lambda: None)
+    monkeypatch.setattr(macos.keyboard._cf, "release", lambda ref: None)
+    monkeypatch.setattr(macos.keyboard.ctypes.c_void_p, "in_dll", lambda library, name: SimpleNamespace(value=1))
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": iso})
+    monkeypatch.setattr(macos.keyboard, "_KEYBOARD_TYPES", {"com.apple.keylayout.French": 41})
+    monkeypatch.setattr(macos.keyboard, "_LAST_READ", [])
+
+    assert macos.keyboard._layout() is iso  # the same keyboard: the table already read
+    kind[0] = 40  # an ANSI keyboard plugged in
+    assert macos.keyboard._layout() is not iso
+
+
+def test_a_worker_refuses_a_layout_read_for_another_kind_of_keyboard(monkeypatch):
+    azerty = {"a": (12, False), "q": (0, False)}
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {"com.apple.keylayout.French": azerty})
+    monkeypatch.setattr(macos.keyboard, "_KEYBOARD_TYPES", {"com.apple.keylayout.French": 41})  # read on ISO
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
+    kind = [41]
+    monkeypatch.setattr(macos.keyboard, "_keyboard_type", lambda: kind[0])
+
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 12, False)
+    kind[0] = 40  # an ANSI keyboard now: some keys sit elsewhere
+    error = _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a"))
+    assert isinstance(error, macos.MacOSError) and "layout() from the main thread again" in str(error)

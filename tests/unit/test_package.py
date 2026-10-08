@@ -77,3 +77,22 @@ def test_deprecation_warnings_point_at_the_caller():
         warnings.simplefilter("always")
         old()
     assert caught[0].filename == __file__
+
+
+def test_the_api_reference_lists_every_public_name():
+    import importlib
+    import pathlib
+    import re
+
+    reference = pathlib.Path(__file__).parents[2] / "docs" / "api.md"
+    documented = set(re.findall(r"^\.\. auto\w+:: (macos\.[\w.]+)$", reference.read_text(encoding="utf-8"), re.M))
+    missing = []
+    for module_name in sorted(macos._SUBMODULES):
+        module = importlib.import_module("macos." + module_name)
+        for name in module.__all__:
+            # A name the package re-exports (macos.notify, macos.ShortcutNotFoundError) is documented there.
+            if getattr(macos, name, None) is getattr(module, name) and "macos." + name in documented:
+                continue
+            if "macos.{}.{}".format(module_name, name) not in documented:
+                missing.append("macos.{}.{}".format(module_name, name))
+    assert not missing, "add these to docs/api.md: {}".format(missing)

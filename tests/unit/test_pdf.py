@@ -477,3 +477,52 @@ def test_inverting_samples_flips_every_byte():
 def test_hex_colors_are_read_by_one_parser():
     assert macos.pdf._color is macos.image._hex_color
     assert macos.pdf._color("#FF8000") == (1.0, 128 / 255, 0.0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="draws PDF pages with PDFKit")
+def test_redrawn_pages_keep_the_crop_box(tmp_path):
+    import struct
+
+    from tests.helpers import pdf_with_text, rgb_png
+
+    # A Letter page cropped to its bottom-left 300 x 300 points: SECRET is drawn, but cropped away.
+    cropped = tmp_path / "cropped.pdf"
+    cropped.write_bytes(pdf_with_text([("VISIBLE", 72, 72), ("SECRET", 400, 700)], crop=(0, 0, 300, 300)))
+    signature = tmp_path / "signature.png"
+    signature.write_bytes(rgb_png(30, 10, lambda x, y: (20, 40, 160)))
+    made = [
+        macos.pdf.watermark(cropped, "DRAFT", tmp_path / "watermarked.pdf"),
+        macos.pdf.sign(cropped, signature, tmp_path / "signed.pdf", width=30),
+        macos.pdf.add_text(cropped, "Approved", tmp_path / "noted.pdf"),
+    ]
+
+    def size(png):
+        return struct.unpack(">II", png[16:24])
+
+    assert size(macos.pdf.render(cropped, size=300)) == (300, 300)  # the crop box, not the Letter page
+    for pdf in made:
+        # The new page is the part that showed, nothing more.
+        assert size(macos.pdf.render(pdf, size=300)) == (300, 300), pdf.name
+        assert "VISIBLE" in macos.pdf.text(pdf), pdf.name
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes outlines with PDFKit")
+@pytest.mark.parametrize(
+    "rotate, corner",
+    # The corner, in the page's own coordinates, that shows at the top-left once the page is turned.
+    [(0, (100, 400)), (90, (100, 100)), (180, (400, 100)), (270, (400, 400))],
+)
+def test_bookmarks_open_at_the_top_of_the_visible_part(tmp_path, rotate, corner):
+    import ctypes
+
+    from macos import _objc
+    from tests.helpers import pdf_with_text
+
+    cropped = tmp_path / "cropped.pdf"
+    cropped.write_bytes(pdf_with_text([("VISIBLE", 150, 150)], rotate=rotate, crop=(100, 100, 400, 400)))
+    marked = macos.pdf.set_bookmarks(cropped, [("Start", 1)], tmp_path / "marked.pdf")
+
+    with macos.pdf._open(marked, None) as document:
+        child = _objc.send(_objc.send(document, "outlineRoot"), "childAtIndex:", 0, argtypes=(ctypes.c_ulong,))
+        point = _objc.send(_objc.send(child, "destination"), "point", restype=_objc.CGPoint)
+    assert (point.x, point.y) == corner  # of the crop box as it shows, not the Letter page's (0, 792)

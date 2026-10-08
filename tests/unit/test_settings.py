@@ -31,8 +31,8 @@ def prefs(monkeypatch):
     monkeypatch.setattr(finder, "restart", lambda: done.append("finder"))
     monkeypatch.setattr(appearance, "_announce", lambda *names: done.append(names))
     monkeypatch.setattr(screen, "_apply_capture_settings", lambda: done.append("capture"))
-    for module in (system, windows):
-        monkeypatch.setattr(module, "_run", lambda args: done.append(args[-1]))
+    for module, name in ((system, "_run"), (_system, "run")):  # _system.run: the killall of every restart
+        monkeypatch.setattr(module, name, lambda args, **kwargs: done.append(args[-1]))
     return store, done
 
 
@@ -186,7 +186,7 @@ def test_appearance_settings(prefs):
 def test_screen_and_system_settings(prefs, monkeypatch):
     store, _ = prefs
     commands = []
-    monkeypatch.setattr(system, "_run", lambda args: commands.append(args))
+    monkeypatch.setattr(_system, "run", lambda args, **kwargs: commands.append(args))
 
     assert screen.screensaver_delay() == 20.0
     screen.set_screensaver_delay(5)
@@ -779,6 +779,34 @@ def test_batched_restarts():
     assert ran == ["dock", "dock"]  # restarted anyway, to apply what changed
 
 
+def test_one_failed_restart_neither_skips_the_others_nor_hides_the_error(monkeypatch):
+    ran = []
+    warned = []
+    monkeypatch.setattr(_system, "add_note", lambda error, message: warned.append(message))
+
+    def restarter(name, fails=False):
+        def restart():
+            if _system.restart_later(name, restart):
+                return
+            ran.append(name)
+            if fails:
+                raise macos.CommandError(["killall", name], 2, "killall: timed out")
+
+        return restart
+
+    with pytest.raises(RuntimeError, match="the setting failed"):  # the block's own error, not killall's
+        with _system.batched_restarts():
+            restarter("SystemUIServer", fails=True)()
+            restarter("Dock")()
+            raise RuntimeError("the setting failed")
+    assert ran == ["SystemUIServer", "Dock"]  # the Dock still restarted
+    assert warned == ["restarting SystemUIServer failed too: 'killall' exited with status 2: killall: timed out"]
+
+    with pytest.raises(macos.CommandError):  # alone, the failed restart is the error
+        with _system.batched_restarts():
+            restarter("SystemUIServer", fails=True)()
+
+
 def test_hardware_setting_checks():
     with pytest.raises(ValueError, match="seconds must be positive"):
         macos.keyboard.set_backlight_timeout(0)
@@ -795,3 +823,22 @@ def test_defaults_delete_checks_the_domain(fake_run):
     for domain in ("", "   "):
         with pytest.raises(ValueError):
             defaults.delete(domain, "key")
+
+
+def test_control_center_restart_only_overlooks_it_not_running(monkeypatch):
+    def killall(status, message):
+        def run(args, **kwargs):
+            raise macos.CommandError(args, status, message)
+
+        return run
+
+    # No process: it reads the settings when it starts.
+    monkeypatch.setattr(_system, "run", killall(1, "No matching processes belonging to you were found"))
+    system._restart_control_center()
+    # The same status 1 when it found one it couldn't signal: that restart failed.
+    monkeypatch.setattr(_system, "run", killall(1, "kill: 812: Operation not permitted"))
+    with pytest.raises(macos.CommandError, match="not permitted"):
+        system._restart_control_center()
+    monkeypatch.setattr(_system, "run", killall(2, "killall: permission denied"))
+    with pytest.raises(macos.CommandError, match="permission denied"):
+        system._restart_control_center()

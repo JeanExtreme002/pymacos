@@ -32,8 +32,8 @@ from typing import Any, Optional, Sequence, Tuple, Union
 
 from . import _cf, _objc, apps
 from ._objc import CGPoint, CGSize
-from ._system import framework, run as _run
-from .errors import CommandError, MacOSError, PermissionDeniedError
+from ._system import framework, killall
+from .errors import MacOSError, PermissionDeniedError
 
 __all__ = [
     "Window",
@@ -615,16 +615,8 @@ def set_double_click_title_bar(action: Optional[str]) -> None:
     defaults.write(defaults.GLOBAL, "AppleActionOnDoubleClick", _TITLE_BAR_ACTIONS[action])
 
 
-_NO_MATCHING_PROCESS = 1  # killall's exit status when no process has the name
-
-
 def _restart_window_manager() -> None:
-    try:
-        _run(["killall", "WindowManager"])  # macOS starts it again, reading the settings
-    except CommandError as error:
-        if error.returncode != _NO_MATCHING_PROCESS:
-            raise
-        # Not running: it reads them when it starts.
+    killall("WindowManager")  # macOS starts it again, reading the settings
 
 
 def tiling() -> bool:
@@ -691,27 +683,26 @@ def _grid(
         return []
     across = min(columns or math.ceil(math.sqrt(count)), count)
     rows = math.ceil(count / across)
-    x, y, width, height = area
-    height_each = (height - gap * (rows + 1)) / rows
-    narrowest = (width - gap * (across + 1)) / across
-    if height_each < 1 or narrowest < 1:
+    # The area's edges rounded, not its origin and size: rounding both could end it a point past the real one.
+    left_edge, top_edge, width, height = area
+    x, y, right, bottom, space = (
+        math.floor(value + 0.5) for value in (left_edge, top_edge, left_edge + width, top_edge + height, gap)
+    )
+    width, height = right - x, bottom - y
+    if (height - space * (rows + 1)) / rows < 1 or (width - space * (across + 1)) / across < 1:
         raise ValueError("a gap of {} points leaves no room for {} windows on the display".format(gap, count))
-    frames = []
-    for row in range(rows):
-        in_row = min(across, count - row * across)
-        width_each = (width - gap * (in_row + 1)) / in_row
-        top = y + gap + row * (height_each + gap)
-        for column in range(in_row):
-            left = x + gap + column * (width_each + gap)
-            # Round the edges, not the sizes: rounding both could push the last window past the area.
-            frames.append(
-                (
-                    round(left),
-                    round(top),
-                    round(left + width_each) - round(left),
-                    round(top + height_each) - round(top),
-                )
-            )
+
+    def edges(start: int, length: int, parts: int) -> "builtins.list[Tuple[int, int]]":
+        # Whole points, each edge rounded once from an exact fraction: a window's far edge is
+        # exactly the gap before the next one's near edge, so they never overlap, nor pass the end.
+        room = length - space * (parts + 1)
+        cut = [(2 * part * room + parts) // (2 * parts) for part in range(parts + 1)]
+        return [(start + space * (part + 1) + cut[part], cut[part + 1] - cut[part]) for part in range(parts)]
+
+    frames: "builtins.list[Tuple[int, int, int, int]]" = []
+    for top, height_each in edges(y, height, rows):
+        in_row = min(across, count - len(frames))
+        frames.extend((left, top, width_each, height_each) for left, width_each in edges(x, width, in_row))
     return frames
 
 

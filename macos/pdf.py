@@ -66,7 +66,10 @@ __all__ = [
 PathLike = Union[str, "os.PathLike[str]"]
 
 _MAX_RENDER = 4096
-_MEDIA_BOX = 0  # kPDFDisplayBoxMediaBox
+# kPDFDisplayBoxCropBox (kCGPDFCropBox in Core Graphics): the part of the page
+# that shows. What's drawn, measured and placed: what a viewer cropped away
+# must stay away in what's made from the page.
+_CROP_BOX = 1
 _OPAQUE_RGB = 5  # kCGImageAlphaNoneSkipLast: the pixels of a bitmap drawn here, on an opaque page
 
 
@@ -137,7 +140,11 @@ def text(path: PathLike, pages: Optional[Iterable[int]] = None, *, password: Opt
     """
     with _open(path, password) as document:
         numbers = list(pages) if pages is not None else range(1, _count(document) + 1)
-        parts = [_objc.pystring(_objc.send(_page(document, number), "string")) or "" for number in numbers]
+        parts = []
+        for number in numbers:
+            # A pool per page: each page's text would otherwise stay alive until the last one's read.
+            with _objc.autorelease_pool():
+                parts.append(_objc.pystring(_objc.send(_page(document, number), "string")) or "")
         return "\n".join(part.rstrip("\n") for part in parts)
 
 
@@ -451,8 +458,8 @@ _INVISIBLE = 3  # kCGTextInvisible: text that selection and search find, but tha
 
 
 def _seen_size(graphics: ctypes.CDLL, page: int) -> Tuple[float, float]:
-    """The size of a ``CGPDFPage``, in points, as it shows: turned when its /Rotate is a quarter turn."""
-    box = graphics.CGPDFPageGetBoxRect(page, _MEDIA_BOX)
+    """The size of a ``CGPDFPage``'s crop box, in points, as it shows: turned when its /Rotate is a quarter turn."""
+    box = graphics.CGPDFPageGetBoxRect(page, _CROP_BOX)
     width, height = box.size.width, box.size.height
     if graphics.CGPDFPageGetRotationAngle(page) % 180:
         width, height = height, width
@@ -460,10 +467,12 @@ def _seen_size(graphics: ctypes.CDLL, page: int) -> Tuple[float, float]:
 
 
 def _draw_page(graphics: ctypes.CDLL, context: int, page: int, width: float, height: float) -> None:
-    """Draw a ``CGPDFPage`` over ``width`` x ``height`` points of ``context``, from its corner, turned as it shows."""
+    """Draw a ``CGPDFPage``'s crop box over ``width`` x ``height`` points of ``context``, from its corner, turned as it shows."""
     frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
     graphics.CGContextSaveGState(context)
-    graphics.CGContextConcatCTM(context, graphics.CGPDFPageGetDrawingTransform(page, _MEDIA_BOX, frame, 0, True))
+    # Clipped too: what lies outside the crop box mustn't spill into the new page.
+    graphics.CGContextClipToRect(context, frame)
+    graphics.CGContextConcatCTM(context, graphics.CGPDFPageGetDrawingTransform(page, _CROP_BOX, frame, 0, True))
     graphics.CGContextDrawPDFPage(context, page)
     graphics.CGContextRestoreGState(context)
 
@@ -753,7 +762,7 @@ def render(path: PathLike, page: int = 1, *, size: int = 1024, password: Optiona
     framework("AppKit")
     with _open(path, password) as document:
         target = _page(document, page)
-        bounds = _objc.send(target, "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+        bounds = _objc.send(target, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
         width, height = bounds.size.width, bounds.size.height
         # A page with /Rotate 90 or 270 is drawn turned: fit the turned shape.
         if _objc.send(target, "rotation", restype=ctypes.c_long) % 180:
@@ -763,7 +772,7 @@ def render(path: PathLike, page: int = 1, *, size: int = 1024, password: Optiona
         # longest side come out at exactly `size`.
         box = _objc.CGSize(width * scale + 0.5, height * scale + 0.5)
         image = _objc.send(
-            target, "thumbnailOfSize:forBox:", box, _MEDIA_BOX, argtypes=(_objc.CGSize, ctypes.c_long)
+            target, "thumbnailOfSize:forBox:", box, _CROP_BOX, argtypes=(_objc.CGSize, ctypes.c_long)
         )
         tiff = _objc.send(image, "TIFFRepresentation")
         rep = _objc.send(_objc.cls("NSBitmapImageRep"), "imageRepWithData:", tiff, argtypes=(_objc.id,))
@@ -810,6 +819,7 @@ def _graphics() -> ctypes.CDLL:
         "CGContextSetTextDrawingMode": ((pointer, ctypes.c_int32), None),
         "CGContextScaleCTM": ((pointer, ctypes.c_double, ctypes.c_double), None),
         "CGContextFillRect": ((pointer, _objc.CGRect), None),
+        "CGContextClipToRect": ((pointer, _objc.CGRect), None),
         "CGColorSpaceCreateDeviceRGB": ((), pointer),
         "CGColorSpaceRelease": ((pointer,), None),
         "CGBitmapContextCreate": (
@@ -1107,7 +1117,8 @@ def _find(document: int, text: str, page: Optional[int]) -> Tuple[int, Tuple[flo
             if not 1 <= number <= count or (page is not None and number != page):
                 continue
             box = _objc.send(selection, "boundsForPage:", candidate, argtypes=(_objc.id,), restype=_objc.CGRect)
-            bounds = _objc.send(candidate, "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+            # From the crop box's corner, as sign() and add_text() place things.
+            bounds = _objc.send(candidate, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
             rotation = int(_objc.send(candidate, "rotation", restype=ctypes.c_long))
             own = (box.origin.x - bounds.origin.x, box.origin.y - bounds.origin.y, box.size.width, box.size.height)
             return number, _seen(own, bounds.size.width, bounds.size.height, rotation)
@@ -1210,18 +1221,18 @@ def sign(
 
             def seen(number: int) -> Tuple[float, float]:
                 bounds = _objc.send(
-                    _page(document, number), "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect
+                    _page(document, number), "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect
                 )
                 if _objc.send(_page(document, number), "rotation", restype=ctypes.c_long) % 180:
                     return bounds.size.height, bounds.size.width
                 return bounds.size.width, bounds.size.height
 
             def draw(context: int, index: int, page_width: float, page_height: float) -> None:
-                # PDFKit draws the page as it looks, rotation and form fields included.
+                # PDFKit draws the page as it looks: its crop box, rotation and form fields included.
                 _objc.send(
                     _page(document, index + 1),
                     "drawWithBox:toContext:",
-                    _MEDIA_BOX,
+                    _CROP_BOX,
                     context,
                     argtypes=(ctypes.c_long, _objc.id),
                     restype=None,
@@ -1327,7 +1338,8 @@ def add_text(
         _objc.send(measured, "autorelease")
         extent = _objc.send(measured, "size", restype=_objc.CGSize)
         width, height = extent.width + 8, extent.height + 4  # a little room: FreeText boxes pad their text
-        bounds = _objc.send(target, "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+        # The corners of the page as it shows: a cropped page's corners aren't its media box's.
+        bounds = _objc.send(target, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
         # Place it on the page as it's seen: a rotated page's corners aren't its unrotated ones.
         rotation = int(_objc.send(target, "rotation", restype=ctypes.c_long))
         seen = (bounds.size.height, bounds.size.width) if rotation % 180 else (bounds.size.width, bounds.size.height)
@@ -1445,8 +1457,14 @@ def set_bookmarks(
             outline = _objc.send(_objc.send(_objc.cls("PDFOutline"), "alloc"), "init")
             _objc.send(outline, "autorelease")
             _objc.send(outline, "setLabel:", _objc.nsstring(entry.title), argtypes=(_objc.id,), restype=None)
-            bounds = _objc.send(page, "boundsForBox:", _MEDIA_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
-            top = _objc.CGPoint(0, bounds.size.height)  # opens at the page's top
+            # Opens at the top-left corner of the page as it's shown: its visible part (the crop box),
+            # turned by its rotation, back into the page's own coordinates.
+            bounds = _objc.send(page, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+            rotation = int(_objc.send(page, "rotation", restype=ctypes.c_long))
+            width, height = bounds.size.width, bounds.size.height
+            shown_height = height if rotation % 180 == 0 else width
+            x, y, _, _ = _unrotated((0, shown_height, 0, 0), width, height, rotation)
+            top = _objc.CGPoint(bounds.origin.x + x, bounds.origin.y + y)
             destination = _objc.send(
                 _objc.send(_objc.cls("PDFDestination"), "alloc"),
                 "initWithPage:atPoint:",
@@ -1640,11 +1658,11 @@ def images(
     if not source.exists():
         raise FileNotFoundError(str(source))
     target = Path(folder).expanduser().absolute()
-    target.mkdir(parents=True, exist_ok=True)
     graphics = _pdf_objects()
     document = _open_for_drawing(source, password)
     saved: List[Path] = []
     try:
+        target.mkdir(parents=True, exist_ok=True)  # once the PDF opened: no empty folder for one that can't be read
         count = graphics.CGPDFDocumentGetNumberOfPages(document)
         wanted = list(pages) if pages is not None else list(range(1, count + 1))
         for number in wanted:
@@ -1700,7 +1718,6 @@ def images(
 Target = Union[str, "re.Pattern[str]"]
 
 
-_CROP_BOX = 1  # kPDFDisplayBoxCropBox: the part of the page that shows
 _REDACTION_SCALE = 3.0  # 216 dots per inch: sharp enough to read and print the rest of the page
 _REDACTION_LONGEST = 6000  # pixels, for huge pages
 _BLOCK = "\u2588"  # █, what redacted text becomes in metadata and bookmarks
@@ -2063,7 +2080,9 @@ def redact(
         flatten = {}
         per_page = {}
         for number in range(1, _count(document) + 1):
-            found, boxes = _redactions(_page(document, number), number, patterns, counts)
+            # A pool per page: searching one makes strings and selections, all done with once it's searched.
+            with _objc.autorelease_pool():
+                found, boxes = _redactions(_page(document, number), number, patterns, counts)
             if found:  # even without a box to draw: redrawing the page is what removes the text
                 flatten[number] = boxes
                 per_page[number] = found

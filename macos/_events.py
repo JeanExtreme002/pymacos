@@ -166,13 +166,25 @@ class Listener:
         while True:
             self.check()
             while self.pending and not self.stop.is_set():
+                if deadline is not None and time.monotonic() >= deadline:
+                    # Out of time: what was queued by now still comes (it happened within the wait),
+                    # but nothing queued later, so a steady stream can't keep it going for good.
+                    for _ in range(len(self.pending)):
+                        if self.stop.is_set():
+                            return
+                        yield self.pending.popleft()
+                    return
                 yield self.pending.popleft()
             if self.stop.is_set():
                 return
             remaining = _SLICE if deadline is None else min(_SLICE, deadline - time.monotonic())
             if remaining <= 0:
                 return
-            _objc.spin(remaining)
+            self.pause(remaining)
+
+    def pause(self, seconds: float) -> None:
+        """Wait up to ``seconds`` for the callbacks, between two looks at :attr:`pending`: by turning this thread's run loop."""
+        _objc.spin(seconds)
 
 
 class Listeners:

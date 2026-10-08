@@ -18,12 +18,19 @@ class _FakeMdfind:
         self.lines, self.returncode_value, self.stderr_text = lines, returncode, stderr
 
     def __call__(self, args, **kwargs):
-        self.args = list(args)
-        self.stdout = iter(line + "\n" for line in self.lines)
-        self.stdout = _Stream(self.stdout)
+        assert args[:2] == ["mdfind", "-0"]
+        self.args = [args[0], *args[2:]]  # what the tests compare, without the -0 every call has
+        # mdfind -0 ends each path with a NUL, and a diagnostic with a newline.
+        self.stdout = _Stream(
+            (line + "\n" if line.startswith("Failed") else line + "\0").encode("utf-8") for line in self.lines
+        )
         self.stderr = kwargs["stderr"]
         assert self.stderr is not subprocess.PIPE  # read only after stdout's end: a full pipe would hang mdfind
-        self.stderr.write(self.stderr_text)
+        if isinstance(self.stderr_text, bytes):  # what mdfind wrote, as it wrote it: not always UTF-8
+            self.stderr.flush()
+            self.stderr.buffer.write(self.stderr_text)
+        else:
+            self.stderr.write(self.stderr_text)
         self.returncode = None
         self.killed = False
         return self
@@ -41,13 +48,16 @@ class _FakeMdfind:
 
 
 class _Stream:
-    def __init__(self, lines):
-        self.lines, self.read_count = lines, 0
+    """mdfind's stdout, handing over one record per read, as a pipe does when paths trickle in."""
 
-    def __iter__(self):
-        for line in self.lines:
+    def __init__(self, records):
+        self.records, self.read_count = records, 0
+
+    def read1(self, size):
+        for record in self.records:
             self.read_count += 1
-            yield line
+            return record
+        return b""
 
     def close(self):
         pass
@@ -103,6 +113,13 @@ def test_spotlight_failure_is_a_command_error(mdfind):
         macos.spotlight.search("x")
 
 
+def test_a_diagnostic_that_isnt_utf8_is_still_a_command_error(mdfind):
+    mdfind([], returncode=2, stderr=b"mdfind: no index on Caf\xe9")  # Latin-1, from an old volume's name
+
+    with pytest.raises(macos.CommandError, match="no index on Caf\ufffd"):
+        macos.spotlight.search("x")
+
+
 def test_spotlight_search_name_is_literal(mdfind):
     fake = mdfind([])
 
@@ -125,15 +142,17 @@ def test_spotlight_metadata(monkeypatch, tmp_path):
     target = tmp_path / "report.pdf"
     target.touch()
     created = datetime(2026, 1, 2, 3, 4, 5)
+    values = {"kMDItemNumberOfPages": 3, "kMDItemFSCreationDate": created, "kMDItemTitle": "Café"}
 
     def fake(args, **kwargs):
         assert args == ["mdls", "-plist", "-", str(target)]
-        payload = plistlib.dumps({"kMDItemNumberOfPages": 3, "kMDItemFSCreationDate": created})
+        assert kwargs["timeout"]  # a wedged mdls doesn't hang the caller
+        payload = plistlib.dumps(values)
         return subprocess.CompletedProcess(args, 0, payload, b"")
 
-    monkeypatch.setattr(macos.spotlight.subprocess, "run", fake)
+    monkeypatch.setattr(_system.subprocess, "run", fake)
 
-    assert macos.spotlight.metadata(target) == {"kMDItemNumberOfPages": 3, "kMDItemFSCreationDate": created}
+    assert macos.spotlight.metadata(target) == values
     with pytest.raises(FileNotFoundError):
         macos.spotlight.metadata(tmp_path / "missing")
 
@@ -153,3 +172,16 @@ def test_spotlight_reads_a_long_stderr_without_a_pipe(mdfind):
     with pytest.raises(macos.CommandError) as info:
         macos.spotlight.search("x")
     assert len(info.value.stderr) > 64 * 1024
+
+
+def test_spotlight_keeps_a_file_name_holding_a_newline(mdfind):
+    mdfind(["/a/two\nlines.txt", "/b/caf\u00e9.txt"])
+
+    assert macos.spotlight.search("x") == [Path("/a/two\nlines.txt"), Path("/b/caf\u00e9.txt")]
+
+
+def test_spotlight_keeps_a_path_that_is_not_utf8(monkeypatch):
+    import io
+
+    records = io.BytesIO(b"/a/caf\xe9.txt\0")
+    assert list(macos.spotlight._records(records)) == ["/a/caf\udce9.txt"]  # opens the same file

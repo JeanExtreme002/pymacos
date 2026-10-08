@@ -90,6 +90,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "pytest-rerunfailures",
+    "hypothesis",
     "flake8",
     "mypy",
     "build",

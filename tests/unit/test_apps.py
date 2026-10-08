@@ -106,6 +106,7 @@ def test_install_from_dmg_keeps_the_old_app_when_the_copy_fails(monkeypatch, tmp
     (installed / "Contents" / "old").write_text("old version")
     monkeypatch.setattr(system, "mount_image", lambda image: volume)
     monkeypatch.setattr(system, "unmount_image", lambda mounted, force=False: None)
+    monkeypatch.setattr(apps, "get", lambda name: None)  # not running
 
     def failing_copy(args):
         Path(args[-1]).mkdir()  # a partial copy
@@ -303,3 +304,133 @@ def test_uninstall_moves_name_matches_only_when_asked(tmp_path, monkeypatch):
     assert apps.uninstall("Chat", dry_run=True, include_name_matches=True) == [
         bundle, home / "Library/Caches/com.example.Chat", home / "Library/Application Support/Chat",  # the names last
     ]
+
+
+def _dmg_with_tool_installed(monkeypatch, tmp_path):
+    from macos import apps, system
+
+    volume = tmp_path / "Volume"
+    (volume / "Tool.app" / "Contents").mkdir(parents=True)
+    installed = tmp_path / "Applications" / "Tool.app"
+    (installed / "Contents").mkdir(parents=True)
+    (installed / "Contents" / "old").write_text("old version")
+    unmounted = []
+    monkeypatch.setattr(system, "mount_image", lambda image: volume)
+    monkeypatch.setattr(system, "unmount_image", lambda mounted, force=False: unmounted.append(mounted))
+    monkeypatch.setattr(apps, "_run", lambda args: Path(args[-1]).mkdir())
+    return installed, unmounted
+
+
+def test_install_from_dmg_refuses_to_replace_a_running_app(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, unmounted = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    monkeypatch.setattr(apps, "get", lambda name: apps.App(name="Tool", bundle_id=None, pid=42, path=name))
+
+    with pytest.raises(macos.MacOSError, match="Tool is running: quit it first"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", replace=True)
+    assert (installed / "Contents" / "old").read_text() == "old version"
+    assert unmounted  # the image is unmounted all the same
+
+
+def test_install_from_dmg_checks_the_copy_it_replaces_not_an_app_of_that_name(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, _ = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    asked = []
+    monkeypatch.setattr(apps, "get", lambda name: asked.append(name))
+    monkeypatch.chdir(tmp_path / "Applications")
+
+    apps.install_from_dmg(tmp_path / "Tool.dmg", destination=".", replace=True)
+    assert asked == [str(installed)]  # "Tool.app" alone would be any running app called Tool
+
+
+def test_install_from_dmg_knows_the_running_app_spelled_another_way(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, _ = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    (tmp_path / "Volume" / "Tool.app").rename(tmp_path / "Volume" / "tool.app")  # the image spells it in lower case
+    if not (installed.parent / "tool.app").exists():
+        pytest.skip("this disk tells names apart by case: the two are different apps on it")
+    # Running apps are known by the path as the disk spells it.
+    monkeypatch.setattr(apps, "get", lambda path: apps.App("Tool", None, 42, path) if path == str(installed) else None)
+
+    with pytest.raises(macos.MacOSError, match="is running: quit it first"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", replace=True)
+    assert (installed / "Contents" / "old").read_text() == "old version"
+
+
+def test_install_from_dmg_warns_when_the_old_copy_stays(monkeypatch, tmp_path):
+    from macos import apps
+
+    installed, _ = _dmg_with_tool_installed(monkeypatch, tmp_path)
+    monkeypatch.setattr(apps, "get", lambda name: None)
+    monkeypatch.setattr(apps.shutil, "rmtree", lambda path, ignore_errors=False: None)  # root-owned files: nothing goes
+
+    with pytest.warns(RuntimeWarning, match="delete .*replaced-.* yourself"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", replace=True)
+    assert not (installed / "Contents" / "old").exists()  # the new copy is in place
+
+
+def test_setting_a_default_app_reuses_one_completion_block(monkeypatch):
+    import functools
+
+    from macos import apps
+
+    made, sent = [], []
+    monkeypatch.setattr(apps._objc, "block", lambda function, *types: made.append(function) or len(made))
+    monkeypatch.setattr(apps, "_default_handler", functools.lru_cache(maxsize=None)(apps._default_handler.__wrapped__))
+    monkeypatch.setattr(apps, "_default_generation", [0])
+    monkeypatch.setattr(apps, "_default_answers", [])
+    monkeypatch.setattr(apps, "framework", lambda name: None)
+    monkeypatch.setattr(apps._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(apps._objc, "nsstring", lambda text: 1)
+    monkeypatch.setattr(apps._objc, "file_url", lambda path: 1)
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector.startswith("setDefaultApplication"):
+            sent.append(args[2])  # the block
+        return 1
+
+    monkeypatch.setattr(apps._objc, "send", send)
+    answer = {"now": True}
+
+    def run_until(done, timeout):
+        if answer["now"]:
+            made[sent[-1] - 1](None)  # macOS calls the block: no error
+        return done()
+
+    monkeypatch.setattr(apps._objc, "run_until", run_until)
+    for _ in range(3):
+        apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 5)
+    assert len(made) == 1 and sent == [1, 1, 1]  # no block per call
+
+    answer["now"] = False
+    with pytest.raises(macos.MacOSError, match="wasn't confirmed"):
+        apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 5)
+    made[0](None)  # the given-up call's late answer: retired, it answers nothing
+    assert apps._default_answers == []
+    answer["now"] = True
+    apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 5)
+    assert len(made) == 2  # a new block after the timeout only
+
+
+def test_waiting_for_another_default_app_change_counts_against_the_timeout(monkeypatch):
+    import threading
+
+    from macos import apps
+
+    sent = []
+    monkeypatch.setattr(apps, "framework", lambda name: None)
+    monkeypatch.setattr(apps._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(apps._objc, "nsstring", lambda text: 1)
+    monkeypatch.setattr(apps._objc, "send", lambda receiver, selector, *args, **kwargs: sent.append(selector) or 1)
+    monkeypatch.setattr(apps, "_default_call", threading.Lock())
+
+    apps._default_call.acquire()  # another call, waiting for the user to confirm its change
+    try:
+        with pytest.raises(macos.MacOSError, match="within 0.2 seconds"):
+            apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 0.2)
+    finally:
+        apps._default_call.release()
+    assert not any(selector.startswith("setDefaultApplication") for selector in sent)  # never asked: out of time

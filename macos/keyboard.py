@@ -182,29 +182,109 @@ def _text_input() -> ctypes.CDLL:
     return carbon
 
 
+@lru_cache(maxsize=None)
+def _us_layout() -> Dict[str, Tuple[int, bool]]:
+    layout = {char: (code, False) for char, code in _US_LAYOUT.items()}
+    layout.update({char: (_US_LAYOUT[base], True) for char, base in _US_SHIFTED.items()})
+    return layout
+
+
+# Layouts whose keys type what a US keyboard's do: away from the main thread,
+# where macOS won't hand the layout over, the US table is right for these only.
+_US_COMPATIBLE = frozenset(
+    # Not US International: its ' " ` ~ ^ are dead keys, which type nothing until the next key.
+    "com.apple.keylayout." + name for name in ("US", "ABC", "USExtended", "Australian")
+)
+
+# The same layouts by the number the preferences list enabled layouts with ("KeyboardLayout ID").
+_US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15})
+
+# The layouts read on the main thread, by input source ID: other threads use them.
+_LAYOUTS: Dict[str, Dict[str, Tuple[int, bool]]] = {}
+# The ID of the layout the main thread read last: the one in use when the preferences don't name it.
+_LAST_READ: List[str] = []
+# The physical keyboard (ANSI, ISO, JIS) each of _LAYOUTS was read for: its keys sit elsewhere on another.
+_KEYBOARD_TYPES: Dict[str, int] = {}
+
+_HITOOLBOX = "com.apple.HIToolbox"
+
+
+def _current_layout_id() -> str:
+    """
+    The input source ID of the keyboard layout in use, as saved in the preferences: readable on any thread.
+
+    Read again at every key, not cached: a key pressed right after a switch to AZERTY must use AZERTY.
+    """
+    from . import defaults
+
+    with _cf.owned(_cf.string(_HITOOLBOX)) as domain:
+        _cf.lib().CFPreferencesAppSynchronize(domain)  # see a switch made since the last read
+    current = str(defaults.read(_HITOOLBOX, "AppleCurrentKeyboardLayoutInputSourceID", default="") or "")
+    if current:
+        return current
+    # Not saved yet (an account that never switched layouts): when every layout enabled
+    # types as a US keyboard does, the one in use does too, whichever it is.
+    enabled = defaults.read(_HITOOLBOX, "AppleEnabledInputSources", default=None)
+    numbers = [
+        source.get("KeyboardLayout ID")
+        for source in (enabled if isinstance(enabled, list) else [])
+        if isinstance(source, dict) and source.get("InputSourceKind") == "Keyboard Layout"
+    ]
+    if numbers and all(number in _US_COMPATIBLE_NUMBERS for number in numbers):
+        return "com.apple.keylayout.US"
+    return ""
+
+
+def _keyboard_type() -> int:
+    """The physical keyboard (ANSI, ISO, JIS) in use: a global any thread may read, unlike the layout."""
+    return int(_text_input().LMGetKbdType())
+
+
 def _layout() -> Dict[str, Tuple[int, bool]]:
     """
     What each key of the current keyboard layout types: ``{"a": (0, False), "?": (44, True)}``.
 
-    The ``bool`` says whether it needs Shift. Falls back to a US keyboard
-    when the layout can't be read: macOS only allows it on the main thread.
+    The ``bool`` says whether it needs Shift. macOS only hands the layout
+    over on the main thread: elsewhere, the one the main thread last read
+    for the same layout serves, or the US table for a layout that matches
+    it. Any other layout raises :class:`MacOSError` there, rather than
+    pressing the wrong keys (Cmd+A would be Cmd+Q on an AZERTY keyboard).
     """
-    fallback = {char: (code, False) for char, code in _US_LAYOUT.items()}
-    fallback.update({char: (_US_LAYOUT[base], True) for char, base in _US_SHIFTED.items()})
     if threading.current_thread() is not threading.main_thread():
-        return fallback
+        current = _current_layout_id()
+        if not current and _LAST_READ:
+            current = _LAST_READ[0]  # never switched since the account was made: still the one the main thread read
+        if current in _LAYOUTS:
+            read_for = _KEYBOARD_TYPES.get(current)
+            if read_for is not None and read_for != _keyboard_type():
+                raise MacOSError(
+                    "a different kind of keyboard is in use since the main thread read the layout, and its keys "
+                    "sit elsewhere: call macos.keyboard.layout() from the main thread again"
+                )
+            return _LAYOUTS[current]
+        if current in _US_COMPATIBLE:
+            return _us_layout()
+        raise MacOSError(
+            "the keyboard layout in use ({}) can only be read on the main thread: call "
+            "macos.keyboard.layout() once from the main thread first, so other threads know it".format(current or "unknown")
+        )
     carbon = _text_input()
     cf = _cf.lib()
     source = carbon.TISCopyCurrentKeyboardLayoutInputSource()
     if not source:
-        return fallback
+        return _us_layout()
     try:
+        identifier = _source_property(source, "kTISPropertyInputSourceID")
+        if identifier:
+            _LAST_READ[:] = [identifier]
+        keyboard_type = carbon.LMGetKbdType()
+        if identifier in _LAYOUTS and _KEYBOARD_TYPES.get(identifier) == keyboard_type:
+            return _LAYOUTS[identifier]
         key = ctypes.c_void_p.in_dll(carbon, "kTISPropertyUnicodeKeyLayoutData").value
         data = carbon.TISGetInputSourceProperty(source, key)
         if not data:
-            return fallback
+            return _us_layout()
         layout = cf.CFDataGetBytePtr(data)
-        keyboard_type = carbon.LMGetKbdType()
         found: Dict[str, Tuple[int, bool]] = {}
         # Unshifted characters win: "1" is the 1 key, not Shift+something.
         for shifted, modifiers in ((False, 0), (True, 0x02)):  # 0x02: shiftKey >> 8
@@ -221,7 +301,12 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
                     char = chr(chars[0])
                     if char.isprintable() and char.strip() and char not in found:
                         found[char] = (code, shifted)
-        return found or fallback
+        if not found:
+            return _us_layout()
+        if identifier:
+            _LAYOUTS[identifier] = found
+            _KEYBOARD_TYPES[identifier] = keyboard_type
+        return found
     finally:
         _cf.release(source)
 
@@ -296,14 +381,38 @@ def press(keys: str, *, times: int = 1) -> None:
     own = _MODIFIER_FLAGS.get(code, 0)
     for _ in range(times):
         flags = 0
-        for flag, modifier in modifiers:
-            flags |= flag
-            _events.post(_key_event(modifier, True, flags))
-        _events.post(_key_event(code, True, flags | own))
-        _events.post(_key_event(code, False, flags))
-        for flag, modifier in reversed(modifiers):
-            flags &= ~flag
-            _events.post(_key_event(modifier, False, flags))
+        down: List[Tuple[int, int]] = []
+        key_down = False
+        try:
+            for flag, modifier in modifiers:
+                flags |= flag
+                # Noted first: one whose press fails half-way is released too, and its flag cleared.
+                down.append((flag, modifier))
+                _events.post(_key_event(modifier, True, flags))
+            key_down = True
+            _events.post(_key_event(code, True, flags | own))
+            _events.post(_key_event(code, False, flags))
+            key_down = False
+        except BaseException:
+            failed = True
+            raise
+        else:
+            failed = False
+        finally:
+            # Released even when a post fails halfway, or Cmd would stay down system-wide; each
+            # release is tried even when one before it fails (Ctrl-C in the pause after a post).
+            releases = [(code, flags)] if key_down else []  # down, maybe, and not up: or it would repeat
+            for flag, modifier in reversed(down):
+                flags &= ~flag
+                releases.append((modifier, flags))
+            problem: Optional[BaseException] = None
+            for key, state in releases:
+                try:
+                    _events.post(_key_event(key, False, state))
+                except BaseException as error:
+                    problem = problem or error
+            if problem is not None and not failed:
+                raise problem
 
 
 @contextmanager
@@ -388,7 +497,7 @@ def type(text: str, *, interval: float = 0.0) -> None:
     Type ``text`` into the app in front, as if typed on the keyboard.
 
     Any character works (accents, emoji...), whatever the keyboard layout.
-    New lines press Enter and tabs press Tab. ``interval`` is the pause
+    New lines (``\\n``, ``\\r\\n`` or ``\\r``) press Enter and tabs press Tab. ``interval`` is the pause
     between characters, in seconds, for apps that can't keep up. The keys
     :func:`hold` holds down don't apply: the text comes out as written. Needs
     the Accessibility permission.
@@ -398,7 +507,8 @@ def type(text: str, *, interval: float = 0.0) -> None:
     _events.require_permission()
     cg = _events.graphics()
     pieces: List[str] = []
-    for line_index, line in enumerate(text.split("\n")):
+    # Windows' and old Macs' line endings are one Enter too, not a stray character.
+    for line_index, line in enumerate(text.replace("\r\n", "\n").replace("\r", "\n").split("\n")):
         if line_index:
             pieces.append("\n")
         for tab_index, part in enumerate(line.split("\t")):
@@ -478,6 +588,7 @@ def layouts() -> List[str]:
 def layout() -> str:
     """Return the keyboard layout (input source) in use, such as ``'ABC'`` or ``'French'``. Call it from the main thread."""
     _require_main_thread("macos.keyboard.layout()")
+    _layout()  # remembered, for the threads that press keys or listen for hotkeys
     carbon = _text_input()
     with _cf.owned(carbon.TISCopyCurrentKeyboardInputSource()) as source:
         if not source:
@@ -657,7 +768,10 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
     ``break`` out of the loop, or ``timeout`` seconds pass. Needs the *Input
     Monitoring* permission. macOS hides the keys typed in password fields.
     """
-    unshifted = {code: char for char, (code, shifted) in _layout().items() if not shifted}
+    try:
+        unshifted = {code: char for char, (code, shifted) in _layout().items() if not shifted}
+    except MacOSError:  # off the main thread, on a layout not read there yet: name keys by what they type
+        unshifted = {}
     cg = _events.graphics()
 
     def convert(kind: int, event: int) -> KeyPress:

@@ -65,6 +65,23 @@ def test_a_failure_leaves_the_target_as_it_was(tmp_path):
     assert target.read_bytes() == b"old" and os.listdir(str(tmp_path)) == ["keep.txt"]
 
 
+def test_a_symbolic_link_stays_one_and_its_file_is_replaced(tmp_path):
+    (tmp_path / "data").mkdir()
+    real = tmp_path / "data" / "memo-2024.bin"
+    real.write_bytes(b"old")
+    link = tmp_path / "memo.m4a"
+    link.symlink_to(real)
+
+    with _files.replacing(link) as temporary:
+        assert temporary.name == "memo.m4a"  # the caller's name: its extension picks the format
+        assert temporary.parent.parent == real.parent  # beside the real file: a rename on its disk
+        temporary.write_bytes(b"new")
+
+    assert link.is_symlink() and os.readlink(str(link)) == str(real)
+    assert real.read_bytes() == b"new"
+    assert sorted(os.listdir(str(tmp_path / "data"))) == ["memo-2024.bin"]
+
+
 def test_write_atomically(tmp_path):
     target = tmp_path / "out.txt"
     assert _files.write_atomically(str(target), lambda name: open(name, "w").write("hi")) == target

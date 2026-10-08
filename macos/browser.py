@@ -191,7 +191,7 @@ class Tab:
 
     def activate(self) -> None:
         """Show this tab, bring its window to the front, and the browser too."""
-        _script(self.app, _ACTIVATE[_KINDS[self.app]], str(self.window), str(self.index))
+        _script(self.app, _ACTIVATE[_kind(self.app)], str(self.window), str(self.index))
 
     def close(self) -> None:
         """Close this tab."""
@@ -199,15 +199,24 @@ class Tab:
 
     def reload(self) -> None:
         """Load the page again."""
-        _script(self.app, _RELOAD[_KINDS[self.app]], str(self.window), str(self.index))
+        _script(self.app, _RELOAD[_kind(self.app)], str(self.window), str(self.index))
 
     def go(self, url: str) -> None:
         """Load ``url`` in this tab, in place of its page."""
         _script(self.app, _GO, str(self.window), str(self.index), url)
 
 
+def _kind(app: str) -> str:
+    """The AppleScript dictionary of ``app``, which must be one of :data:`BROWSERS`."""
+    if app not in _KINDS:
+        raise ValueError("{!r} isn't a browser this module can script; see macos.browser.BROWSERS".format(app))
+    return _KINDS[app]
+
+
 def _script(app: str, source: str, *args: str) -> str:
-    # The app name comes from BROWSERS, never from the caller's text: it's safe in the source.
+    # The app name is pasted into the source, so it must be one of BROWSERS: a Tab can be
+    # built by hand (from JSON, say), and its app could otherwise carry AppleScript.
+    _kind(app)
     return applescript(app, source.replace("{app}", app), *args)
 
 

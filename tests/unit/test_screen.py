@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -134,32 +135,154 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
     assert macos.screen.is_locked() is locked
 
 
+@pytest.fixture(autouse=True)
+def _no_terminal(monkeypatch):
+    """No terminal sent a Ctrl-C here, whether the tests run in one or not (CI): the tests that need one say so."""
+    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: False)
+
+
+class _FakeRecording:
+    """``subprocess.Popen`` for screencapture: ``record(args, timeout)`` plays what it does while recording."""
+
+    def __init__(self, record, stuck_finishing=False, interrupted_again=False, exit_status=0):
+        self.record = record
+        self.stuck_finishing = stuck_finishing  # after Ctrl-C, it doesn't finish the movie in time
+        self.interrupted_again = interrupted_again
+        self.exit_status = exit_status  # how it ends after Ctrl-C
+        self.made = []
+
+    def __call__(self, args, **kwargs):
+        assert not kwargs.get("start_new_session")  # in Python's group: it ends with it, never left recording
+        recording = self
+
+        class Process:
+            returncode = None
+            signals = []
+            calls = []
+
+            def communicate(self, timeout=None):
+                Process.calls.append(timeout)
+                if len(Process.calls) == 1:
+                    recording.record(args, timeout)
+                elif len(Process.calls) == 2 and recording.stuck_finishing:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                elif len(Process.calls) == 2 and recording.interrupted_again:
+                    raise KeyboardInterrupt  # Ctrl-C a second time, while it finishes
+                self.returncode = recording.exit_status if len(Process.calls) == 2 else 0
+                return None, b""
+
+            def poll(self):
+                return self.returncode
+
+            def send_signal(self, number):
+                Process.signals.append(number)
+
+            def kill(self):
+                Process.signals.append("kill")
+
+        self.made.append((list(args), Process))
+        return Process()
+
+
 def test_screen_record_command(fake_run, monkeypatch, tmp_path):
     target = tmp_path / "demo.mov"
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
-
-    def record(args, **kwargs):
-        fake_run(args, **kwargs)
-        target.write_bytes(b"movie")
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setattr(_system.subprocess, "run", record)
+    recording = _FakeRecording(lambda args, timeout: Path(args[-1]).write_bytes(b"movie"))
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
 
     assert macos.screen.record(target, 2.4, region=(0, 0, 800, 600), display=2, audio=True, clicks=True) == target
-    assert fake_run.args == ["screencapture", "-x", "-v", "-V2", "-R0,0,800,600", "-D2", "-g", "-k", str(target)]
+    args = recording.made[0][0]
+    assert args[:-1] == ["screencapture", "-x", "-v", "-V2", "-R0,0,800,600", "-D2", "-g", "-k"]
+    # Recorded beside the target, then moved over it.
+    assert Path(args[-1]).name == "demo.mov" and Path(args[-1]).parent.parent == tmp_path
+    assert target.read_bytes() == b"movie"
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
+def test_a_screen_recording_that_saves_nothing_leaves_the_old_one(fake_run, monkeypatch, tmp_path):
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", _FakeRecording(lambda args, timeout: None))
+
+    # screencapture exited 0 without writing: the old recording can't pass for the new one.
+    with pytest.raises(macos.MacOSError, match="wasn't saved"):
+        macos.screen.record(target, 1)
+    assert target.read_bytes() == b"yesterday"
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
 def test_screen_record_gives_up_on_a_stuck_screencapture(fake_run, monkeypatch, tmp_path):
-    import subprocess
+    def stuck(args, timeout):
+        assert timeout == 62  # the recording's seconds, and a minute to save it
+        raise subprocess.TimeoutExpired(args, timeout)
 
-    def stuck(args, **kwargs):
-        assert kwargs["timeout"] == 62  # the recording's seconds, and a minute to save it
-        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
-
-    monkeypatch.setattr(_system.subprocess, "run", stuck)
+    recording = _FakeRecording(stuck)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
     with pytest.raises(macos.MacOSError, match="didn't finish recording"):
         macos.screen.record(tmp_path / "clip.mov", 2)
+    assert recording.made[0][1].signals == ["kill"]
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monkeypatch, tmp_path, finished):
+    import signal
+
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+
+    def interrupted(args, timeout):
+        if finished:  # told to stop, screencapture ends the movie
+            Path(args[-1]).write_bytes(b"movie so far")
+        raise KeyboardInterrupt
+
+    recording = _FakeRecording(interrupted)
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    with pytest.raises(KeyboardInterrupt):  # the script still stops, as asked
+        macos.screen.record(target, 60)
+    process = recording.made[0][1]
+    # Asked to stop, then waited for to finish the file, never killed: subprocess.run would kill it at once.
+    assert process.signals == [signal.SIGINT] and process.calls[1] == macos.screen._FINISH_GRACE
+    assert target.read_bytes() == (b"movie so far" if finished else b"yesterday")
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
+def test_a_ctrl_c_from_the_terminal_isnt_sent_to_screencapture_twice(fake_run, monkeypatch, tmp_path):
+    def interrupted(args, timeout):
+        Path(args[-1]).write_bytes(b"movie so far")
+        raise KeyboardInterrupt
+
+    recording = _FakeRecording(interrupted)
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: True)  # it got the terminal's SIGINT too
+    with pytest.raises(KeyboardInterrupt):
+        macos.screen.record(tmp_path / "demo.mov", 60)
+    assert recording.made[0][1].signals == []  # only waited for: a second SIGINT may cut its finishing short
+
+
+@pytest.mark.parametrize(
+    "how", [{"stuck_finishing": True}, {"interrupted_again": True}, {"exit_status": 1}], ids=["slow", "twice", "failed"]
+)
+def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_run, monkeypatch, tmp_path, how):
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+
+    def interrupted(args, timeout):
+        Path(args[-1]).write_bytes(b"half a movie")
+        raise KeyboardInterrupt
+
+    recording = _FakeRecording(interrupted, **how)
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    with pytest.raises(KeyboardInterrupt):  # still the Ctrl-C
+        macos.screen.record(target, 60)
+    if "exit_status" not in how:
+        assert recording.made[0][1].signals[-1] == "kill"  # stopped for good, not left running
+    assert target.read_bytes() == b"yesterday"  # an unfinished movie is dropped
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
 def test_screen_record_needs_the_permission(fake_run, monkeypatch, tmp_path):
@@ -254,3 +377,27 @@ def test_screenshot_settings(monkeypatch, tmp_path):
         screen.set_screenshot_format("webp")
     with pytest.raises(NotADirectoryError):
         screen.set_screenshot_folder(tmp_path / "missing")
+
+
+def test_a_display_change_that_fails_is_cancelled(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def begin(pointer):
+        pointer._obj.value = 99
+        return 0
+
+    cg = SimpleNamespace(
+        CGBeginDisplayConfiguration=begin,
+        CGCancelDisplayConfiguration=lambda handle: calls.append(("cancel", handle)),
+        CGCompleteDisplayConfiguration=lambda handle, option: calls.append(("complete", handle)),
+    )
+    monkeypatch.setattr(screen, "_arrangement_api", lambda: cg)
+
+    def change(api, handle):
+        raise ValueError("no such display")
+
+    with pytest.raises(ValueError, match="no such display"):
+        screen._configure(change)
+    assert calls == [("cancel", 99)]

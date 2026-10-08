@@ -21,7 +21,8 @@ def test_network_offline(commands):
     assert macos.network.ip() is None
 
 
-def test_wifi_power(commands):
+def test_wifi_power(commands, monkeypatch):
+    monkeypatch.setattr(macos.network, "_corewlan_device", lambda: None)  # networksetup's list, then
     commands.answers["-listallhardwareports"] = (
         0,
         "Hardware Port: Ethernet\nDevice: en1\n\nHardware Port: Wi-Fi\nDevice: en0\n",
@@ -34,11 +35,22 @@ def test_wifi_power(commands):
     assert commands.calls[-1] == ["networksetup", "-setairportpower", "en0", "on"]
 
 
-def test_no_wifi(commands):
+def test_no_wifi(commands, monkeypatch):
+    monkeypatch.setattr(macos.network, "_corewlan_device", lambda: None)
     commands.answers["-listallhardwareports"] = (0, "Hardware Port: Ethernet\nDevice: en1\n", "")
 
     with pytest.raises(macos.NotSupportedError, match="no Wi-Fi"):
         macos.network.wifi_power()
+
+
+def test_wifi_device_is_found_on_a_mac_in_another_language(commands, monkeypatch):
+    # networksetup names the port "WLAN" on a German Mac: CoreWLAN's answer doesn't depend on it.
+    monkeypatch.setattr(macos.network, "_corewlan_device", lambda: "en0")
+    commands.answers["-listallhardwareports"] = (0, "Hardware Port: WLAN\nDevice: en0\n", "")
+    commands.answers["-getairportpower"] = (0, "Wi-Fi Power (en0): On\n", "")
+
+    assert macos.network.wifi_power() is True
+    assert ["networksetup", "-listallhardwareports"] not in commands.calls
 
 
 _VPN_LIST = """Available network connection services in the current set (*=enabled):
@@ -170,3 +182,18 @@ def test_vpn_commands_have_a_timeout(fake_run, monkeypatch):
     monkeypatch.setattr(_system.subprocess, "run", run)
     macos.network.connect_vpn("Office", wait=False)
     assert seen == [("list", 30.0), ("start", 30.0)]
+
+
+def test_system_configuration_is_declared_once_for_network_and_events():
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("loads SystemConfiguration")
+    from macos import _sc, _system
+
+    sc = _sc.lib()
+    assert sc is _system.framework("SystemConfiguration")  # one handle, its signatures set once
+    declared = sc.SCDynamicStoreCreate.argtypes
+    macos.network.dns_servers()  # network used to declare the callback as a plain pointer, events as a CFUNCTYPE
+    assert macos.events._sc.lib() is sc
+    assert sc.SCDynamicStoreCreate.argtypes is declared

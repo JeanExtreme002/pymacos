@@ -6,8 +6,11 @@ commands and loading system frameworks.
 """
 
 import ctypes
+import os
+import signal
 import subprocess
 import sys
+import threading
 import warnings
 from contextlib import contextmanager
 from functools import lru_cache
@@ -71,13 +74,18 @@ def run(
     Text mode turns ``\r\n`` and ``\r`` into ``\n``; ``exact_newlines=True``
     keeps them as the command wrote them, for output that holds file names
     (which may contain any of them).
+
+    Output that isn't valid UTF-8 never raises: in text mode the bad bytes
+    become U+FFFD, and with ``exact_newlines=True`` they are kept the way
+    :func:`os.fsdecode` keeps them (surrogate escapes), so a file name read
+    back still opens the same file.
     """
     require_macos()
 
     if exact_newlines:
         options: Dict[str, Any] = {"input": None if input is None else input.encode("utf-8")}
     else:
-        options = {"input": input, "text": True, "encoding": "utf-8"}
+        options = {"input": input, "text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         result = subprocess.run(list(args), capture_output=True, timeout=timeout, **options)
     except FileNotFoundError:
@@ -87,12 +95,79 @@ def run(
 
     stdout, stderr = result.stdout, result.stderr
     if isinstance(stdout, bytes):
-        stdout = stdout.decode("utf-8")
+        stdout = stdout.decode("utf-8", "surrogateescape")
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
     if result.returncode != 0:
         raise CommandError(args, result.returncode, stderr)
     return stdout
+
+
+def _terminal_interrupted_us() -> bool:
+    """
+    Whether a Ctrl-C would have come from this process's terminal, to its whole foreground process group.
+
+    True when this process group is the terminal's foreground one: the terminal sent SIGINT to every
+    process in it, the commands this one started included. False with no terminal (a service, an IDE
+    without one) or in the background, where an interrupt can only have come from elsewhere.
+    """
+    try:
+        terminal = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+    except OSError:
+        return False
+    try:
+        return os.tcgetpgrp(terminal) == os.getpgrp()
+    except OSError:
+        return False
+    finally:
+        os.close(terminal)
+
+
+class UnfinishedInterrupt(KeyboardInterrupt):
+    """Ctrl-C, after which the command didn't finish in its grace time and was killed: what it wrote is incomplete."""
+
+
+def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None:
+    """
+    Run a command that saves its work when told to stop (``screencapture -v``), letting it finish on Ctrl-C.
+
+    ``subprocess.run`` kills the command a quarter of a second after Ctrl-C,
+    which cuts a movie being written short. Here it's asked to stop, once
+    (SIGINT), and given ``grace`` seconds to finish its file before
+    ``KeyboardInterrupt`` goes on. When it doesn't finish in time, it is
+    killed and :class:`UnfinishedInterrupt` (a ``KeyboardInterrupt``) says its
+    file is incomplete. Otherwise it is as :func:`run`, minus the output.
+
+    It stays in Python's process group, not a session of its own, so what
+    signals the whole group (closing the terminal, for one) ends it too, rather
+    than leave the screen recording with nobody to stop it. A signal to Python
+    alone (``kill`` of its pid) still leaves it to run until its own end.
+    """
+    require_macos()
+    try:
+        process = subprocess.Popen(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+    try:
+        _, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise CommandTimeoutError(args, timeout) from None
+    except KeyboardInterrupt as interrupt:
+        if process.poll() is None and not _terminal_interrupted_us():
+            process.send_signal(signal.SIGINT)  # a Ctrl-C the terminal sent reached it already: never twice
+        try:
+            process.communicate(timeout=grace)
+        except BaseException:  # out of time, or a second Ctrl-C: it's stopped for good, its file unfinished
+            process.kill()
+            process.communicate()
+            raise UnfinishedInterrupt(*interrupt.args) from interrupt
+        if process.returncode != 0:
+            raise UnfinishedInterrupt(*interrupt.args) from interrupt  # it ended, but not cleanly: can't trust the file
+        raise
+    if process.returncode != 0:
+        raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
 
 
 def applescript(app: str, script: str, *args: str, input: Optional[str] = None) -> str:
@@ -114,6 +189,59 @@ def applescript(app: str, script: str, *args: str, input: Optional[str] = None) 
                 "{} in System Settings › Privacy & Security › Automation".format(app)
             ) from None
         raise
+
+
+def add_note(error: BaseException, message: str) -> None:
+    """
+    Tell what else went wrong while handling ``error``: as a note on it (Python 3.11+), else as a warning.
+
+    For clean-ups that fail after the error that started them, which stays the one raised.
+    """
+    if hasattr(error, "add_note"):
+        error.add_note(message)
+    else:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def killall(process: str) -> None:
+    """
+    Quit every process named ``process``, for macOS to start it again with the settings just written.
+
+    One that isn't running is fine: it reads them when it starts.
+    """
+    try:
+        run(["killall", process], timeout=10)  # killall only signals: never long
+    except CommandError as error:
+        # 1 also means a process it found couldn't be signalled ("Operation not permitted"): only "no
+        # matching processes" (in English: killall isn't localized) is a process that isn't running.
+        if error.returncode != 1 or "No matching processes" not in error.stderr:
+            raise
+
+
+LAUNCHCTL_TIMEOUT = 60.0
+"""Seconds for a ``launchctl`` call: it answers at once, unless launchd is wedged."""
+PROFILER_TIMEOUT = 60.0
+"""Seconds for ``system_profiler``: it takes a moment, and has hung on some Macs."""
+
+
+def launchd_user_domain() -> str:
+    """The launchd domain of this user's session, ``gui/<uid>``, where launch agents run."""
+    import os
+
+    return "gui/{}".format(os.getuid())
+
+
+def launchd_disabled(domain: str) -> Dict[str, bool]:
+    """launchctl's own on/off switches in ``domain``: label -> disabled; ``{}`` when it won't say."""
+    import re
+
+    try:
+        output = run(["launchctl", "print-disabled", domain], timeout=LAUNCHCTL_TIMEOUT)
+    except CommandError:
+        return {}
+    # Written as words or as booleans, depending on the macOS version: "disabled" and true mean off.
+    found = re.findall(r'"([^"]+)"\s*=>\s*(enabled|disabled|true|false)', output)
+    return {label: state in ("disabled", "true") for label, state in found}
 
 
 _ACTIVATE_SETTINGS = "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings"
@@ -160,28 +288,45 @@ def private_framework(name: str) -> ctypes.CDLL:
 
 
 # Restarts (the Dock, Finder...) put off until a batch of changes ends, by name.
-_deferred: Optional[Dict[str, Callable[[], None]]] = None
+# Per thread: a batch on one thread doesn't hold back another thread's restarts.
+_batch = threading.local()
 
 
 def restart_later(name: str, restart: Callable[[], None]) -> bool:
     """Inside :func:`batched_restarts`, note ``restart`` to run once at its end and return ``True``; else ``False``."""
-    if _deferred is None:
+    deferred: Optional[Dict[str, Callable[[], None]]] = getattr(_batch, "deferred", None)
+    if deferred is None:
         return False
-    _deferred[name] = restart
+    deferred[name] = restart
     return True
 
 
 @contextmanager
 def batched_restarts() -> Iterator[None]:
     """Run each restart asked for in the block once, when it ends (even if it fails), instead of after every change."""
-    global _deferred
-    if _deferred is not None:
+    if getattr(_batch, "deferred", None) is not None:
         yield  # already batching
         return
-    _deferred = {}
+    _batch.deferred = {}
+    failed: Optional[BaseException] = None
     try:
         yield
+    except BaseException as error:
+        failed = error
+        raise
     finally:
-        pending, _deferred = _deferred, None
-        for restart in pending.values():
-            restart()
+        pending, _batch.deferred = _batch.deferred, None
+        # Every restart runs, even after one fails, and never hides the error of the block itself.
+        problems = []
+        for name, restart in pending.items():
+            try:
+                restart()
+            except Exception as problem:
+                problems.append((name, problem))
+        if problems:
+            first = failed if failed is not None else problems[0][1]
+            for name, reason in problems:
+                if reason is not first:
+                    add_note(first, "restarting {} failed too: {}".format(name, reason))
+            if failed is None:
+                raise first

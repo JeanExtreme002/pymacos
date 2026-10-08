@@ -93,7 +93,8 @@ def _place(placemark: int) -> Place:
 
 
 Answer = Tuple[List[Place], Optional[Tuple[int, str]]]
-_answers: List[Answer] = []
+# An exception, when the answer couldn't be read: the caller gets it, not a timeout.
+_answers: List[Union[Answer, Exception]] = []
 
 
 def _answer(found: List[Place], failure: Optional[Tuple[int, str]]) -> None:
@@ -108,12 +109,18 @@ def _handler() -> int:
     """The completion block, ``void (^)(NSArray<CLPlacemark *> *, NSError *)``, made once: blocks live for good."""
 
     def done(placemarks: Optional[int], error: Optional[int]) -> None:
-        # Read everything now: the placemarks go away with the block's call.
-        found = [_place(placemark) for placemark in _objc.nsarray(placemarks)] if placemarks else []
-        failure = None
-        if error:
-            code = int(_objc.send(error, "code", restype=ctypes.c_long))
-            failure = (code, _objc.pystring(_objc.send(error, "localizedDescription")) or "")
+        try:
+            failure = None
+            if error:
+                code = int(_objc.send(error, "code", restype=ctypes.c_long))
+                if code == _CANCELED:
+                    return  # a canceled request's answer, which nobody waits for: not even read
+                failure = (code, _objc.pystring(_objc.send(error, "localizedDescription")) or "")
+            # Read everything now: the placemarks go away with the block's call.
+            found = [_place(placemark) for placemark in _objc.nsarray(placemarks)] if placemarks else []
+        except Exception as problem:  # an exception must not cross back into Objective-C: _ask raises it
+            _answers.append(problem)
+            return
         _answer(found, failure)
 
     return _objc.block(done, b"v@?@@", ctypes.c_void_p, ctypes.c_void_p)
@@ -141,7 +148,10 @@ def _ask(selector: str, argument: int, timeout: float) -> List[Place]:
                 raise TimeoutError("Apple's geocoding service didn't answer within {} seconds".format(timeout))
         finally:
             _objc.send(geocoder, "release", restype=None)
-        found, failure = _answers.pop()
+        answer = _answers.pop()
+    if isinstance(answer, Exception):
+        raise answer
+    found, failure = answer
     return _result(found, failure)
 
 

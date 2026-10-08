@@ -132,6 +132,69 @@ def test_a_metadata_copy_takes_the_format_of_its_extension(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_metadata_that_would_lose_frames_or_tags_is_refused(tmp_path):
+    from macos import _cf
+    from tests.helpers import rgb_png
+
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(8, 8, lambda x, y: (200, 30, 30)))
+    io = macos.image._io()
+    with _cf.owned(macos.image._source(frame)) as image_source:
+        macos.image._write(
+            tmp_path / "anim.gif",
+            "com.compuserve.gif",
+            lambda d: [io.CGImageDestinationAddImageFromSource(d, image_source, 0, None) for _ in range(2)],
+            2,
+        )
+    before = (tmp_path / "anim.gif").read_bytes()
+    # Saved again it would keep one frame, and GIF has nowhere for a location: nothing is written.
+    with pytest.raises(ValueError):
+        macos.image.set_location(tmp_path / "anim.gif", 10, 20)
+    assert (tmp_path / "anim.gif").read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["anim.gif", "frame.png"]
+    # A copy in a one-frame format keeps the first frame, as convert() does: nothing to refuse.
+    still = macos.image.set_location(tmp_path / "anim.gif", 10, 20, output=tmp_path / "still.jpg")
+    assert macos.image.metadata(still)["{GPS}"]["Latitude"] == pytest.approx(10)
+
+
+def test_only_metadata_a_format_drops_entirely_counts_as_lost():
+    changes = {"{Exif}": {"DateTimeOriginal": "2024:01:02 03:04:05", "OffsetTimeOriginal": "+02:00"}, "{GPS}": {"Latitude": 10.0}}
+    # HEIC may rewrite the offset its own way: the date was still written.
+    written = {"{Exif}": {"DateTimeOriginal": "2024:01:02 03:04:05", "OffsetTimeOriginal": "+0200"}, "{GPS}": {"Latitude": 10.0}}
+    assert macos.image._dropped(written, changes) == []
+    assert macos.image._dropped({"{Exif}": written["{Exif}"]}, changes) == ["{GPS}"]  # GIF: nowhere for a location
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_a_location_a_format_cant_hold_is_refused(tmp_path, monkeypatch):
+    from tests.helpers import rgb_png
+
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(8, 8, lambda x, y: (200, 30, 30)))
+    still = macos.image.convert(frame, tmp_path / "still.png")
+    before = still.read_bytes()
+    # A format with nowhere for a location: what's written back holds no {GPS} at all. (Which formats
+    # those are changes with macOS: GIF dropped it on some versions and keeps it on others.)
+    monkeypatch.setattr(macos.image, "metadata", lambda path: {})
+    with pytest.raises(ValueError, match=r"\{GPS\}"):
+        macos.image.set_location(still, 10, 20)
+    assert still.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["frame.png", "still.png"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_a_precise_location_isnt_refused_for_the_rounding_exif_does(tmp_path):
+    from tests.helpers import rgb_png
+
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(8, 8, lambda x, y: (200, 30, 30)))
+    photo = macos.image.convert(frame, tmp_path / "photo.jpg")
+    # EXIF keeps about 5 decimals: 48.858370123 reads back 48.85837.
+    macos.image.set_location(photo, 48.858370123, 2.294481789)
+    assert macos.image.metadata(photo)["{GPS}"]["Latitude"] == pytest.approx(48.85837, abs=1e-5)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
 def test_written_images_get_the_usual_permissions(tmp_path):
     import os
     import stat

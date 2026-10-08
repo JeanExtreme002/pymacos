@@ -136,3 +136,14 @@ def test_browser_open_refuses_a_url_that_looks_like_an_option(browsers):
     with pytest.raises(ValueError, match="must not start with '-'"):
         macos.browser.open("-g")
     assert browsers.calls == []
+
+
+def test_browser_tab_actions_refuse_an_app_that_isnt_a_browser(browsers):
+    # The app name goes into the script's source: a Tab built by hand must not smuggle AppleScript in.
+    tab = macos.browser.Tab(
+        title="x", url="https://example.com", app='Safari" to do shell script "touch /tmp/pwned', window=1, index=1, active=True
+    )
+    for action in (tab.activate, tab.close, tab.reload, lambda: tab.go("https://example.com")):
+        with pytest.raises(ValueError, match="isn't a browser"):
+            action()
+    assert browsers.calls == []  # nothing ran

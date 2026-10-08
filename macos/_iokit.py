@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 """
-IOKit over ctypes: the registry, the power sources and the power assertions,
-with every signature the package uses declared once.
+IOKit over ctypes: the registry and its notifications, the power sources and
+the power assertions, with every signature the package uses declared once.
 
 ``framework("IOKit")`` is one cached handle, so modules that declared the same
 functions each on their own were setting the very same ``argtypes`` again,
@@ -19,6 +19,11 @@ MAIN_PORT = 0
 """``kIOMainPortDefault``: the port every IOKit lookup goes through."""
 SUCCESS = 0
 """``kIOReturnSuccess``."""
+
+POWER_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+"""``IOPowerSourceCallbackType``: ``(context)``."""
+MATCHED_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32)
+"""``IOServiceMatchingCallback``: ``(refcon, iterator)``."""
 
 
 @lru_cache(maxsize=None)
@@ -44,6 +49,17 @@ def lib() -> ctypes.CDLL:
         "IOPMAssertionCreateWithName": ((ref, ctypes.c_uint32, ref, ctypes.POINTER(ctypes.c_uint32)), ctypes.c_int),
         "IOPMAssertionRelease": ((ctypes.c_uint32,), ctypes.c_int),
         "IOPMCopyAssertionsByProcess": ((ctypes.POINTER(ref),), ctypes.c_int),
+        "IOPSGetProvidingPowerSourceType": ((ref,), ref),
+        "IOPSNotificationCreateRunLoopSource": ((POWER_CALLBACK, ctypes.c_void_p), ref),
+        # Notifications: services appearing and going (USB devices...).
+        "IONotificationPortCreate": ((ctypes.c_uint32,), ctypes.c_void_p),
+        "IONotificationPortGetRunLoopSource": ((ctypes.c_void_p,), ref),
+        "IONotificationPortDestroy": ((ctypes.c_void_p,), None),
+        "IOServiceAddMatchingNotification": (
+            (ctypes.c_void_p, ctypes.c_char_p, ref, MATCHED_CALLBACK, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)),
+            ctypes.c_int,
+        ),
+        "IORegistryEntryGetName": ((service, ctypes.c_char_p), ctypes.c_int),
     }
     for name, (argtypes, restype) in signatures.items():
         function = getattr(io, name)

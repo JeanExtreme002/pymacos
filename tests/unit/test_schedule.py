@@ -345,3 +345,58 @@ def test_schedule_add_keeps_a_replaced_paused_job_paused_when_bootstrap_fails(fa
 
     assert _plist(home, "backup")["StartInterval"] == 3600
     assert calls[-1] == ["launchctl", "disable", "gui/501/pymacos.backup"]
+
+
+def test_schedule_add_says_when_the_replaced_job_could_not_be_put_back(fake_run, home, monkeypatch):
+    import subprocess
+    import warnings
+
+    from macos import _system
+
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+
+    def launchctl(args, **kwargs):  # every bootstrap fails: the new job's, and the old one's put back
+        if args[1] == "bootstrap":
+            return subprocess.CompletedProcess(args, 5, "", "Bootstrap failed: 5: Input/output error")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", launchctl)
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError) as caught:
+            macos.schedule.add("backup", home / "backup.py", every=60)
+    told = getattr(caught.value, "__notes__", []) + [str(warning.message) for warning in warned]
+    assert any("'backup' it replaced couldn't be put back" in text for text in told)
+
+
+def test_schedule_jobs_skip_a_plist_edited_into_nonsense(fake_run, home):
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    agents = home / "Library" / "LaunchAgents"
+    (agents / "pymacos.list.plist").write_bytes(plistlib.dumps(["not", "a", "job"]))
+    (agents / "pymacos.days.plist").write_bytes(
+        plistlib.dumps({"Label": "pymacos.days", "StartCalendarInterval": [{"Hour": "nine"}], "ProgramArguments": "x"})
+    )
+    (agents / "pymacos.odd.plist").write_bytes(
+        plistlib.dumps({"Label": "pymacos.odd", "StartCalendarInterval": ["09:00"], "WatchPaths": "/tmp"})
+    )
+    (agents / "pymacos.logs.plist").write_bytes(plistlib.dumps({"Label": "pymacos.logs", "StandardOutPath": ["a", "b"]}))
+    infinite = {"Label": "pymacos.forever", "StartCalendarInterval": {"Hour": float("inf")}}
+    (agents / "pymacos.forever.plist").write_bytes(plistlib.dumps(infinite))
+
+    found = {job.name: job for job in macos.schedule.jobs()}
+    # The list, the day that isn't a number, the infinite hour and the log list are skipped.
+    assert set(found) == {"backup", "odd"}
+    assert found["odd"].at == () and found["odd"].when_changed == () and found["odd"].script == Path()
+
+
+def test_schedule_keeps_only_absolute_folders_of_path(fake_run, home, monkeypatch):
+    monkeypatch.setenv("PATH", os.pathsep.join(["/opt/homebrew/bin", ".", "", "bin", "/usr/bin", "/opt/homebrew/bin"]))
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert _plist(home, "backup")["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/bin"
+
+
+def test_schedule_gives_launchctl_a_time_limit(fake_run, home):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    assert all(call.get("timeout") for call in fake_run.calls if call["args"][0] == "launchctl")

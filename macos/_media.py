@@ -52,14 +52,14 @@ def load() -> None:
     framework("CoreMedia")
 
 
-def asset(path: Path) -> int:
-    """An autoreleased ``AVURLAsset`` for a media file. Call inside an autorelease pool."""
+def asset(path: Path, kind: str = "video or sound") -> int:
+    """An autoreleased ``AVURLAsset`` for a media file, ``kind`` naming it in the error. Call inside an autorelease pool."""
     load()
     found = _objc.send(
         _objc.cls("AVURLAsset"), "URLAssetWithURL:options:", _objc.file_url(path), None, argtypes=(_objc.id, _objc.id)
     )
     if not found or not _objc.send(found, "isPlayable", restype=_objc.BOOL):
-        raise ValueError("{} is not a video or sound macOS can play".format(path))
+        raise ValueError("{} is not a {} macOS can play".format(path, kind))
     return found
 
 
