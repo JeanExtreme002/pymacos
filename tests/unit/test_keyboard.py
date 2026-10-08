@@ -256,6 +256,26 @@ def test_ctrl_c_between_a_key_down_and_up_lets_the_key_up(fake_events, monkeypat
     assert posted == [(55, True), (8, True), (8, False), (55, False)]  # C doesn't stay down, nor Cmd
 
 
+def test_ctrl_c_while_one_modifier_is_let_up_still_lets_the_others_up(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+    interrupted = []
+
+    def post(event):
+        fields = fake_events.events[event]
+        posted.append((fields["code"], fields["down"]))
+        if fields["code"] == 56 and not fields["down"] and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt  # in the pause after Shift went up
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(KeyboardInterrupt):
+        macos.keyboard.press("cmd+shift+c")
+
+    assert posted == [(55, True), (56, True), (8, True), (8, False), (56, False), (55, False)]  # Cmd up too
+
+
 def test_type_presses_enter_once_for_each_line_ending(fake_events):
     macos.keyboard.type("a\r\nb\rc\nd")
 

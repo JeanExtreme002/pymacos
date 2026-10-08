@@ -872,17 +872,25 @@ def record(
         args.append("-k")
     # Into a new file beside it, moved over the output once saved, as screenshots are: a
     # recording already there can't pass for the new one, and stays when this one fails.
+    interrupted: List[BaseException] = []
     with _files.replacing(target) as staged:
         try:
             _run([*args, str(staged)], timeout=max(1, round(seconds)) + 60)  # screencapture has hung on some Macs, VMs among them
         except CommandTimeoutError:
             raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
+        except KeyboardInterrupt as error:
+            # Ctrl-C reaches screencapture too, which ends the movie there: kept, then Ctrl-C goes on.
+            interrupted.append(error)
         try:
             written = staged.stat().st_size
         except OSError:
             written = 0
         if not written:
+            if interrupted:
+                raise interrupted[0]  # nothing saved yet: the old file stays, and so does the Ctrl-C
             raise MacOSError("the screen recording wasn't saved")
+    if interrupted:
+        raise interrupted[0]
     return target
 
 

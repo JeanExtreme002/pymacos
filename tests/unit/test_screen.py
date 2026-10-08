@@ -179,6 +179,24 @@ def test_screen_record_gives_up_on_a_stuck_screencapture(fake_run, monkeypatch, 
         macos.screen.record(tmp_path / "clip.mov", 2)
 
 
+@pytest.mark.parametrize("finished", [True, False])
+def test_ctrl_c_keeps_the_movie_screencapture_finished(fake_run, monkeypatch, tmp_path, finished):
+    target = tmp_path / "demo.mov"
+    target.write_bytes(b"yesterday")
+
+    def record(args, **kwargs):
+        if finished:  # Ctrl-C reaches screencapture as well, which ends the movie
+            Path(args[-1]).write_bytes(b"movie so far")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(_system.subprocess, "run", record)
+    with pytest.raises(KeyboardInterrupt):  # the script still stops, as asked
+        macos.screen.record(target, 60)
+    assert target.read_bytes() == (b"movie so far" if finished else b"yesterday")
+    assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
+
+
 def test_screen_record_needs_the_permission(fake_run, monkeypatch, tmp_path):
     monkeypatch.setattr(macos.screen, "has_permission", lambda: False)
 

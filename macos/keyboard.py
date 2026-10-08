@@ -383,14 +383,25 @@ def press(keys: str, *, times: int = 1) -> None:
             _events.post(_key_event(code, False, flags))
             key_down = False
         except BaseException:
-            if key_down:  # down, maybe, and not up (Ctrl-C mid-post): or the key would repeat system-wide
-                _events.post(_key_event(code, False, flags))
+            failed = True
             raise
+        else:
+            failed = False
         finally:
-            # Released even when a post fails halfway, or Cmd would stay down system-wide.
+            # Released even when a post fails halfway, or Cmd would stay down system-wide; each
+            # release is tried even when one before it fails (Ctrl-C in the pause after a post).
+            releases = [(code, flags)] if key_down else []  # down, maybe, and not up: or it would repeat
             for flag, modifier in reversed(down):
                 flags &= ~flag
-                _events.post(_key_event(modifier, False, flags))
+                releases.append((modifier, flags))
+            problem: Optional[BaseException] = None
+            for key, state in releases:
+                try:
+                    _events.post(_key_event(key, False, state))
+                except BaseException as error:
+                    problem = problem or error
+            if problem is not None and not failed:
+                raise problem
 
 
 @contextmanager

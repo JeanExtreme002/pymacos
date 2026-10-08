@@ -455,19 +455,26 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
             raise MacOSError("the microphone could not start recording")
         # Not recordForDuration: its stop is a run loop timer, which a
         # script never turns. Stop it ourselves, even on Ctrl-C.
+        heard = 0.0
         try:
             time.sleep(seconds)
         except KeyboardInterrupt as error:
             interrupted.append(error)  # stopped on purpose: what was recorded is kept, then Ctrl-C goes on
+            heard = _recorded_seconds(recorder)
         finally:
             _objc.send(recorder, "stop", restype=None)
-        if not temporary.exists():
+        if not temporary.exists() or (interrupted and heard <= 0):
             if interrupted:
                 raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
             raise MacOSError("the recording wasn't saved")
     if interrupted:
         raise interrupted[0]
     return target
+
+
+def _recorded_seconds(recorder: int) -> float:
+    """How long a recorder still recording has recorded: 0 when it has no sound yet, only the file's header."""
+    return float(_objc.send(recorder, "currentTime", restype=ctypes.c_double) or 0)
 
 
 def input_level(seconds: float = 0.3) -> float:
@@ -1180,6 +1187,7 @@ def record_until_silence(
         if not _objc.send(recorder, "record", restype=_objc.BOOL):
             raise MacOSError("the microphone could not start recording")
         interrupted: List[BaseException] = []
+        heard = 0.0
         try:
             started = time.monotonic()
             heard_at: Optional[float] = None
@@ -1198,9 +1206,10 @@ def record_until_silence(
                     break
         except KeyboardInterrupt as error:
             interrupted.append(error)  # stopped on purpose, as in record(): what was recorded is kept
+            heard = _recorded_seconds(recorder)
         finally:
             _objc.send(recorder, "stop", restype=None)
-        if not temporary.exists():
+        if not temporary.exists() or (interrupted and heard <= 0):
             if interrupted:
                 raise interrupted[0]  # stopped before anything was saved: the Ctrl-C, not a failure of ours
             raise MacOSError("the recording wasn't saved")

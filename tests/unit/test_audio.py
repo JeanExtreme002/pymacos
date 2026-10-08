@@ -315,6 +315,33 @@ def test_ctrl_c_before_anything_was_saved_stays_a_ctrl_c(monkeypatch, tmp_path, 
     assert target.read_bytes() == b"yesterday"
 
 
+@pytest.mark.parametrize("record", ["record", "record_until_silence"])
+def test_ctrl_c_before_any_sound_keeps_the_old_file(monkeypatch, tmp_path, record):
+    from contextlib import nullcontext
+
+    from macos import _capture
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    def send(receiver, selector, *args, **kwargs):
+        return 0.0 if selector == "currentTime" else True  # prepared, but no sound captured yet
+
+    target = tmp_path / "memo.m4a"
+    target.write_bytes(b"yesterday")
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    # prepareToRecord already wrote the file's header.
+    monkeypatch.setattr(macos.audio, "_recorder", lambda path, channels, metering=False: path.write_bytes(b"header") or 1)
+    monkeypatch.setattr(macos.audio._objc, "send", send)
+    monkeypatch.setattr(macos.audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(macos.audio.time, "sleep", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        getattr(macos.audio, record)(target, 60)
+    assert target.read_bytes() == b"yesterday"  # not replaced by an empty recording
+    assert [path.name for path in tmp_path.iterdir()] == ["memo.m4a"]
+
+
 def test_audio_argument_checks(tmp_path):
     with pytest.raises(ValueError, match="0.0 to 1.0"):
         macos.audio.set_input_volume(1.5)
