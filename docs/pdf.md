@@ -60,8 +60,9 @@ macos.pdf.watermark("contract.pdf", "DRAFT", "contract-draft.pdf")
 macos.pdf.watermark("id.pdf", "Only for Acme Inc.", "id-acme.pdf", color="#d00000", opacity=0.3)
 ```
 
-The text is sized to fit each page. The pages keep their look and their text,
-but not their links or form fields.
+The text is sized to fit each page. The pages keep their look and their text;
+filled form fields, notes and stamps are redrawn as they appear (so they can't
+be edited any more), and links go.
 
 ## Making PDFs smaller
 
@@ -131,8 +132,9 @@ macos.pdf.text("scan-searchable.pdf")   # the scan's text
 
 The pages look the same, and their text can be selected, copied and searched,
 in Preview and Spotlight too. Pages that already have text aren't read again,
-unless `redo=True`. Every page is redrawn into the new PDF, so links and form
-fields aren't kept. `languages` (`["fr-FR", "en-US"]`) helps Vision with
+unless `redo=True`. Every page is redrawn into the new PDF: filled form fields,
+notes and stamps stay as they look but can't be edited any more, and links go.
+`languages` (`["fr-FR", "en-US"]`) helps Vision with
 accents and words. To only read a page, render it and use OCR:
 
 ```python

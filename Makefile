@@ -31,7 +31,7 @@ help:
 	@echo "  $(YELLOW)test$(NC)             - Run the unit tests (safe: nothing on this Mac changes)"
 	@echo "  $(YELLOW)test-live$(NC)        - Run the live tests too: they use the clipboard, volume, dialogs... of this Mac"
 	@echo "  $(YELLOW)test-unit$(NC)        - Same as test"
-	@echo "  $(YELLOW)test-coverage$(NC)    - Run all tests with a coverage report"
+	@echo "  $(YELLOW)test-coverage$(NC)    - Run the unit tests with a coverage report (what CI gates on)"
 	@echo "  $(YELLOW)lint$(NC)             - Run the linter (flake8)"
 	@echo "  $(YELLOW)type-check$(NC)       - Run the type checker (mypy)"
 	@echo "  $(YELLOW)check$(NC)            - Run lint, type-check and test"
@@ -89,11 +89,12 @@ test-live:
 	@echo "$(GREEN)Running all tests, live ones included...$(NC)"
 	$(PYTHON) -m pytest $(TEST_DIR) -v -rs
 
-# Run tests with coverage
+# The unit tests with coverage: the figure CI gates on (the live tests'
+# coverage depends on the Mac they run on)
 .PHONY: test-coverage
 test-coverage:
-	@echo "$(GREEN)Running tests with coverage...$(NC)"
-	$(PYTHON) -m pytest $(TEST_DIR) --cov=$(PACKAGE_NAME) --cov-report=html --cov-report=term
+	@echo "$(GREEN)Running unit tests with coverage...$(NC)"
+	$(PYTHON) -m pytest $(TEST_DIR) -m "not live" --cov=$(PACKAGE_NAME) --cov-report=html --cov-report=term
 	@echo "$(YELLOW)HTML report available at htmlcov/index.html$(NC)"
 
 # Run linter

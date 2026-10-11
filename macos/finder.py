@@ -20,11 +20,11 @@ tags show up in Finder's sidebar and in Spotlight.
 """
 
 import collections
-import subprocess
 import ctypes
 import fnmatch
 import os
 import stat
+import subprocess
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,7 +34,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
 from ._system import applescript, framework, require_macos, restart_process, run as _run
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = [
     "reveal",
@@ -1273,8 +1273,8 @@ def largest(
     disk), the whole folder is walked file by file.
 
     Walking a big folder, a whole disk or a network share, can take very
-    long: past ``timeout`` seconds of it, :class:`TimeoutError` is raised
-    rather than an answer missing files. ``None`` walks for as long as it takes.
+    long: past ``timeout`` seconds of it, :class:`~macos.WaitTimeoutError` (a
+    ``TimeoutError``) is raised rather than an answer missing files. ``None`` walks for as long as it takes.
     """
     if count < 1:
         raise ValueError("count must be 1 or more, not {}".format(count))
@@ -1290,7 +1290,7 @@ def largest(
     def walk(top: Path) -> None:
         for current, _, files in os.walk(top):
             if deadline is not None and time.monotonic() > deadline:
-                raise TimeoutError(
+                raise WaitTimeoutError(
                     "looking through {} file by file took more than {:g} seconds (Spotlight hasn't indexed it); "
                     "pass a longer timeout, or None".format(top, timeout or 0)
                 )

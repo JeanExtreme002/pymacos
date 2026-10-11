@@ -6,11 +6,11 @@ commands and loading system frameworks.
 """
 
 import ctypes
+import functools
 import os
 import signal
 import subprocess
 import sys
-import functools
 import threading
 import warnings
 from contextlib import contextmanager

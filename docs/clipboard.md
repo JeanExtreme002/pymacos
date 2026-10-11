@@ -77,8 +77,8 @@ macos.clipboard.paste_files()   # [PosixPath('/Users/alice/report.pdf'), ...]
 
 {func}`~macos.clipboard.wait_for_change` blocks until something new is copied,
 and returns it as text (`None` if it isn't text). Clearing the clipboard doesn't
-count as a copy. With `timeout`, it raises `TimeoutError` if nothing is copied
-in time:
+count as a copy. With `timeout`, it raises {class}`~macos.WaitTimeoutError` (a
+`TimeoutError`) if nothing is copied in time:
 
 ```python
 print("Copy a link...")

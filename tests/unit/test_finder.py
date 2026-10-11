@@ -238,7 +238,7 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(finder, "require_macos", lambda: None)
     monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [])  # nothing indexed: walked
     monkeypatch.setattr(finder.time, "monotonic", tick)
-    with pytest.raises(TimeoutError, match="took more than 25 seconds"):
+    with pytest.raises(macos.WaitTimeoutError, match="took more than 25 seconds"):
         finder.largest(tmp_path, at_least=1024, timeout=25)
 
     clock["now"] = 0.0

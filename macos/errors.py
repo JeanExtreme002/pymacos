@@ -66,7 +66,7 @@ class PromptTimeoutError(MacOSError, TimeoutError):
 
 
 class WaitTimeoutError(MacOSError, TimeoutError):
-    """What was waited for (a copy to the clipboard, say) didn't happen before the time ran out."""
+    """What was waited for (a copy, an appearance change, a geocoding answer, a folder walked) didn't happen in time."""
 
 
 class ShortcutNotFoundError(CommandError, LookupError):

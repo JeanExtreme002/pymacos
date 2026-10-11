@@ -20,7 +20,7 @@ catches {class}`~macos.PermissionDeniedError`, and `except LookupError` catches
 | {class}`~macos.NotSupportedError` | Not running on macOS, or a required system tool is missing |
 | {class}`~macos.PermissionDeniedError` | A privacy permission is missing, or the user denied access |
 | {class}`~macos.PromptTimeoutError` | A camera or microphone permission prompt went unanswered (also a `TimeoutError`) |
-| {class}`~macos.WaitTimeoutError` | What was waited for (a copy to the clipboard) didn't happen in time (also a `TimeoutError`) |
+| {class}`~macos.WaitTimeoutError` | What was waited for (a copy, an appearance change, a geocoding answer, a folder walked) didn't happen in time (also a `TimeoutError`) |
 | {class}`~macos.AppNotFoundError` | No app matches the name, or it didn't start in time |
 | {class}`~macos.ShortcutNotFoundError` | No shortcut has the name (also a `LookupError` and a `CommandError`) |
 | {class}`~macos.KeychainError` | The Keychain returned an error (see its `status`) |

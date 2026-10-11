@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from . import _cf, _objc, defaults
 from ._system import applescript, framework
+from .errors import WaitTimeoutError
 
 __all__ = [
     "is_dark",
@@ -103,8 +104,8 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 1.0) -
     Wait until the system switches between Light and Dark mode, and return the new mode.
 
     Useful to restyle a terminal UI or a plot as soon as the user (or *Auto*)
-    switches. Raises :class:`TimeoutError` if nothing changes within
-    ``timeout`` seconds. ``interval`` is how often to check, in seconds.
+    switches. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
+    nothing changes within ``timeout`` seconds. ``interval`` is how often to check, in seconds.
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
@@ -117,7 +118,7 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 1.0) -
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("the appearance didn't change within {}s".format(timeout))
+                raise WaitTimeoutError("the appearance didn't change within {}s".format(timeout))
             time.sleep(min(interval, remaining))
         else:
             time.sleep(interval)

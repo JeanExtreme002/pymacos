@@ -181,7 +181,8 @@ hasn't indexed that disk), the whole folder is walked file by file.
 
 Walking a big folder, a whole disk or a network share, can take very long:
 after `timeout` seconds of it (60 by default) {func}`~macos.finder.largest`
-raises `TimeoutError` rather than return an answer missing files. Pass
+raises {class}`~macos.WaitTimeoutError` (a `TimeoutError`) rather than return an
+answer missing files. Pass
 `timeout=None` to walk for as long as it takes.
 
 ## Finder settings
