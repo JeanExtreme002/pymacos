@@ -27,7 +27,7 @@ from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import _capture as _av, _cf, _files, _objc, defaults
-from ._system import framework, killall, private_framework, restart_later, run as _run, run_to_the_end, UnfinishedInterrupt
+from ._system import framework, private_framework, restart_process, run as _run, run_to_the_end, UnfinishedInterrupt
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -321,9 +321,7 @@ _SETTING_FORMATS = ("png", "jpg", "heic", "tiff", "gif", "pdf", "bmp")
 
 def _apply_capture_settings() -> None:
     """Restart the screenshot shortcuts' UI, which reads the settings when it starts; once per batch of changes."""
-    if restart_later("SystemUIServer", _apply_capture_settings):
-        return
-    killall("SystemUIServer")
+    restart_process("SystemUIServer")
 
 
 def screenshot_folder() -> Path:

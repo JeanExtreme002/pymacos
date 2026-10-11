@@ -906,21 +906,22 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
             if not _objc.send(writer, "startWriting", restype=_objc.BOOL):
                 raise MacOSError("could not start writing {}".format(target))
             try:
-                _write_session(writer, writer_input, adaptor, pictures, fps, width, height)
+                _feed_frames(writer, writer_input, adaptor, pictures, fps, width, height)
             except BaseException:
                 # Whatever stopped it (a bad frame, Ctrl-C): the writer is told, so it closes its file
-                # and frees the encoder now, not when the pool drains. Only while it still writes: one
-                # that is finishing (or failed, or is done) must not be cancelled on top of that.
-                if _objc.send(writer, "status", restype=_objc.NSInteger) == _WRITING:
-                    _objc.send(writer, "cancelWriting", restype=None)
+                # and frees the encoder now, not when the pool drains. Only here, before the finish is
+                # asked for: a writer that is finishing must not be cancelled on top of that (its status
+                # says "writing" until it's done, so the status can't tell the two apart).
+                _objc.send(writer, "cancelWriting", restype=None)
                 raise
+            _finish_writing(writer, writer_input)
     return target
 
 
-def _write_session(
+def _feed_frames(
     writer: int, writer_input: int, adaptor: int, pictures: Iterable[int], fps: float, width: int, height: int
 ) -> None:
-    """Feed ``pictures`` to a started ``writer`` and wait for it to finish the file."""
+    """Feed ``pictures`` to a started ``writer``, one every ``1 / fps`` seconds."""
     _objc.send(writer, "startSessionAtSourceTime:", _media.time(0), argtypes=(_media.CMTime,), restype=None)
     for index, picture in enumerate(pictures):
         # A pool per frame: what encoding one autoreleases goes with it, not after the last.
@@ -948,6 +949,10 @@ def _write_session(
                 _cf.release(buffer)
             if not appended:
                 raise MacOSError("could not add frame {} to the video".format(index + 1))
+
+
+def _finish_writing(writer: int, writer_input: int) -> None:
+    """Tell a fed ``writer`` the frames are over, and wait for it to finish the file."""
     _objc.send(writer_input, "markAsFinished", restype=None)
     _objc.send(
         writer,

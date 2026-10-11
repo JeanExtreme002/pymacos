@@ -264,10 +264,11 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
     library = _load()
     if not text.strip():
         return []
-    code = _with_scheme(_language_of(text, language), "NameType")
+    wanted = _language_of(text, language)
+    code = _with_scheme(wanted, "NameType")
     if code is None:
         raise NotSupportedError(
-            "this Mac has no name recognition for the language {!r}".format(_language_of(text, language))
+            "this Mac has no name recognition for the language {!r}".format(wanted)
         )
     scheme = ctypes.c_void_p.in_dll(library, "NLTagSchemeNameType").value
     if scheme is None:
@@ -339,9 +340,10 @@ def keywords(text: str, *, language: Optional[str] = None, verbs: bool = False, 
     library = _load()
     if not text.strip():
         return []
-    code = _with_scheme(_language_of(text, language), "LexicalClass")
+    asked = _language_of(text, language)
+    code = _with_scheme(asked, "LexicalClass")
     if code is None:
-        raise NotSupportedError("this Mac has no word classes for the language {!r}".format(_language_of(text, language)))
+        raise NotSupportedError("this Mac has no word classes for the language {!r}".format(asked))
     lexical = ctypes.c_void_p.in_dll(library, "NLTagSchemeLexicalClass").value
     lemma = ctypes.c_void_p.in_dll(library, "NLTagSchemeLemma").value
     if lexical is None or lemma is None:

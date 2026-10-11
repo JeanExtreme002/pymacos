@@ -32,7 +32,7 @@ from typing import Any, Optional, Sequence, Tuple, Union
 
 from . import _cf, _objc, apps, defaults
 from ._objc import CGPoint, CGSize
-from ._system import framework, killall, restart_later
+from ._system import framework, restart_process
 from .errors import MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -622,9 +622,7 @@ def set_double_click_title_bar(action: Optional[str]) -> None:
 
 def _restart_window_manager() -> None:
     """Quit the window manager, for macOS to start it again with the settings just written; once per batch."""
-    if restart_later("WindowManager", _restart_window_manager):
-        return
-    killall("WindowManager")
+    restart_process("WindowManager")
 
 
 def tiling() -> bool:

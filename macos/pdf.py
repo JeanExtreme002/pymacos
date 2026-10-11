@@ -19,6 +19,7 @@ Preview.
 
 import ctypes
 import math
+import operator
 import os
 import re
 import shutil
@@ -334,7 +335,13 @@ def rotate(
 
         macos.pdf.rotate("scan.pdf", 90, "scan.pdf", pages=[2])
     """
-    if isinstance(degrees, bool) or not isinstance(degrees, int) or degrees % 90:
+    try:
+        if isinstance(degrees, bool):
+            raise TypeError
+        degrees = operator.index(degrees)  # an int, or an integer of numpy's: never a float, which the page rejects
+    except TypeError:
+        raise ValueError("degrees must be an int multiple of 90, not {!r}".format(degrees)) from None
+    if degrees % 90:
         raise ValueError("degrees must be an int multiple of 90, not {!r}".format(degrees))
     with _open(path, password) as document:
         numbers = list(pages) if pages is not None else list(range(1, _count(document) + 1))

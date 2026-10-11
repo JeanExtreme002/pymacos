@@ -32,11 +32,10 @@ from ._system import (
     LAUNCHCTL_TIMEOUT,
     PROFILER_TIMEOUT,
     framework,
-    killall,
     launchd_disabled,
     launchd_user_domain,
     require_macos,
-    restart_later,
+    restart_process,
     run as _run,
 )
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
@@ -852,9 +851,7 @@ def _restart_control_center() -> None:
 
     Inside :func:`macos._system.batched_restarts` (as :func:`macos.settings.apply` runs), it's put off to the end of the batch.
     """
-    if restart_later("ControlCenter", _restart_control_center):
-        return
-    killall("ControlCenter")
+    restart_process("ControlCenter")
 
 
 def battery_percentage_shown() -> bool:

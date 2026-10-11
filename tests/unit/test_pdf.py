@@ -12,6 +12,15 @@ def test_pdf_argument_checks(tmp_path):
         macos.pdf.rotate(__file__, 45, tmp_path / "out.pdf")
     with pytest.raises(ValueError, match="int multiple of 90"):
         macos.pdf.rotate(__file__, 90.0, tmp_path / "out.pdf")  # a float would reach ctypes as a C long
+    with pytest.raises(ValueError, match="int multiple of 90"):
+        macos.pdf.rotate(__file__, True, tmp_path / "out.pdf")
+
+    class Index:  # an integer of another kind (numpy's, say): an index, so it counts
+        def __index__(self):
+            return 45
+
+    with pytest.raises(ValueError, match="multiple of 90, not 45"):
+        macos.pdf.rotate(__file__, Index(), tmp_path / "out.pdf")
     with pytest.raises(ValueError, match=r"\(title, page\)"):
         macos.pdf.set_bookmarks(__file__, [("Intro",)], tmp_path / "out.pdf")
     with pytest.raises(ValueError, match=r"\(title, page\)"):

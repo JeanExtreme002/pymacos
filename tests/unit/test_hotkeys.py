@@ -180,6 +180,27 @@ def test_a_listen_never_iterated_still_closes_its_tap(fake_tap):
     assert fake_tap.closed == [True, "port"]
 
 
+def test_a_listen_is_iterated_on_the_thread_that_made_it(fake_tap):
+    import threading
+
+    watching = _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no")
+    outcome = []
+    worker = threading.Thread(target=lambda: outcome.append(_raised(lambda: next(watching))))
+    worker.start()
+    worker.join()
+    assert isinstance(outcome[0], macos.MacOSError) and "thread" in str(outcome[0])  # its tap is on this thread's loop
+    assert fake_tap.closed == []  # still listening here
+    watching.close()
+
+
+def _raised(call):
+    try:
+        call()
+    except BaseException as error:
+        return error
+    return None
+
+
 def test_listen_raises_what_convert_raised(fake_tap, monkeypatch):
     monkeypatch.setattr(_events._objc, "spin", lambda seconds: fake_tap.callback(0, KEY_DOWN, fake_tap.key(1, 0), 0))
 

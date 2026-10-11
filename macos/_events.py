@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterator, List, Optional
 from . import _cf, _objc
 from ._objc import CGPoint
 from ._system import framework
-from .errors import PermissionDeniedError
+from .errors import MacOSError, PermissionDeniedError
 
 HID_TAP = 0  # kCGHIDEventTap: as if the events came from the hardware
 PAUSE = 0.005  # between events, so apps see them in order
@@ -310,11 +310,14 @@ class _Listening:
     def __init__(self, tap: Tap, items: Iterator[Any]) -> None:
         self._tap: Optional[Tap] = tap
         self._items = items
+        self._thread = threading.get_ident()  # the tap is on this thread's run loop: only it can hear it
 
     def __iter__(self) -> "_Listening":
         return self
 
     def __next__(self) -> Any:
+        if threading.get_ident() != self._thread:
+            raise MacOSError("iterate watch() on the thread that called it: its event tap is on that thread's run loop")
         try:
             return next(self._items)
         except BaseException:  # the end (StopIteration) or an error: either way, done listening

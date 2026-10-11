@@ -147,6 +147,20 @@ def test_dock_add_app_index_skips_spacers(dock_settings):
     assert [entry.name for entry in macos.dock.apps()] == ["Safari", "Code"]
 
 
+def test_dock_add_app_replaces_a_tile_of_another_kind_at_that_path(dock_settings):
+    store, restarts, app = dock_settings
+    # A folder tile pointing at the app's path: adding the app takes its place, it isn't there twice.
+    store["persistent-apps"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ] + store["persistent-apps"]  # fmt: skip
+    added = macos.dock.add_app("Code")
+    tiles = store["persistent-apps"]
+    assert added.path == app and len(tiles) == 2 and tiles[0]["tile-type"] == "file-tile"  # where the folder was
+    assert [tile["tile-data"].get("file-label") for tile in tiles] == ["Code", "Safari"]
+    assert macos.dock.remove_app("Code") is True and len(store["persistent-apps"]) == 1
+
+
 def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):
     store, restarts, _ = dock_settings
     spacer = {"tile-data": {}, "tile-type": "spacer-tile"}

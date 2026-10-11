@@ -35,7 +35,6 @@ def fake_run(monkeypatch):
     monkeypatch.setattr(_system.subprocess, "run", fake)
     # notify() reads the notification settings first; in unit tests they allow it.
     monkeypatch.setattr(notifications, "is_allowed", lambda: True)
-    del notifications._known[:]  # an answer kept by an earlier test would stand in for the stub
     return fake
 
 

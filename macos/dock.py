@@ -248,12 +248,16 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
     if not path.exists():
         raise AppNotFoundError("{!r} is not an installed app".format(app))
     tiles = _tiles()
-    existing = [tile for tile in tiles if _tile_path(tile) == path]
-    if existing:
+    if any(_is_app(tile) and _tile_path(tile) == path for tile in tiles):
         kept = next((entry for entry in apps() if entry.path == path), None)
         if kept is not None:
             return kept
-        # There, but not as an app tile (a folder tile at that path, say): added as an app all the same.
+    # There as a tile of another kind (a folder tile at that path, say): that one goes, so the app isn't there twice.
+    if index is None:
+        others = [position for position, tile in enumerate(tiles) if _tile_path(tile) == path]
+        if others:
+            index = sum(1 for tile in tiles[: others[0]] if _is_app(tile))  # its place, among the apps
+    tiles = [tile for tile in tiles if _tile_path(tile) != path]
     bundle_id = _apps._bundle_id(str(path))
     name = path.stem
     tile = {

@@ -226,6 +226,19 @@ def add_note(error: BaseException, message: str) -> None:
         warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
+def restart_process(name: str) -> None:
+    """
+    Quit ``name`` for macOS to start it again with the settings just written: once per batch.
+
+    Inside :func:`batched_restarts` it's put off to the end of the block, and done once however
+    many settings asked for it. For a process that needs more than a :func:`killall` (the Dock,
+    waited for), write the restart out and hand it to :func:`restart_later` the same way.
+    """
+    if restart_later(name, lambda: killall(name)):
+        return
+    killall(name)
+
+
 def killall(process: str) -> None:
     """
     Quit every process named ``process``, for macOS to start it again with the settings just written.

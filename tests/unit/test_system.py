@@ -606,7 +606,7 @@ def test_control_center_restart_is_batched(monkeypatch):
     from macos import _system, system
 
     killed = []
-    monkeypatch.setattr(system, "killall", lambda name: killed.append(name))
+    monkeypatch.setattr(_system, "killall", lambda name: killed.append(name))  # what restart_process runs
     system._restart_control_center()
     assert killed == ["ControlCenter"]
     with _system.batched_restarts():
