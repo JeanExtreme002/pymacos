@@ -22,7 +22,8 @@ import os
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
-from ._system import run as _run
+from ._system import osascript_error, run as _run
+from .errors import CommandError
 
 __all__ = ["alert", "confirm", "prompt", "choose", "choose_file", "choose_files", "choose_folder"]
 
@@ -55,7 +56,10 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     for line in script:
         command += ["-e", line]
     # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
-    return _run([*command, "--", *args], exact_newlines=True).rstrip("\n").split("\n")
+    try:
+        return _run([*command, "--", *args], exact_newlines=True).rstrip("\n").split("\n")
+    except CommandError as error:
+        raise osascript_error(error, None) from None
 
 
 def _giving_up(timeout: Optional[float]) -> str:
@@ -96,6 +100,10 @@ def confirm(
 
     Clicking ``cancel``, pressing Escape or reaching ``timeout`` returns ``False``.
     """
+    if not ok.strip() or not cancel.strip():
+        raise ValueError("the ok and cancel buttons need a label")
+    if ok == cancel:
+        raise ValueError("the ok and cancel buttons must differ, not both {!r}".format(ok))
     statement = (
         "set r to display dialog (item 1 of argv) buttons {(item 3 of argv), (item 2 of argv)} "
         "default button (item 2 of argv) cancel button (item 3 of argv)"
@@ -146,6 +154,8 @@ def choose(
     title: Optional[str] = None,
 ) -> Optional[str]:
     """Let the user pick one of ``options`` from a list, and return it (``None`` if cancelled)."""
+    if isinstance(options, (str, bytes)):
+        raise TypeError("options must be a list of choices, not a single string: use [{!r}]".format(options))
     options = [str(option) for option in options]
     if not options:
         raise ValueError("choose() needs at least one option")
@@ -167,6 +177,8 @@ def choose(
 def _choose_file_body(
     prompt: Optional[str], types: Optional[Sequence[str]], folder: Optional[PathLike], multiple: bool
 ) -> Tuple[List[str], List[str]]:
+    if isinstance(types, (str, bytes)):
+        raise TypeError("types must be a list of extensions or type identifiers, not a single string: use [{!r}]".format(types))
     statement = "set r to choose file with prompt (item 1 of argv)"
     body: List[str] = []
     if types:
@@ -183,8 +195,20 @@ def _choose_file_body(
 
     # Extensions ("pdf") and type identifiers ("public.image") both work.
     names = [str(kind).lstrip(".") for kind in types or []]
-    args = [prompt or "Choose a file:", "\n".join(names), str(Path(folder).expanduser().resolve()) if folder else ""]
+    args = [prompt or "Choose a file:", "\n".join(names), _folder(folder)]
     return body, args
+
+
+def _folder(folder: Optional[PathLike]) -> str:
+    """Where a picker opens, as an absolute path; ``""`` for the picker's own choice."""
+    if folder is None:
+        return ""
+    chosen = Path(folder).expanduser().resolve()
+    if not chosen.exists():
+        raise FileNotFoundError(str(chosen))
+    if not chosen.is_dir():
+        raise NotADirectoryError(str(chosen))
+    return str(chosen)
 
 
 def _paths_body() -> List[str]:
@@ -238,6 +262,6 @@ def choose_folder(prompt: Optional[str] = None, *, folder: Optional[PathLike] = 
     statement = "set r to choose folder with prompt (item 1 of argv)"
     if folder is not None:
         statement += " default location (POSIX file (item 2 of argv))"
-    args = [prompt or "Choose a folder:", str(Path(folder).expanduser().resolve()) if folder else ""]
+    args = [prompt or "Choose a folder:", _folder(folder)]
     found = _paths(_show([statement, *_paths_body()], args))
     return found[0] if found else None

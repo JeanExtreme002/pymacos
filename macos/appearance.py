@@ -17,10 +17,11 @@ program runs.
 
 import ctypes
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from . import _cf, _objc
+from . import _cf, _objc, defaults
 from ._system import applescript, framework
+from .errors import WaitTimeoutError
 
 __all__ = [
     "is_dark",
@@ -41,20 +42,16 @@ __all__ = [
 ]
 
 
-def _read(key: str) -> Optional[int]:
-    """Return an owned reference to a global-domain preference value (or ``None``)."""
+def _current(key: str, default: Any = None) -> Any:
+    """A global-domain value as cfprefsd has it now: :func:`set_mode` writes it from another process."""
     cf = _cf.lib()
-    domain = _cf.constant(cf, "kCFPreferencesAnyApplication")
-    cf.CFPreferencesAppSynchronize(domain)
-    with _cf.owned(_cf.string(key)) as name:
-        return cf.CFPreferencesCopyAppValue(name, domain)
+    cf.CFPreferencesAppSynchronize(_cf.constant(cf, "kCFPreferencesAnyApplication"))
+    return defaults.read(defaults.GLOBAL, key, default=default)
 
 
 def mode() -> str:
     """Return ``"dark"`` or ``"light"``."""
-    with _cf.owned(_read("AppleInterfaceStyle")) as value:
-        style = _cf.to_str(value)
-    return "dark" if style == "Dark" else "light"
+    return "dark" if _current("AppleInterfaceStyle") == "Dark" else "light"
 
 
 def is_dark() -> bool:
@@ -80,8 +77,7 @@ def set_mode(mode: str) -> None:
 
 def is_auto() -> bool:
     """Whether the appearance is set to *Auto* (switches between Light and Dark by time of day)."""
-    with _cf.owned(_read("AppleInterfaceStyleSwitchesAutomatically")) as value:
-        return _cf.to_bool(value)
+    return bool(_current("AppleInterfaceStyleSwitchesAutomatically", default=False))
 
 
 def accent_color() -> str:
@@ -108,8 +104,8 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 1.0) -
     Wait until the system switches between Light and Dark mode, and return the new mode.
 
     Useful to restyle a terminal UI or a plot as soon as the user (or *Auto*)
-    switches. Raises :class:`TimeoutError` if nothing changes within
-    ``timeout`` seconds. ``interval`` is how often to check, in seconds.
+    switches. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
+    nothing changes within ``timeout`` seconds. ``interval`` is how often to check, in seconds.
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
@@ -122,7 +118,7 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 1.0) -
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("the appearance didn't change within {}s".format(timeout))
+                raise WaitTimeoutError("the appearance didn't change within {}s".format(timeout))
             time.sleep(min(interval, remaining))
         else:
             time.sleep(interval)
@@ -152,7 +148,6 @@ def set_auto_mode(on: bool = True) -> None:
 
     macOS may apply the switch only at the next login.
     """
-    from . import defaults
 
     defaults.write(defaults.GLOBAL, "AppleInterfaceStyleSwitchesAutomatically", bool(on))
     _announce("AppleInterfaceThemeChangedNotification")
@@ -172,7 +167,6 @@ def set_accent_color(name: str) -> None:
     ``"graphite"``, ``"multicolor"`` (each app's own color)... Running apps
     update at once; a few only when reopened.
     """
-    from . import defaults
 
     if name not in _ACCENTS:
         raise ValueError("name must be one of {}, not {!r}".format(", ".join(ACCENT_COLORS), name))
@@ -186,14 +180,12 @@ def set_accent_color(name: str) -> None:
 
 def menu_bar_hidden() -> bool:
     """Whether the menu bar hides until the pointer reaches the top of the screen."""
-    from . import defaults
 
     return bool(defaults.read(defaults.GLOBAL, "_HIHideMenuBar", default=False))
 
 
 def set_hide_menu_bar(on: bool = True) -> None:
     """Hide the menu bar until the pointer reaches the top of the screen, like the Dock's autohide, or keep it shown."""
-    from . import defaults
 
     defaults.write(defaults.GLOBAL, "_HIHideMenuBar", bool(on))
     _announce("AppleInterfaceMenuBarHidingChangedNotification")
@@ -204,7 +196,6 @@ _SCROLL_BARS = {"automatic": "Automatic", "when_scrolling": "WhenScrolling", "al
 
 def scroll_bars() -> str:
     """When scroll bars show: ``'automatic'`` (by the mouse or trackpad), ``'when_scrolling'`` or ``'always'``."""
-    from . import defaults
 
     found = defaults.read(defaults.GLOBAL, "AppleShowScrollBars", default="Automatic")
     names = {value: name for name, value in _SCROLL_BARS.items()}
@@ -213,7 +204,6 @@ def scroll_bars() -> str:
 
 def set_scroll_bars(when: str) -> None:
     """Show scroll bars ``"always"``, ``"when_scrolling"``, or ``"automatic"``-ally, like System Settings › Appearance."""
-    from . import defaults
 
     if when not in _SCROLL_BARS:
         raise ValueError("when must be 'automatic', 'when_scrolling' or 'always', not {!r}".format(when))
@@ -223,7 +213,6 @@ def set_scroll_bars(when: str) -> None:
 
 def font_smoothing() -> bool:
     """Whether text is drawn a little bolder (font smoothing), as System Settings › Appearance offers."""
-    from . import defaults
 
     return defaults.read(defaults.GLOBAL, "AppleFontSmoothing", default=1) != 0
 
@@ -234,7 +223,6 @@ def set_font_smoothing(on: bool = True) -> None:
 
     Apps pick it up when they're reopened.
     """
-    from . import defaults
 
     if on:
         defaults.delete(defaults.GLOBAL, "AppleFontSmoothing")  # macOS's own

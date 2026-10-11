@@ -395,3 +395,13 @@ def test_audio_argument_checks(tmp_path):
         macos.audio.record_until_silence(tmp_path / "out.m4a", threshold=2)
     with pytest.raises(ValueError, match="can't record"):
         macos.audio.record_until_silence(tmp_path / "out.mp3")
+
+
+def test_a_name_property_too_short_to_hold_a_string_reads_as_empty(monkeypatch):
+    from macos import audio
+
+    released = []
+    monkeypatch.setattr(audio, "_property", lambda target, selector, *args: b"\x01\x02")
+    monkeypatch.setattr(audio._cf, "release", released.append)
+    assert audio._string(7, "name") == ""
+    assert released == []  # no CFStringRef was read out of it, so none is released

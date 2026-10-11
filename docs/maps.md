@@ -65,7 +65,7 @@ A place is an address, a {class}`~macos.maps.Place` or `(latitude, longitude)`;
 Apple limits how many requests an app makes in a short time: space out
 large batches, or a request raises {class}`~macos.MacOSError`. A request
 that gets no answer within `timeout` seconds (15 by default) raises
-`TimeoutError`. Call these functions from the main thread, where the answers
+{class}`~macos.WaitTimeoutError` (a `TimeoutError`). Call these functions from the main thread, where the answers
 arrive.
 
 ## Reference

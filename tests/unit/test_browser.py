@@ -41,6 +41,17 @@ def test_browser_tabs(browsers):
     assert macos.browser.current_tab().title == "pymacos"  # the front window's shown tab
 
 
+def test_browser_keeps_the_separators_out_of_the_titles(browsers):
+    # The script takes the record and field separators out of every title and URL, so a page can't
+    # split its own record. Were one to come through anyway, the listing fails rather than lose tabs.
+    assert "my clean(n)" in macos.browser._LIST["chromium"] and "my clean(u)" in macos.browser._LIST["safari"]
+    browsers.stdout = "7\x1f1\x1ffalse\x1fodd\x1ftitle\x1fhttps://a/\x1e" + _TABS
+    with pytest.raises(macos.MacOSError, match="can't read"):
+        macos.browser.tabs()
+    browsers.stdout = "\n"
+    assert macos.browser.tabs() == []
+
+
 def test_browser_prefers_the_one_in_front(browsers, monkeypatch):
     monkeypatch.setattr(apps, "frontmost", lambda: apps.App(name="Safari", bundle_id=None, pid=2, path=None))
     monkeypatch.setattr(apps, "running", lambda **kwargs: [apps.App(name="Safari", bundle_id=None, pid=2, path=None)])

@@ -23,7 +23,7 @@ from urllib.parse import quote, urlencode
 
 from . import _objc
 from ._system import framework, require_macos, run as _run
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = [
     "Place",
@@ -145,7 +145,7 @@ def _ask(selector: str, argument: int, timeout: float) -> List[Place]:
                 _objc.send(geocoder, "cancelGeocode", restype=None)
                 _objc.run_until(lambda: bool(_answers), _DRAIN)
                 del _answers[:]
-                raise TimeoutError("Apple's geocoding service didn't answer within {} seconds".format(timeout))
+                raise WaitTimeoutError("Apple's geocoding service didn't answer within {} seconds".format(timeout))
         finally:
             _objc.send(geocoder, "release", restype=None)
         answer = _answers.pop()
@@ -177,8 +177,8 @@ def geocode(address: str, *, timeout: float = 15) -> List[Place]:
     Any address works, whole or in part, in any language; names come back
     in the system's language. The service guesses rather than give up, so
     check the place's ``country_code`` or ``city`` for vague addresses.
-    Raises :class:`TimeoutError` if the service doesn't answer within
-    ``timeout`` seconds.
+    Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if the
+    service doesn't answer within ``timeout`` seconds.
     """
     if not address.strip():
         raise ValueError("address must not be empty")

@@ -72,7 +72,7 @@ def test_is_allowed_reads_the_notification_settings(monkeypatch, apps, expected)
     def fake(args, **kwargs):
         return subprocess.CompletedProcess(args, 0, plistlib.dumps({"apps": apps}), b"")
 
-    monkeypatch.setattr(macos.notifications.subprocess, "run", fake)
+    monkeypatch.setattr(_system.subprocess, "run", fake)
 
     assert macos.notifications.is_allowed() is expected
 
@@ -83,6 +83,17 @@ def test_is_allowed_is_unknown_when_the_settings_are_unreadable(monkeypatch):
     def fake(args, **kwargs):
         return subprocess.CompletedProcess(args, 0, b"not a plist", b"")
 
-    monkeypatch.setattr(macos.notifications.subprocess, "run", fake)
+    monkeypatch.setattr(_system.subprocess, "run", fake)
 
+    assert macos.notifications.is_allowed() is None
+
+
+def test_is_allowed_gives_up_on_a_wedged_defaults(monkeypatch):
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+
+    def hung(args, **kwargs):
+        assert kwargs["timeout"]
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(_system.subprocess, "run", hung)
     assert macos.notifications.is_allowed() is None

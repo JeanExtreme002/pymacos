@@ -49,6 +49,28 @@ def test_shortcut_not_found_checks_the_list(commands):
     assert isinstance(info.value, LookupError)
 
 
+def test_shortcut_text_input_file_goes_even_when_the_run_fails(commands, tmp_path, monkeypatch):
+    monkeypatch.setattr(macos.shortcuts.tempfile, "tempdir", str(tmp_path))
+    commands.answers["run"] = (1, "", "Error: no")
+    commands.answers["shortcuts list --show-identifiers"] = (0, "Fails (1234-ABCD)\n", "")
+    with pytest.raises(macos.CommandError):
+        macos.shortcuts.run("Fails", input="text")
+    assert os.listdir(str(tmp_path)) == []  # the temporary file is gone
+    # Even when the paths given after it are missing.
+    with pytest.raises(FileNotFoundError):
+        macos.shortcuts.run("Fails", input=[tmp_path / "missing.png"])
+    assert os.listdir(str(tmp_path)) == []
+
+
+def test_shortcut_failure_when_the_listing_fails_too_keeps_the_run_error(commands):
+    commands.answers["run"] = (1, "", "Error: the run's own message")
+    commands.answers["shortcuts list --show-identifiers"] = (1, "", "listing broke")
+
+    with pytest.raises(macos.CommandError, match="the run's own message") as info:
+        macos.shortcuts.run("Any")
+    assert not isinstance(info.value, macos.ShortcutNotFoundError)
+
+
 def test_shortcut_failure_of_an_existing_shortcut_is_a_command_error(commands):
     commands.answers["run"] = (1, "", "Error: something else")
     commands.answers["shortcuts list --show-identifiers"] = (0, "Broken (1234-ABCD)\n", "")

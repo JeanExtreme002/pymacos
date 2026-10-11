@@ -187,6 +187,7 @@ class _FakeRecording:
 def test_screen_record_command(fake_run, monkeypatch, tmp_path):
     target = tmp_path / "demo.mov"
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(macos.screen._av, "require_permission", lambda media: None)  # the microphone, for audio=True
     recording = _FakeRecording(lambda args, timeout: Path(args[-1]).write_bytes(b"movie"))
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
 
@@ -285,6 +286,24 @@ def test_a_movie_screencapture_couldnt_finish_doesnt_replace_the_old_one(fake_ru
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
+def test_recording_with_sound_asks_for_the_microphone_first(fake_run, monkeypatch, tmp_path):
+    asked = []
+
+    def refuse(media):
+        asked.append(media)
+        raise macos.PermissionDeniedError("Microphone permission is missing")
+
+    monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
+    monkeypatch.setattr(macos.screen._av, "require_permission", refuse)
+    recording = _FakeRecording(lambda args, timeout: Path(args[-1]).write_bytes(b"movie"))
+    monkeypatch.setattr(_system.subprocess, "Popen", recording)
+    with pytest.raises(macos.PermissionDeniedError, match="Microphone"):
+        macos.screen.record(tmp_path / "demo.mov", 1, audio=True)
+    assert asked == [macos.screen._av.AUDIO] and recording.made == []  # never a silent movie
+    macos.screen.record(tmp_path / "demo.mov", 1)  # without sound, the microphone isn't needed
+    assert asked == [macos.screen._av.AUDIO] and len(recording.made) == 1
+
+
 def test_screen_record_needs_the_permission(fake_run, monkeypatch, tmp_path):
     monkeypatch.setattr(macos.screen, "has_permission", lambda: False)
 
@@ -377,6 +396,23 @@ def test_screenshot_settings(monkeypatch, tmp_path):
         screen.set_screenshot_format("webp")
     with pytest.raises(NotADirectoryError):
         screen.set_screenshot_folder(tmp_path / "missing")
+
+
+def test_screenshot_settings_restart_the_ui_once_per_batch(fake_run, monkeypatch, tmp_path):
+    from macos import defaults
+
+    store = {}
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, default=None: store.get(key, default))
+    monkeypatch.setattr(defaults, "write", lambda domain, key, value: store.__setitem__(key, value))
+
+    screen.set_screenshot_shadow(False)
+    assert [call["args"] for call in fake_run.calls] == [["killall", "SystemUIServer"]]
+    with _system.batched_restarts():
+        screen.set_screenshot_folder(tmp_path)
+        screen.set_screenshot_format("jpg")
+        screen.set_screenshot_shadow(True)
+        assert len(fake_run.calls) == 1  # put off until the batch ends
+    assert [call["args"] for call in fake_run.calls] == [["killall", "SystemUIServer"]] * 2
 
 
 def test_a_display_change_that_fails_is_cancelled(monkeypatch):

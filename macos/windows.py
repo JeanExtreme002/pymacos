@@ -30,10 +30,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple, Union
 
-from . import _cf, _objc, apps
+from . import _cf, _objc, apps, defaults
 from ._objc import CGPoint, CGSize
-from ._system import framework, killall
-from .errors import MacOSError, PermissionDeniedError
+from ._system import framework, restart_process
+from .errors import MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
     "Window",
@@ -60,6 +60,8 @@ _FAILURE = -25200  # kAXErrorFailure: the app refused, without saying why
 _API_DISABLED = -25211  # kAXErrorAPIDisabled: no Accessibility permission
 _INVALID_ELEMENT = -25202  # kAXErrorInvalidUIElement: the window is gone
 _CANNOT_COMPLETE = -25204  # kAXErrorCannotComplete: the app didn't answer, or quit
+_ATTRIBUTE_UNSUPPORTED = -25205  # kAXErrorAttributeUnsupported: this window has no such attribute
+_NO_VALUE = -25212  # kAXErrorNoValue: the attribute is there, with nothing in it
 _POINT, _SIZE = 1, 2  # kAXValueCGPointType, kAXValueCGSizeType
 _TIMEOUT = 2.0  # seconds to wait for an app that doesn't answer
 _FULL_SCREEN_TIMEOUT = 10.0
@@ -192,7 +194,7 @@ class Window:
 
     def _read(self, attribute: str) -> Optional[int]:
         status, value = _copy(self._element, attribute)
-        if status != _SUCCESS and status not in (-25212, -25205):  # no value, unsupported: treat as missing
+        if status != _SUCCESS and status not in (_NO_VALUE, _ATTRIBUTE_UNSUPPORTED):  # treat as missing
             _check(status, "read the window's {}".format(attribute))
         return value
 
@@ -373,10 +375,14 @@ class Window:
         """Bring it to the front, with its app, ready for keystrokes."""
         if self.minimized:
             self.restore()
-        app = next((running for running in apps.running(include_background=True) if running.pid == self.pid), None)
+        with _objc.autorelease_pool():
+            handle = apps._handle(self.pid)  # this one app, not a scan of every process
+            app = apps._app(handle) if handle else None
         if app is not None:
             try:
-                app.activate()
+                # Asked, not awaited: Accessibility below makes it frontmost either way, so an app
+                # LaunchServices can't switch to needn't cost the wait for it.
+                app.activate(timeout=0)
             except MacOSError:
                 pass  # LaunchServices can't activate some apps (helper processes): Accessibility below still can
         # macOS may refuse an activation asked by another app: make the app
@@ -486,7 +492,10 @@ def _usable_areas() -> "builtins.list[Tuple[float, float, float, float]]":
 @lru_cache(maxsize=None)
 def _window_number() -> Any:
     """``_AXUIElementGetWindow``: the window server's number for a window, which ``screencapture -l`` takes."""
-    function = framework("ApplicationServices")._AXUIElementGetWindow
+    try:
+        function = framework("ApplicationServices")._AXUIElementGetWindow
+    except AttributeError:  # private: Apple may drop it in any release
+        raise NotSupportedError("this version of macOS can't tell a window's number, which its screenshot needs") from None
     function.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
     function.restype = ctypes.c_int32
     return function
@@ -595,8 +604,6 @@ _WINDOW_MANAGER = "com.apple.WindowManager"
 
 def double_click_title_bar() -> Optional[str]:
     """What a double click on a window's title bar does: ``'zoom'``, ``'fill'``, ``'minimize'``, or ``None``."""
-    from . import defaults
-
     found = defaults.read(defaults.GLOBAL, "AppleActionOnDoubleClick", default="Maximize")
     names = {value: name for name, value in _TITLE_BAR_ACTIONS.items()}
     return names.get(found, "zoom")
@@ -608,21 +615,18 @@ def set_double_click_title_bar(action: Optional[str]) -> None:
 
     ``"fill"`` needs macOS 15 or later. Some apps pick it up only when reopened.
     """
-    from . import defaults
-
     if action not in _TITLE_BAR_ACTIONS:
         raise ValueError("action must be 'zoom', 'fill', 'minimize' or None, not {!r}".format(action))
     defaults.write(defaults.GLOBAL, "AppleActionOnDoubleClick", _TITLE_BAR_ACTIONS[action])
 
 
 def _restart_window_manager() -> None:
-    killall("WindowManager")  # macOS starts it again, reading the settings
+    """Quit the window manager, for macOS to start it again with the settings just written; once per batch."""
+    restart_process("WindowManager")
 
 
 def tiling() -> bool:
     """Whether dragging a window to an edge of the screen tiles it there (macOS 15 and later)."""
-    from . import defaults
-
     return bool(defaults.read(_WINDOW_MANAGER, "EnableTilingByEdgeDrag", default=True))
 
 
@@ -632,8 +636,6 @@ def set_tiling(on: bool = True) -> None:
 
     Needs macOS 15 or later; the layouts of :meth:`Window.snap` work either way.
     """
-    from . import defaults
-
     defaults.write(_WINDOW_MANAGER, "EnableTilingByEdgeDrag", bool(on))
     defaults.write(_WINDOW_MANAGER, "EnableTopTilingByEdgeDrag", bool(on))
     _restart_window_manager()
@@ -641,23 +643,17 @@ def set_tiling(on: bool = True) -> None:
 
 def click_wallpaper_to_show_desktop() -> bool:
     """Whether a click on the wallpaper moves the windows away to show the desktop (macOS 14 and later)."""
-    from . import defaults
-
     return bool(defaults.read(_WINDOW_MANAGER, "EnableStandardClickToShowDesktop", default=True))
 
 
 def set_click_wallpaper_to_show_desktop(on: bool = True) -> None:
     """Make a click on the wallpaper show the desktop, or only in Stage Manager (``False``). Needs macOS 14 or later."""
-    from . import defaults
-
     defaults.write(_WINDOW_MANAGER, "EnableStandardClickToShowDesktop", bool(on))
     _restart_window_manager()
 
 
 def animations() -> bool:
     """Whether windows, sheets and panels open with an animation."""
-    from . import defaults
-
     return bool(defaults.read(defaults.GLOBAL, "NSAutomaticWindowAnimationsEnabled", default=True))
 
 
@@ -667,8 +663,6 @@ def set_animations(on: bool = True) -> None:
 
     Apps pick it up when they're reopened.
     """
-    from . import defaults
-
     defaults.write(defaults.GLOBAL, "NSAutomaticWindowAnimationsEnabled", bool(on))
 
 

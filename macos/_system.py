@@ -6,6 +6,7 @@ commands and loading system frameworks.
 """
 
 import ctypes
+import functools
 import os
 import signal
 import subprocess
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar, Union
 
-from .errors import CommandError, CommandTimeoutError, NotSupportedError, PermissionDeniedError
+from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 
 def require_macos() -> None:
@@ -37,8 +38,6 @@ def deprecated(replacement: str, *, removal: str) -> Callable[[_F], _F]:
     a name is deprecated for at least one minor release before it's removed,
     and only removed in a major one.
     """
-    import functools
-
     def decorate(function: _F) -> _F:
         message = "{}.{}() is deprecated and will be removed in pymacos {}; use {} instead".format(
             function.__module__, function.__name__, removal, replacement
@@ -191,12 +190,28 @@ def applescript(app: str, script: str, *args: str, input: Optional[str] = None) 
     try:
         return run(["osascript", "-e", script, *(["--", *args] if args else [])], input=input)
     except CommandError as error:
-        if "-1743" in error.stderr:  # errAEEventNotPermitted
-            raise PermissionDeniedError(
-                "Automation permission is missing: allow the app running Python (your terminal or IDE) to control "
-                "{} in System Settings › Privacy & Security › Automation".format(app)
-            ) from None
-        raise
+        raise osascript_error(error, app) from None
+
+
+def osascript_error(error: CommandError, app: Optional[str]) -> MacOSError:
+    """
+    The exception to raise for a failed ``osascript`` run: what macOS refused, said plainly, or ``error`` itself.
+
+    A missing Automation permission (``app`` names what the script controls) becomes
+    :class:`PermissionDeniedError`; a session with no way to show anything (over SSH,
+    in a service) becomes :class:`MacOSError` saying so.
+    """
+    if "-1743" in error.stderr:  # errAEEventNotPermitted
+        return PermissionDeniedError(
+            "Automation permission is missing: allow the app running Python (your terminal or IDE) to control "
+            "{} in System Settings › Privacy & Security › Automation".format(app or "the app")
+        )
+    if "-1713" in error.stderr:  # errAENoUserInteraction
+        return MacOSError(
+            "macOS can't show a dialog from here (no user session: over SSH, in a service or a build): "
+            "run the script from a logged-in session"
+        )
+    return error
 
 
 def add_note(error: BaseException, message: str) -> None:
@@ -209,6 +224,19 @@ def add_note(error: BaseException, message: str) -> None:
         error.add_note(message)
     else:
         warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def restart_process(name: str) -> None:
+    """
+    Quit ``name`` for macOS to start it again with the settings just written: once per batch.
+
+    Inside :func:`batched_restarts` it's put off to the end of the block, and done once however
+    many settings asked for it. For a process that needs more than a :func:`killall` (the Dock,
+    waited for), write the restart out and hand it to :func:`restart_later` the same way.
+    """
+    if restart_later(name, lambda: killall(name)):
+        return
+    killall(name)
 
 
 def killall(process: str) -> None:
@@ -234,8 +262,6 @@ PROFILER_TIMEOUT = 60.0
 
 def launchd_user_domain() -> str:
     """The launchd domain of this user's session, ``gui/<uid>``, where launch agents run."""
-    import os
-
     return "gui/{}".format(os.getuid())
 
 
@@ -261,8 +287,6 @@ def apply_input_settings() -> None:
 
     Some (key repeat, pointer speed) still wait for the next login.
     """
-    import os
-
     if restart_later("input settings", apply_input_settings):
         return
     if os.path.exists(_ACTIVATE_SETTINGS):

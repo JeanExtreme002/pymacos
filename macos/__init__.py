@@ -64,6 +64,7 @@ from .errors import (
     PermissionDeniedError,
     PromptTimeoutError,
     ShortcutNotFoundError,
+    WaitTimeoutError,
 )
 
 if TYPE_CHECKING:  # what the lazy loading below provides, spelled out for type checkers
@@ -203,4 +204,5 @@ __all__ = [
     "PermissionDeniedError",
     "PromptTimeoutError",
     "ShortcutNotFoundError",
+    "WaitTimeoutError",
 ]

@@ -26,8 +26,8 @@ from pathlib import Path
 from datetime import time as dt_time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _files, _objc, defaults
-from ._system import framework, killall, private_framework, run as _run, run_to_the_end, UnfinishedInterrupt
+from . import _capture as _av, _cf, _files, _objc, defaults
+from ._system import framework, private_framework, restart_process, run as _run, run_to_the_end, UnfinishedInterrupt
 from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
@@ -320,8 +320,8 @@ _SETTING_FORMATS = ("png", "jpg", "heic", "tiff", "gif", "pdf", "bmp")
 
 
 def _apply_capture_settings() -> None:
-    # The screenshot shortcuts' UI reads the settings when it starts.
-    killall("SystemUIServer")
+    """Restart the screenshot shortcuts' UI, which reads the settings when it starts; once per batch of changes."""
+    restart_process("SystemUIServer")
 
 
 def screenshot_folder() -> Path:
@@ -828,6 +828,9 @@ def is_asleep(display_id: Union[int, Display, None] = None) -> bool:
     return bool(graphics.CGDisplayIsAsleep(target))
 
 
+_FINISH_GRACE = 10.0  # seconds screencapture gets, after Ctrl-C, to finish the movie
+
+
 def record(
     path: Union[str, "os.PathLike[str]"],
     seconds: float,
@@ -859,6 +862,8 @@ def record(
             "Screen Recording permission is missing: allow the app running Python (your terminal or IDE) in "
             "System Settings › Privacy & Security › Screen & System Audio Recording, then restart it"
         )
+    if audio:
+        _av.require_permission(_av.AUDIO)  # asked first: denied, screencapture would record a silent movie
     # -V stops after the given seconds; screencapture only takes whole seconds.
     args = ["screencapture", "-x", "-v", "-V{}".format(max(1, round(seconds)))]
     if region is not None:
@@ -895,9 +900,6 @@ def record(
     if interrupted:
         raise interrupted[0]
     return target
-
-
-_FINISH_GRACE = 10.0  # seconds screencapture gets, after Ctrl-C, to finish the movie
 
 
 def screensaver_delay() -> Optional[float]:

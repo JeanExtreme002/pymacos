@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, TypeVar, Union
 
 from . import _cf, _iokit, _libc, _objc, defaults
 from ._libc import pids as _pids
@@ -32,10 +32,10 @@ from ._system import (
     LAUNCHCTL_TIMEOUT,
     PROFILER_TIMEOUT,
     framework,
-    killall,
     launchd_disabled,
     launchd_user_domain,
     require_macos,
+    restart_process,
     run as _run,
 )
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
@@ -479,6 +479,7 @@ def volumes() -> List[Volume]:
 # that keeps a file open on it holds it for good: once this wait is over, the
 # last error is raised as is.
 _BUSY_WAIT = 5.0
+_HDIUTIL_TIMEOUT = 60.0  # seconds for an hdiutil or diskutil call: a disk that stopped answering mustn't hang the script
 _BUSY_MARKERS = ("failed to eject", "failed to unmount", "could not be unmounted", "dissented", "resource busy")
 
 
@@ -552,7 +553,6 @@ def _detach(devices: List[str]) -> str:
     return ""
 
 
-_HDIUTIL_TIMEOUT = 60.0  # seconds for a detach
 _DEVICE = re.compile(r"/dev/disk\d+(?:s\d+)*")
 
 
@@ -610,7 +610,7 @@ def unmount_image(mount_point: Union[str, "os.PathLike[str]"], *, force: bool = 
     doesn't answer for a minute raises :class:`~macos.errors.CommandTimeoutError`. ``force=True``
     unmounts it even while a program has files open on it.
     """
-    _release(["hdiutil", "detach", str(Path(mount_point)), *(["-force"] if force else [])])
+    _release(["hdiutil", "detach", str(Path(mount_point).expanduser()), *(["-force"] if force else [])])
 
 
 @dataclass(frozen=True)
@@ -846,8 +846,12 @@ def set_keep_windows_on_quit(on: bool = True) -> None:
 
 
 def _restart_control_center() -> None:
-    """Quit Control Center, which draws the menu bar's clock and icons: macOS starts it again, reading the settings."""
-    killall("ControlCenter")
+    """
+    Quit Control Center, which draws the menu bar's clock and icons: macOS starts it again, reading the settings.
+
+    Inside :func:`macos._system.batched_restarts` (as :func:`macos.settings.apply` runs), it's put off to the end of the batch.
+    """
+    restart_process("ControlCenter")
 
 
 def battery_percentage_shown() -> bool:
@@ -893,6 +897,19 @@ _CLOCK_OPTIONS = {
 _CLOCK_DATES = ("auto", "always", "never")  # ShowDate's 0, 1 and 2
 
 
+_T = TypeVar("_T")
+
+
+def _as_int(value: object, fallback: _T) -> Union[int, _T]:
+    """``value`` as an int, or ``fallback`` when a hand-edited preference holds something else (text, a list...)."""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return fallback
+
+
 def clock_format() -> Dict[str, object]:
     """
     How the menu bar's clock shows the time.
@@ -903,7 +920,7 @@ def clock_format() -> Dict[str, object]:
     found: Dict[str, object] = {
         name: bool(defaults.read(_CLOCK, key, default=default)) for name, (key, default) in _CLOCK_OPTIONS.items()
     }
-    date = int(defaults.read(_CLOCK, "ShowDate", default=0))
+    date = _as_int(defaults.read(_CLOCK, "ShowDate", default=0), 0)
     found["date"] = _CLOCK_DATES[date] if 0 <= date < len(_CLOCK_DATES) else "auto"
     return found
 
@@ -1001,7 +1018,7 @@ def set_open_photos_on_device_connect(on: bool = True) -> None:
 def menu_bar_spacing() -> Optional[int]:
     """The space around each icon on the right of the menu bar, in points; ``None`` for macOS's own."""
     found = defaults.read(defaults.GLOBAL, "NSStatusItemSpacing", current_host=True)
-    return None if found is None else int(found)
+    return None if found is None else _as_int(found, None)
 
 
 def set_menu_bar_spacing(spacing: Optional[int], *, padding: Optional[int] = None) -> None:
@@ -1095,9 +1112,12 @@ class SecurityStatus:
     """System Integrity Protection guards the system's files."""
 
 
+_SECURITY_TIMEOUT = 30.0  # seconds for fdesetup, spctl, csrutil and socketfilterfw: they answer at once
+
+
 def _state(args: List[str], on: str, off: str) -> Optional[bool]:
     try:
-        output = _run(args).lower()
+        output = _run(args, timeout=_SECURITY_TIMEOUT).lower()
     except (MacOSError, OSError):
         return None
     if on in output:
@@ -1122,7 +1142,10 @@ def security_status() -> SecurityStatus:
     require_macos()
     firewall: Optional[bool] = None
     try:
-        found = re.search(r"State = (\d)", _run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"]))
+        found = re.search(
+            r"State = (\d)",
+            _run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"], timeout=_SECURITY_TIMEOUT),
+        )
         firewall = None if found is None else found.group(1) != "0"
     except (MacOSError, OSError):
         pass
@@ -1245,13 +1268,19 @@ class Process:
         kill(self, force=force)
 
 
-def _user(uid: int) -> Optional[str]:
+def _user(uid: int, known: Optional[Dict[int, Optional[str]]] = None) -> Optional[str]:
+    """The name of ``uid``; ``known`` memoizes the answers across one listing (a lookup can ask the directory server)."""
     import pwd
 
+    if known is not None and uid in known:
+        return known[uid]
     try:
-        return pwd.getpwuid(uid).pw_name
+        name: Optional[str] = pwd.getpwuid(uid).pw_name
     except KeyError:
-        return None
+        name = None
+    if known is not None:
+        known[uid] = name
+    return name
 
 
 def _process_name(name: bytes, short_name: bytes, path: Optional[Path]) -> str:
@@ -1266,7 +1295,7 @@ def _info(lib: ctypes.CDLL, pid: int, flavor: int, into: ctypes.Structure) -> bo
     return bool(lib.proc_pidinfo(pid, flavor, 0, ctypes.byref(into), ctypes.sizeof(into)) == ctypes.sizeof(into))
 
 
-def _read_process(pid: int) -> Optional[Process]:
+def _read_process(pid: int, users: Optional[Dict[int, Optional[str]]] = None) -> Optional[Process]:
     lib, tick = _libproc()
     short = _ShortInfo()
     if not _info(lib, pid, _PROC_PIDT_SHORTBSDINFO, short):
@@ -1281,7 +1310,7 @@ def _read_process(pid: int) -> Optional[Process]:
         pid=pid,
         name=name,
         path=path,
-        user=_user(short.uid),
+        user=_user(short.uid, users),
         parent_pid=short.ppid,
         started=datetime.fromtimestamp(full.start_tvsec + full.start_tvusec / 1e6) if has_full and full.start_tvsec else None,
         memory=int(task.resident_size) if has_task else None,
@@ -1331,7 +1360,8 @@ def processes(*, cpu: bool = False) -> List[Process]:
     is needed.
     """
     def read_all() -> List[Process]:
-        found = [_read_process(pid) for pid in sorted(set(_pids()))]
+        users: Dict[int, Optional[str]] = {}
+        found = [_read_process(pid, users) for pid in sorted(set(_pids()))]
         return [process for process in found if process is not None]
 
     require_macos()
@@ -2193,7 +2223,9 @@ def logs(
         conditions.append("messageType == fault")
     args = ["/usr/bin/log", "show", "--style", "ndjson", "--last", last]
     if level in ("info", "debug"):
-        args.append("--" + level)  # log show leaves them out unless asked
+        args.append("--info")  # log show leaves info and debug messages out unless asked
+    if level == "debug":
+        args.append("--debug")  # --debug alone shows debug messages but still leaves info ones out
     if conditions:
         args += ["--predicate", " AND ".join(conditions)]
     entries: List[LogEntry] = []
@@ -2353,6 +2385,14 @@ class StartupItem:
     """Its description file (a .plist)."""
 
 
+def _running_state(listed: Optional[Dict[str, Optional[bool]]], domain: str, label: str) -> Optional[bool]:
+    """Whether ``label`` runs, from the domain's listing when launchd gave one (a job not listed isn't loaded)."""
+    if listed is None:
+        return _launchd_state(domain, label)
+    state = listed.get(label, False)
+    return _launchd_state(domain, label) if state is None else state
+
+
 def _launchd_state(domain: str, label: str) -> Optional[bool]:
     """Whether a job runs now: ``True``, ``False`` (loaded, not running, or not loaded), or ``None`` if launchd won't say."""
     try:
@@ -2361,6 +2401,31 @@ def _launchd_state(domain: str, label: str) -> Optional[bool]:
         return False if "Could not find service" in (error.stderr or "") else None
     found = re.search(r"^\s*state = (\S+)", output, re.M)
     return found.group(1) == "running" if found else None
+
+
+def _launchd_running(domain: str) -> Optional[Dict[str, Optional[bool]]]:
+    """
+    Which jobs of ``domain`` run now, label -> running, from one ``launchctl print`` of the whole domain.
+
+    ``None`` when launchd won't list the domain: then each job is asked for by itself.
+    """
+    try:
+        output = _run(["launchctl", "print", domain], timeout=LAUNCHCTL_TIMEOUT)
+    except CommandError:
+        return None
+    block = re.search(r"^\s*services = \{\n(.*?)^\s*\}", output, re.M | re.S)
+    if block is None:
+        return None
+    found: Dict[str, Optional[bool]] = {}
+    # One job per line: the pid (0 when not running), the last exit status (or "-", or "(pe)"), the
+    # label. A line written some other way keeps its label with no answer: that job is asked alone.
+    for line in block.group(1).splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit():
+            found[parts[2].strip()] = parts[0] != "0"
+        elif parts:
+            found[parts[-1].strip()] = None
+    return found
 
 
 def startup_items() -> List[StartupItem]:
@@ -2383,7 +2448,10 @@ def startup_items() -> List[StartupItem]:
 
     require_macos()
     user_domain = launchd_user_domain()
-    switches = {"agent": launchd_disabled(user_domain), "daemon": launchd_disabled("system")}
+    domains = {"agent": user_domain, "daemon": "system"}
+    switches = {kind: launchd_disabled(domain) for kind, domain in domains.items()}
+    # One launchctl call per domain, not one per job: a Mac has dozens of them.
+    running = {kind: _launchd_running(domain) for kind, domain in domains.items()}
     found = []
     for folder, kind, shared in _STARTUP_FOLDERS:
         root = Path(folder).expanduser()
@@ -2419,7 +2487,7 @@ def startup_items() -> List[StartupItem]:
                     run_at_load=bool(info.get("RunAtLoad", False)),
                     keep_alive=bool(keep_alive) if not isinstance(keep_alive, dict) else True,
                     enabled=enabled,
-                    running=_launchd_state(user_domain if kind == "agent" else "system", label),
+                    running=_running_state(running[kind], domains[kind], label),
                     path=path,
                 )
             )

@@ -35,6 +35,29 @@ def test_play_drains_what_it_autoreleases(monkeypatch):
     assert events == ["push", "load", "setVolume:", "duration", "play", "pop", "release"]  # released after
 
 
+def test_ctrl_c_while_waiting_stops_the_sound_and_releases_it(monkeypatch):
+    from contextlib import nullcontext
+
+    events = []
+
+    def send(receiver, selector, *args, **kwargs):
+        events.append(selector)
+        return 3.0 if selector == "duration" else True
+
+    def interrupted(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(macos.sound, "_load", lambda sound: 42)
+    monkeypatch.setattr(macos.sound._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(macos.sound._objc, "send", send)
+    monkeypatch.setattr(macos.sound.time, "sleep", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        macos.sound.play("Glass")
+
+    assert events[-2:] == ["stop", "release"]  # not left playing, nor retained for good
+
+
 def test_a_named_sound_is_played_from_a_copy(monkeypatch):
     sent = []
 

@@ -60,13 +60,14 @@ def _state(app: str) -> str:
     return _osascript(app, 'tell application "{}" to player state as string'.format(app)).strip()
 
 
-def _player(app: Optional[str]) -> str:
-    """``app``, or the running player (the one playing, if both run), or Music."""
+def _player(app: Optional[str], running: Optional[List[str]] = None) -> str:
+    """``app``, or the running player (the one playing, if both run), or Music. ``running``: when already known."""
     if app is not None:
         if app not in PLAYERS:
             raise ValueError("app must be one of {}, not {!r}".format(", ".join(PLAYERS), app))
         return app
-    running = _running()
+    if running is None:
+        running = _running()
     playing = [player for player in running if _state(player) == "playing"]
     return (playing or running or ["Music"])[0]
 
@@ -98,8 +99,8 @@ def now_playing(app: Optional[str] = None) -> Optional[Track]:
     """
     if app is not None and app not in PLAYERS:
         raise ValueError("app must be one of {}, not {!r}".format(", ".join(PLAYERS), app))
-    candidates = [app] if app is not None else _running()
-    candidates = [player for player in candidates if player in _running()]
+    running = _running()
+    candidates = [player for player in ([app] if app is not None else running) if player in running]
     found: List[Track] = []
     for player in candidates:
         output = _osascript(player, _TRACK.format(app=player)).rstrip("\n")
@@ -171,8 +172,9 @@ def previous(app: Optional[str] = None) -> None:
 
 def _running_player(app: Optional[str]) -> str:
     """Like ``_player``, but never opens a player: reading or tuning one that isn't running makes no sense."""
-    player = _player(app)
-    if player not in _running():
+    running = _running()  # read once: _player would read it again
+    player = _player(app, running)
+    if player not in running:
         raise MacOSError("{} isn't running".format(player))
     return player
 

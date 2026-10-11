@@ -116,15 +116,35 @@ _ENTITY_KINDS = {"PersonalName": "person", "PlaceName": "place", "OrganizationNa
 
 
 def _language_of(text: str, language: Optional[str]) -> str:
-    code = language or detect(text) or "en"
-    return code.split("-")[0]  # embeddings are per language, not per region
+    return language or detect(text) or "en"
+
+
+def _codes(language: str) -> List[str]:
+    """
+    The codes a model may be filed under for ``language``: the code itself, then its language alone.
+
+    The models are per language, not per region (``'pt-BR'`` finds the Portuguese one), but some only
+    exist under a script subtag: ``'zh-Hans'`` has word classes, ``'zh'`` has none. So the code is tried as
+    it came first, and only then shortened.
+    """
+    primary = language.split("-")[0]
+    return [language] if primary == language else [language, primary]
+
+
+def _embedding(kind: str, language: str) -> Optional[int]:
+    """The word or sentence ``NLEmbedding`` for ``language`` (autoreleased), or ``None`` when this Mac has none."""
+    for code in _codes(language):
+        model = _objc.send(
+            _objc.cls("NLEmbedding"), "{}EmbeddingForLanguage:".format(kind), _objc.nsstring(code), argtypes=(_objc.id,)
+        )
+        if model:
+            return model
+    return None
 
 
 def _model(kind: str, language: str) -> int:
     """The word or sentence ``NLEmbedding`` for ``language`` (autoreleased)."""
-    model = _objc.send(
-        _objc.cls("NLEmbedding"), "{}EmbeddingForLanguage:".format(kind), _objc.nsstring(language), argtypes=(_objc.id,)
-    )
+    model = _embedding(kind, language)
     if not model:
         raise NotSupportedError("no {} embedding for the language {!r} on this Mac".format(kind, language))
     return model
@@ -135,7 +155,8 @@ def similarity(first: str, second: str, *, language: Optional[str] = None) -> fl
     Score how close two texts are in meaning, from -1.0 to 1.0 (higher is closer).
 
     Two single words are compared with a word model (a sentence model when
-    one of them isn't in it), anything longer with a sentence model.
+    one of them isn't in it, or when the language has no word model), anything
+    longer with a sentence model.
     ``language`` (``'en'``, ``'fr'``...) is detected when
     omitted, but detection needs a few words: for single words or very short
     texts, pass it (``similarity("car", "automobile", language="en")``), or
@@ -150,8 +171,8 @@ def similarity(first: str, second: str, *, language: Optional[str] = None) -> fl
     code = _language_of(first + " " + second, language)
     with _objc.autorelease_pool():
         kind = "sentence"
-        if len(first.split()) == 1 and len(second.split()) == 1:
-            words = _model("word", code)
+        words = _embedding("word", code) if len(first.split()) == 1 and len(second.split()) == 1 else None
+        if words:
             known = all(
                 _objc.send(words, "containsString:", _objc.nsstring(word), argtypes=(_objc.id,), restype=_objc.BOOL)
                 for word in (first.strip(), second.strip())
@@ -213,8 +234,12 @@ def _has_scheme(language: str, scheme: str) -> bool:
         return scheme in {_objc.pystring(found) for found in _objc.nsarray(schemes)}
 
 
-def _has_names(language: str) -> bool:
-    return _has_scheme(language, "NameType")
+def _with_scheme(language: str, scheme: str) -> Optional[str]:
+    """The code of :func:`_codes` this Mac has the ``scheme`` model under, or ``None`` when it has none."""
+    for code in _codes(language):
+        if _has_scheme(code, scheme):
+            return code
+    return None
 
 
 def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
@@ -239,9 +264,12 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
     library = _load()
     if not text.strip():
         return []
-    code = _language_of(text, language)
-    if not _has_names(code):
-        raise NotSupportedError("this Mac has no name recognition for the language {!r}".format(code))
+    wanted = _language_of(text, language)
+    code = _with_scheme(wanted, "NameType")
+    if code is None:
+        raise NotSupportedError(
+            "this Mac has no name recognition for the language {!r}".format(wanted)
+        )
     scheme = ctypes.c_void_p.in_dll(library, "NLTagSchemeNameType").value
     if scheme is None:
         raise NotSupportedError("name recognition is not available on this Mac")
@@ -312,9 +340,10 @@ def keywords(text: str, *, language: Optional[str] = None, verbs: bool = False, 
     library = _load()
     if not text.strip():
         return []
-    code = _language_of(text, language)
-    if not _has_scheme(code, "LexicalClass"):
-        raise NotSupportedError("this Mac has no word classes for the language {!r}".format(code))
+    asked = _language_of(text, language)
+    code = _with_scheme(asked, "LexicalClass")
+    if code is None:
+        raise NotSupportedError("this Mac has no word classes for the language {!r}".format(asked))
     lexical = ctypes.c_void_p.in_dll(library, "NLTagSchemeLexicalClass").value
     lemma = ctypes.c_void_p.in_dll(library, "NLTagSchemeLemma").value
     if lexical is None or lemma is None:

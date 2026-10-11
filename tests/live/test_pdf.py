@@ -157,6 +157,26 @@ def test_pdf_metadata_rotate_and_encrypt(tmp_path):
     assert macos.pdf.page_count(changed, password="other") == 2
 
 
+def test_pdf_redrawing_keeps_the_annotations(tmp_path):
+    # A note added to the page, and the page redrawn by watermark(), ocr() and sign(): the note must still show.
+    # Core Graphics draws a page without its annotations, which is how filled forms and notes once vanished.
+    white = tmp_path / "white.png"
+    white.write_bytes(rgb_png(300, 400, lambda x, y: (255, 255, 255)))
+    noted = macos.pdf.add_text(macos.pdf.from_images([white], tmp_path / "page.pdf"), "Received", tmp_path / "noted.pdf", size=40)
+
+    def inked(document):
+        """Whether the top-left corner, where the note is, holds anything but white."""
+        png = tmp_path / "render.png"
+        png.write_bytes(macos.pdf.render(document, 1, size=700))
+        crop = macos.image.crop(png, tmp_path / "crop.png", (36, 38, 160, 50))
+        return macos.image.dominant_colors(crop, 2) != ["#ffffff"]
+
+    assert inked(noted)
+    assert inked(macos.pdf.watermark(noted, "x", tmp_path / "marked.pdf", opacity=0.01))
+    assert inked(macos.pdf.ocr(noted, tmp_path / "searchable.pdf", redo=True))
+    assert inked(macos.pdf.sign(noted, white, tmp_path / "signed.pdf"))
+
+
 def test_pdf_watermark_and_compress(tmp_path):
     document = _text_pdf(tmp_path, ["Page one says hello", "Page two says ola"])
     macos.pdf.rotate(document, 90, document, pages=[2])

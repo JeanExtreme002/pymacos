@@ -129,3 +129,15 @@ def test_music_argument_checks():
             macos.music.seek(seconds)
     with pytest.raises(ValueError, match="0 to 100"):
         macos.music.set_volume(float("nan"))
+
+
+def test_player_commands_read_the_running_players_once(players, monkeypatch):
+    from macos import music
+
+    reads = []
+    real = music._running
+    monkeypatch.setattr(music, "_running", lambda: reads.append(1) or real())
+    macos.music.now_playing()
+    macos.music.pause()
+    macos.music.volume()
+    assert len(reads) == 3  # one read per call, not one per helper on the way

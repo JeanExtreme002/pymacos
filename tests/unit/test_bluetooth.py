@@ -67,6 +67,13 @@ def test_bluetooth_device_matching(commands):
         find("Headset")
 
 
+def test_bluetooth_odd_report(commands):
+    for odd in ("[1, 2]", '{"SPBluetoothDataType": "none"}', "not json"):
+        commands.answers["SPBluetoothDataType"] = (0, odd, "")
+        with pytest.raises(macos.MacOSError, match="something unexpected"):
+            macos.bluetooth.devices()
+
+
 def test_bluetooth_without_devices(commands):
     commands.answers["SPBluetoothDataType"] = (0, '{"SPBluetoothDataType": []}', "")
 

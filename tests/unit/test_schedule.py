@@ -51,6 +51,8 @@ def test_schedule_at_times_and_weekdays(fake_run, home):
 
 
 def test_schedule_at_login_jobs_and_remove(fake_run, home):
+    (home / "venv/bin").mkdir(parents=True)
+    (home / "venv/bin/python").write_text("")
     macos.schedule.add("hello", home / "backup.py", at_login=True, python=home / "venv/bin/python")
     macos.schedule.add("daily", home / "backup.py", at="07:15")
 
@@ -400,3 +402,45 @@ def test_schedule_gives_launchctl_a_time_limit(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
 
     assert all(call.get("timeout") for call in fake_run.calls if call["args"][0] == "launchctl")
+
+
+def test_schedule_refuses_a_string_for_args_and_weekdays(fake_run, home):
+    with pytest.raises(TypeError, match="args must be a list"):
+        macos.schedule.add("backup", home / "backup.py", every=60, args="--quiet")  # would be split into letters
+    with pytest.raises(TypeError, match="weekdays must be a list"):
+        macos.schedule.add("backup", home / "backup.py", at="09:00", weekdays="mon")
+    assert not (home / "Library" / "LaunchAgents").exists()
+
+
+def test_schedule_checks_every_and_the_interpreter(fake_run, home):
+    with pytest.raises(ValueError, match="whole seconds"):
+        macos.schedule.add("backup", home / "backup.py", every=1.9)  # not silently 1
+    with pytest.raises(TypeError, match="every must be a number"):
+        macos.schedule.add("backup", home / "backup.py", every="60")
+    for never in (float("inf"), float("nan"), 0.5):
+        with pytest.raises(ValueError, match="at least 1 second"):
+            macos.schedule.add("backup", home / "backup.py", every=never)
+    with pytest.raises(FileNotFoundError):
+        macos.schedule.add("backup", home / "backup.py", every=60, python=home / "nowhere/python")
+    macos.schedule.add("backup", home / "backup.py", every=60.0)
+    assert _plist(home, "backup")["StartInterval"] == 60
+
+
+def test_schedule_goes_by_the_file_name_not_the_label(fake_run, home):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    agents = home / "Library" / "LaunchAgents"
+    # A copy made by hand keeps the old label: get()/remove() would act on one file and report another.
+    (agents / "pymacos.copy.plist").write_bytes((agents / "pymacos.backup.plist").read_bytes())
+    assert macos.schedule.get("copy") is None
+    assert [job.name for job in macos.schedule.jobs()] == ["backup"]
+    # A StartInterval that isn't a number is reported as no interval, not raised.
+    edited = plistlib.loads((agents / "pymacos.backup.plist").read_bytes())
+    edited["StartInterval"] = "soon"
+    (agents / "pymacos.backup.plist").write_bytes(plistlib.dumps(edited))
+    assert macos.schedule.get("backup").every is None
+
+
+def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    listings = [call["args"] for call in fake_run.calls if call["args"][:2] == ["launchctl", "print-disabled"]]
+    assert len(listings) == 1

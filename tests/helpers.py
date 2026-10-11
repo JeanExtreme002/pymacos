@@ -33,8 +33,12 @@ def png_size(png):
 WALLPAPER_MOVIE = Path("/System/Library/Desktop Pictures/.wallpapers/Sequoia Sunrise/Sequoia Sunrise.mov")
 
 
+# GitHub's runners, where the tests that change the Mac may run unasked: a throwaway machine.
+# ``CI`` alone isn't enough, as it's set in many a shell that is someone's Mac.
+ON_GITHUB = bool(os.environ.get("GITHUB_ACTIONS"))
+
 SETTINGS = pytest.mark.skipif(
-    not (os.environ.get("CI") or os.environ.get("PYMACOS_SETTINGS_TESTS")),
+    not (ON_GITHUB or os.environ.get("PYMACOS_SETTINGS_TESTS")),
     reason="changes (then restores) a setting of this Mac: set PYMACOS_SETTINGS_TESTS=1 to run",
 )
 

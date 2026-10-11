@@ -44,7 +44,8 @@ def _default_mode(folder: str) -> int:
     Read from a file made for it, not with ``os.umask()``, which changes the
     umask of the whole process for a moment, under any other thread too. The
     file is in a folder of its own, so it can't take the name of the output
-    being staged beside it.
+    being staged beside it. Read every time: ``os.umask()`` may have changed
+    it since the last write (a daemon going private before a secrets file).
     """
     inside = tempfile.mkdtemp(dir=folder)
     try:
@@ -88,7 +89,9 @@ def replacing(target: Path) -> Iterator[Path]:
         if not temporary.exists():
             raise MacOSError("could not write {}".format(target))
         try:
-            mode = stat.S_IMODE(os.stat(str(target)).st_mode)
+            # The permission bits only: a setuid, setgid or sticky bit on the old file isn't
+            # something the new content earned.
+            mode = stat.S_IMODE(os.stat(str(target)).st_mode) & 0o777
         except FileNotFoundError:
             mode = _default_mode(folder)
         os.chmod(str(temporary), mode)

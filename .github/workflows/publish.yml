@@ -4,41 +4,20 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
   # Run the whole suite, live tests included, on the commit being released:
   # nothing reaches PyPI from a commit whose tests fail.
   test:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-python@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
       with:
         python-version: '3.12'
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e ".[dev]"
-    - name: Unit tests
-      run: pytest tests/unit -v
-    - name: Live tests
-      # Retried once, as on pull requests: the runner is shared. The unit tests never are.
-      run: pytest tests/live -v --reruns 1 --reruns-delay 5
-
-  # The publish action only runs on Linux, hence a separate job.
-  publish:
-    needs: test
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # Required for trusted publishing (OIDC)
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Set up Python
-      uses: actions/setup-python@v7
-      with:
-        python-version: '3.12'
-
     # A PyPI version can never be uploaded twice, so refuse to publish when the
     # release tag and the package version disagree (e.g. tag v1.1.0 while
     # macos/__init__.py still says 1.0.0).
@@ -50,6 +29,33 @@ jobs:
           exit 1
         fi
 
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+    - name: Unit tests
+      run: pytest tests/unit -v
+    - name: Live tests
+      # Retried once, as on pull requests: the runner is shared. The unit tests never are.
+      run: pytest tests/live -v -rs --reruns 1 --reruns-delay 5
+
+  # The publish action only runs on Linux, hence a separate job.
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # Required for trusted publishing (OIDC)
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      with:
+        python-version: '3.12'
+
     - name: Install build tools
       run: python -m pip install --upgrade pip build
 
@@ -57,4 +63,4 @@ jobs:
       run: python -m build
 
     - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1

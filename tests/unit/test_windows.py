@@ -190,6 +190,16 @@ def test_restarting_the_window_manager_only_ignores_it_not_running(commands):
         windows._restart_window_manager()
 
 
+def test_restarting_the_window_manager_waits_for_the_batch_to_end(commands):
+    from macos import _system, windows
+
+    with _system.batched_restarts():
+        windows._restart_window_manager()
+        windows._restart_window_manager()
+        assert commands.calls == []  # put off until the block ends
+    assert commands.calls == [["killall", "WindowManager"]]  # once
+
+
 def test_request_permission_needs_the_prompt_option(monkeypatch):
     import ctypes
 

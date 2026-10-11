@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Tuple
 
-from . import _events
+from . import _cf, _events
 from ._objc import CGPoint
 from .errors import MacOSError
 
@@ -83,7 +83,7 @@ def position() -> Tuple[float, float]:
     try:
         point = cg.CGEventGetLocation(event)
     finally:
-        cg.CFRelease(event)
+        _cf.release(event)
     return (round(point.x, 1), round(point.y, 1))
 
 
@@ -253,7 +253,10 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[Click]:
             print("clicked at", click.x, click.y)
 
     It only listens: the clicks still reach the apps. It goes on until you
-    ``break`` out of the loop, or ``timeout`` seconds pass.
+    ``break`` out of the loop, or ``timeout`` seconds pass. Needs the *Input
+    Monitoring* permission: without it, the call itself raises
+    :class:`~macos.PermissionDeniedError`, before the loop starts. Loop on
+    the thread that called it: the clicks are heard on that thread's run loop.
     """
     cg = _events.graphics()
     downs = {_BUTTONS["left"][0]: "left", _BUTTONS["right"][0]: "right", _BUTTONS["middle"][0]: None}

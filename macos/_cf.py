@@ -70,10 +70,21 @@ def lib() -> ctypes.CDLL:
     cf.CFStringGetTypeID.argtypes = ()
     cf.CFStringGetTypeID.restype = ctypes.c_ulong
 
+    # CFPreferences, declared here once: defaults.py and appearance.py share the handle.
     cf.CFPreferencesAppSynchronize.argtypes = (CFTypeRef,)
     cf.CFPreferencesAppSynchronize.restype = ctypes.c_bool
     cf.CFPreferencesCopyAppValue.argtypes = (CFTypeRef, CFTypeRef)
     cf.CFPreferencesCopyAppValue.restype = CFTypeRef
+    cf.CFPreferencesSetAppValue.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFPreferencesSetAppValue.restype = None
+    cf.CFPreferencesCopyKeyList.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFPreferencesCopyKeyList.restype = CFTypeRef
+    cf.CFPreferencesSetValue.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFPreferencesSetValue.restype = None
+    cf.CFPreferencesSynchronize.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFPreferencesSynchronize.restype = ctypes.c_bool
+    cf.CFPreferencesCopyValue.argtypes = (CFTypeRef, CFTypeRef, CFTypeRef, CFTypeRef)
+    cf.CFPreferencesCopyValue.restype = CFTypeRef
 
     cf.CFURLCopyFileSystemPath.argtypes = (CFTypeRef, ctypes.c_long)
     cf.CFURLCopyFileSystemPath.restype = CFTypeRef

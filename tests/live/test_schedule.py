@@ -7,9 +7,11 @@ import pytest
 
 import macos
 
+from tests.helpers import ON_GITHUB
+
 
 @pytest.mark.skipif(
-    not (os.environ.get("CI") or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
+    not (ON_GITHUB or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
     reason="adds a launch agent, which macOS announces: set PYMACOS_SCHEDULE_TESTS=1 to run",
 )
 def test_schedule_runs_the_script(tmp_path):
@@ -51,7 +53,7 @@ def _wait_for(path, text="", seconds=30):
 
 
 @pytest.mark.skipif(
-    not (os.environ.get("CI") or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
+    not (ON_GITHUB or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
     reason="adds a launch agent, which macOS announces: set PYMACOS_SCHEDULE_TESTS=1 to run",
 )
 def test_schedule_runs_when_a_folder_changes(tmp_path):
@@ -77,7 +79,7 @@ def test_schedule_runs_when_a_folder_changes(tmp_path):
 
 
 @pytest.mark.skipif(
-    not (os.environ.get("CI") or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
+    not (ON_GITHUB or os.environ.get("PYMACOS_SCHEDULE_TESTS")),
     reason="adds a launch agent, which macOS announces: set PYMACOS_SCHEDULE_TESTS=1 to run",
 )
 def test_schedule_runs_when_a_disk_is_mounted(tmp_path):

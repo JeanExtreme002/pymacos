@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterator, List, Optional
 from . import _cf, _objc
 from ._objc import CGPoint
 from ._system import framework
-from .errors import PermissionDeniedError
+from .errors import MacOSError, PermissionDeniedError
 
 HID_TAP = 0  # kCGHIDEventTap: as if the events came from the hardware
 PAUSE = 0.005  # between events, so apps see them in order
@@ -84,8 +84,6 @@ def graphics() -> ctypes.CDLL:
         "CGRequestListenEventAccess": ((), ctypes.c_bool),
         "CGDisplayRegisterReconfigurationCallback": ((DisplayCallback, pointer), ctypes.c_int32),
         "CGDisplayRemoveReconfigurationCallback": ((DisplayCallback, pointer), ctypes.c_int32),
-        # Through this handle, not CoreFoundation's: its own function object, declared once here.
-        "CFRelease": ((pointer,), None),
     }
     for name, (argtypes, restype) in signatures.items():
         function = getattr(cg, name)
@@ -121,11 +119,10 @@ def require_permission() -> None:
 
 def post(event: int) -> None:
     """Post an owned event, then release it."""
-    cg = graphics()
     try:
-        cg.CGEventPost(HID_TAP, event)
+        graphics().CGEventPost(HID_TAP, event)
     finally:
-        cg.CFRelease(event)
+        _cf.release(event)
     time.sleep(PAUSE)
 
 
@@ -286,7 +283,8 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
     unchanged. ``convert`` runs inside the tap, so it must be quick; returning
     ``None`` skips the event, and an exception it raises comes out of the
     iteration. Stops after ``timeout`` seconds, or when the caller stops
-    iterating. ``denied`` is the error when macOS refuses the tap.
+    iterating. ``denied`` is the error when macOS refuses the tap: raised
+    here, by the call itself, not by the first turn of the iteration.
     """
     listener = Listener()
 
@@ -297,7 +295,45 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
         return event
 
     tap = Tap(kinds, handle, listener, listen_only=True, denied=denied)
-    try:
-        yield from listener.drain(timeout)
-    finally:
-        tap.close()
+    return _Listening(tap, listener.drain(timeout))
+
+
+class _Listening:
+    """
+    What :func:`listen` returns: the items a listener gathers, with the tap closed once they end.
+
+    Not a generator: a generator's ``finally`` only runs once it has started,
+    and the tap is made before that. This closes it whether the caller
+    iterates to the end, breaks out, calls :meth:`close`, or drops it.
+    """
+
+    def __init__(self, tap: Tap, items: Iterator[Any]) -> None:
+        self._tap: Optional[Tap] = tap
+        self._items = items
+        self._thread = threading.get_ident()  # the tap is on this thread's run loop: only it can hear it
+
+    def __iter__(self) -> "_Listening":
+        return self
+
+    def __next__(self) -> Any:
+        if threading.get_ident() != self._thread:
+            raise MacOSError("iterate watch() on the thread that called it: its event tap is on that thread's run loop")
+        try:
+            return next(self._items)
+        except BaseException:  # the end (StopIteration) or an error: either way, done listening
+            self.close()
+            raise
+
+    def close(self) -> None:
+        tap, self._tap = self._tap, None
+        if tap is not None:
+            # The tap first: it's what intercepts the keys. Closing the generator can fail when it's
+            # running on another thread ("generator already executing"); then it ends on its own.
+            tap.close()
+            try:
+                self._items.close()  # type: ignore[attr-defined]  # a generator: its finally runs now
+            except ValueError:
+                pass
+
+    def __del__(self) -> None:
+        self.close()

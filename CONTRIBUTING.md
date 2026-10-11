@@ -18,8 +18,8 @@ for example `make check` (lint, type check and tests) or `make docs`.
 ## Tests
 
 ```bash
-pytest                  # everything, including live tests on your Mac
-pytest tests/unit       # unit tests only (these also run on Linux)
+pytest tests/unit       # unit tests only (these also run on Linux): make test
+pytest                  # everything, including live tests on your Mac: make test-live
 pytest tests/unit/test_audio.py tests/live/test_audio.py   # one module
 ```
 
@@ -32,12 +32,26 @@ tests `macos.audio`):
 Helpers shared by several files are in `tests/helpers.py`, and each folder's
 fixtures in its `conftest.py`.
 
-The live tests talk to the real system. They restore your clipboard and delete
-the Keychain items they create. The ones that turn the camera or the microphone
-on only run when asked: `PYMACOS_CAPTURE_TESTS=1 pytest`. So do the ones that read
-your browser's tabs (`PYMACOS_BROWSER_TESTS=1`) and, outside CI, the one that adds
-a launch agent (`PYMACOS_SCHEDULE_TESTS=1`) or change, then restore, a setting of
-the Mac: the Dock, login items, a default app (`PYMACOS_SETTINGS_TESTS=1`).
+The live tests talk to the real system, so run them when you aren't typing
+elsewhere. Without any switch they: use and restore the clipboard, mute and
+unmute the volume, show three dialogs for a second each, open a small test
+window and give the focus back, create and delete a Keychain item, a Time
+Machine exclusion and a disk image, and ask once for the Automation permission
+(System Events). The more intrusive ones only run when asked, with an
+environment variable:
+
+| Variable | Unlocks |
+|---|---|
+| `PYMACOS_CAPTURE_TESTS=1` | the camera and the microphone |
+| `PYMACOS_BROWSER_TESTS=1` | reading your browser's tabs (macOS asks permission) |
+| `PYMACOS_SCHEDULE_TESTS=1` | adding, then removing, a launch agent (macOS announces it) |
+| `PYMACOS_SETTINGS_TESTS=1` | changing, then restoring, settings: the Dock, login items, a default app, the display mode, a keyboard remap |
+
+On GitHub's runners (`GITHUB_ACTIONS` set) the schedule and settings tests run
+unasked: the machine is thrown away afterwards. `CI` alone unlocks nothing.
+The tests that need a permission the machine lacks (Accessibility, Screen
+Recording, Input Monitoring) skip themselves: `pytest -rs` lists them, so you
+can tell a green run with gaps from a full one.
 
 ## Lint and type check
 

@@ -9,6 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,8 +27,8 @@ jobs:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-python@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -45,12 +48,12 @@ jobs:
       # They talk to a real, shared runner, where speech, launchd and the
       # network are sometimes slow: a failure is retried before it counts.
       # Their coverage is added to the unit tests' for the Codecov report.
-      run: pytest tests/live -v --reruns 1 --reruns-delay 5 --cov=macos --cov-append --cov-report=term --cov-report=xml
+      run: pytest tests/live -v -rs --reruns 1 --reruns-delay 5 --cov=macos --cov-append --cov-report=term --cov-report=xml
     - name: Upload coverage to Codecov
       # Informational only (see codecov.yml): a flaky upload never fails the
       # job. Runs even when tests fail, so partial coverage stays visible.
       if: always()
-      uses: codecov/codecov-action@v7
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7
       with:
         files: ./coverage.xml
         flags: macOS-py${{ matrix.python-version }}
@@ -61,9 +64,10 @@ jobs:
   # unit tests also run on Linux (the live ones skip themselves there).
   test-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-python@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
       with:
         python-version: '3.12'
     - name: Install dependencies
@@ -76,7 +80,7 @@ jobs:
       run: pytest tests -v --cov=macos --cov-report=term --cov-report=xml
     - name: Upload coverage to Codecov
       if: always()
-      uses: codecov/codecov-action@v7
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7
       with:
         files: ./coverage.xml
         flags: Linux-py3.12

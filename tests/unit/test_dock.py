@@ -28,6 +28,69 @@ def dock_settings(monkeypatch, tmp_path):
     return store, restarts, app
 
 
+def test_dock_remove_app_takes_whatever_add_app_took(dock_settings):
+    store, restarts, app = dock_settings
+
+    # The same spellings add_app() accepts: the name with or without .app, the bundle ID, the path.
+    for spelling in ("Safari.app", "safari.APP", "com.apple.Safari", "/Applications/Safari.app", "/Applications/Safari"):
+        store["persistent-apps"] = [
+            {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Safari.app/", "_CFURLStringType": 15},
+                           "file-label": "Safari", "bundle-identifier": "com.apple.Safari"}, "tile-type": "file-tile"},
+        ]  # fmt: skip
+        assert macos.dock.remove_app(spelling) is True, spelling
+        assert store["persistent-apps"] == []
+    added = macos.dock.add_app("Code.app")
+    assert macos.dock.remove_app("Code.app") is True and added.path == app
+    assert macos.dock.remove_app("Code.app") is False
+    # A bundle ID that ends in ".app" is a bundle ID: nothing is cut off it.
+    store["persistent-apps"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Tool.app/", "_CFURLStringType": 15},
+                       "file-label": "Tool", "bundle-identifier": "com.vendor.tool.app"}, "tile-type": "file-tile"},
+    ]  # fmt: skip
+    assert macos.dock.remove_app("com.vendor.tool.app") is True and store["persistent-apps"] == []
+
+
+def test_dock_restart_tolerates_a_dock_that_is_not_running(monkeypatch, commands):
+    pids = [None, None, 7]
+    monkeypatch.setattr(dock, "_pid", lambda: pids.pop(0) if len(pids) > 1 else pids[0])
+    monkeypatch.setattr(dock.time, "sleep", lambda seconds: None)
+    commands.answers["-KILL"] = (1, "", "No matching processes belonging to you were found")
+
+    dock.restart()  # killed a moment ago, not back yet: it reads the settings when it starts
+    assert commands.calls[-1] == ["killall", "-KILL", "Dock"]
+    commands.answers["-KILL"] = (1, "", "Operation not permitted")
+    with pytest.raises(macos.CommandError, match="not permitted"):
+        dock.restart()
+
+
+def test_dock_pid_asks_for_the_dock_alone(monkeypatch):
+    sent = []
+
+    class ObjC:
+        id = object
+        BOOL = bool
+
+        def send(self, receiver, selector, *args, **kwargs):
+            sent.append(selector)
+            return {"isTerminated": False, "processIdentifier": 321}.get(selector, 1)
+
+        def nsarray(self, obj):
+            return [11]
+
+        def nsstring(self, text):
+            return text
+
+        def autorelease_pool(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+    monkeypatch.setattr(dock, "_objc", ObjC())
+    monkeypatch.setattr(dock._apps, "_running_application_class", lambda: 1)
+    assert dock._pid() == 321
+    assert sent[0] == "runningApplicationsWithBundleIdentifier:"  # one call, not a scan of every process
+
+
 def test_dock_settings(dock_settings):
     store, restarts, _ = dock_settings
 
@@ -82,6 +145,48 @@ def test_dock_add_app_index_skips_spacers(dock_settings):
     macos.dock.add_app("Code", index=1)  # after Safari, the first app
     assert [tile.get("tile-type") for tile in store["persistent-apps"]] == ["spacer-tile", "file-tile", "file-tile"]
     assert [entry.name for entry in macos.dock.apps()] == ["Safari", "Code"]
+
+
+def test_dock_add_app_replaces_a_tile_of_another_kind_at_that_path(dock_settings):
+    store, restarts, app = dock_settings
+    # A folder tile pointing at the app's path: adding the app takes its place, it isn't there twice.
+    store["persistent-apps"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ] + store["persistent-apps"]  # fmt: skip
+    store["persistent-apps"].insert(1, {"tile-data": {}, "tile-type": "spacer-tile"})  # folder, spacer, Safari
+    added = macos.dock.add_app("Code")
+    tiles = store["persistent-apps"]
+    assert added.path == app and len(tiles) == 3 and tiles[0]["tile-type"] == "file-tile"  # the folder's exact slot
+    assert [tile["tile-type"] for tile in tiles] == ["file-tile", "spacer-tile", "file-tile"]
+    assert [tile["tile-data"].get("file-label") for tile in tiles] == ["Code", None, "Safari"]
+    assert macos.dock.remove_app("Code") is True and len(store["persistent-apps"]) == 2
+    with pytest.raises(ValueError, match="is an app"):
+        macos.dock.add_folder(app)  # a bundle is a folder to the file system, not to the Dock
+    # With an index asked for, the stray goes and the index counts the apps, as always.
+    store["persistent-apps"] = [
+        {"tile-data": {}, "tile-type": "spacer-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ] + store["persistent-apps"]  # fmt: skip
+    macos.dock.add_app("Code", index=0)  # the spacer left by remove_app() above is still there
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == [None, None, "Code", "Safari"]
+    # Kept as an app already, with a stray folder tile beside it and one on the right side: the strays go.
+    store["persistent-apps"].append(
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"}
+    )  # fmt: skip
+    store["persistent-others"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Users/me/Downloads/", "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ]  # fmt: skip
+    before = len(restarts)
+    assert macos.dock.add_app("Code").path == app
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == [None, None, "Code", "Safari"]
+    assert len(store["persistent-others"]) == 1 and len(restarts) == before + 1
+    assert macos.dock.add_app("Code").path == app and len(restarts) == before + 1  # nothing to change: no restart
 
 
 def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):

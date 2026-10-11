@@ -93,8 +93,10 @@ def test_other_failures_are_not_hidden(fake_settings, monkeypatch):
         raise macos.MacOSError("could not read the Night Shift status")
 
     monkeypatch.setitem(settings._SETTINGS["dock"], "size", settings._Setting(broken, lambda value: None))
-    with pytest.raises(macos.MacOSError, match="Night Shift"):
-        settings.export()
+    # export() leaves the one it couldn't read out, says so, and exports the rest.
+    with pytest.warns(RuntimeWarning, match="dock.size couldn't be read.*Night Shift"):
+        exported = settings.export()
+    assert "size" not in exported["dock"] and exported["dock"]["autohide"] is False
     with pytest.raises(macos.MacOSError, match="Night Shift"):
         settings.apply({"dock": {"size": 64}})
 

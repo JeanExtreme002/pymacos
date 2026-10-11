@@ -112,3 +112,70 @@ def test_a_session_that_fails_to_start_forgets_its_delegate(capture_stubs, monke
         with pytest.raises(macos.MacOSError, match="can't be used that way"):
             work()
     assert capture_stubs == ["delegate", "forget", "delegate", "forget"]
+
+
+def test_ctrl_c_while_recording_keeps_the_movie_so_far(capture_stubs, monkeypatch, tmp_path):
+    from macos import camera
+
+    sent, waits = [], []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append(selector)
+
+    def run_until(done, timeout):
+        waits.append(timeout)
+        if len(waits) == 1:
+            return True  # the recording began
+        raise KeyboardInterrupt  # while it records
+
+    def wait(delegate, what):
+        sent.append("wait:" + what)
+        target.write_bytes(b"movie so far")  # the recorder finishes the file when told to stop
+        return {"done": True}
+
+    target = tmp_path / "clip.mov"
+    monkeypatch.setattr(camera, "_session", lambda inputs, output: "session")
+    monkeypatch.setattr(camera._objc, "send", send)
+    monkeypatch.setattr(camera._objc, "file_url", lambda path: "url")
+    monkeypatch.setattr(camera._objc, "run_until", run_until)
+    monkeypatch.setattr(camera, "_wait", wait)
+
+    interrupted = camera._record(target, 60, None, False)
+
+    assert isinstance(interrupted, KeyboardInterrupt)  # handed back once the movie is written, not raised at once
+    assert sent == ["startRecordingToOutputFileURL:recordingDelegate:", "stopRecording", "wait:video", "stopRunning"]
+    assert target.read_bytes() == b"movie so far"
+
+
+def test_ctrl_c_before_anything_was_recorded_is_the_error(capture_stubs, monkeypatch, tmp_path):
+    from macos import camera
+
+    def run_until(done, timeout):
+        if timeout == camera._TIMEOUT:
+            return True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(camera, "_session", lambda inputs, output: "session")
+    monkeypatch.setattr(camera._objc, "send", lambda receiver, selector, *args, **kwargs: None)
+    monkeypatch.setattr(camera._objc, "file_url", lambda path: "url")
+    monkeypatch.setattr(camera._objc, "run_until", run_until)
+    monkeypatch.setattr(camera, "_wait", lambda delegate, what: {"done": True})  # but no file came out
+    with pytest.raises(KeyboardInterrupt):  # the Ctrl-C, not "the video wasn't saved"
+        camera._record(tmp_path / "clip.mov", 60, None, False)
+
+
+def test_record_raises_the_ctrl_c_once_the_movie_is_in_place(monkeypatch, tmp_path):
+    from macos import _capture, camera
+
+    def record(temporary, seconds, which, audio):
+        temporary.write_bytes(b"movie so far")
+        return KeyboardInterrupt()
+
+    monkeypatch.setattr(camera._files, "require_main_thread", lambda what: None)
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(camera, "_record", record)
+    target = tmp_path / "clip.mov"
+    target.write_bytes(b"yesterday")
+    with pytest.raises(KeyboardInterrupt):
+        macos.camera.record(target, 60)
+    assert target.read_bytes() == b"movie so far" and [path.name for path in tmp_path.iterdir()] == ["clip.mov"]

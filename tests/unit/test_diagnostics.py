@@ -226,3 +226,30 @@ def test_logs_stop_a_log_show_that_takes_too_long(monkeypatch):
     assert isinstance(raised.value, TimeoutError) and raised.value.cmd[:2] == ["/usr/bin/log", "show"]
     with pytest.raises(ValueError, match="timeout"):
         system.logs(timeout=0)
+
+
+def test_logs_asks_for_info_and_debug_messages(monkeypatch):
+    import io
+    import subprocess
+
+    seen = []
+
+    class Done:
+        """A ``log show`` that wrote nothing and exited, as Popen hands it over."""
+
+        def __init__(self, args, **kwargs):
+            seen.append(list(args))
+            self.stdout, self.returncode = io.StringIO(""), 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", Done)
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    for level in ("info", "debug", "error"):
+        system.logs(level=level, last="1m", limit=1)
+    flags = [[flag for flag in args if flag in ("--info", "--debug")] for args in seen]
+    assert flags == [["--info"], ["--info", "--debug"], []]  # --debug alone leaves the info messages out

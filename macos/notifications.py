@@ -17,11 +17,10 @@ drops them without any error, so :func:`notify` checks that setting and raises
 """
 
 import plistlib
-import subprocess
 from typing import List, Optional
 
-from ._system import require_macos, run as _run
-from .errors import PermissionDeniedError
+from ._system import require_macos, run as _run, run_bytes
+from .errors import CommandError, CommandTimeoutError, NotSupportedError, PermissionDeniedError
 
 __all__ = ["notify", "is_allowed"]
 
@@ -30,6 +29,7 @@ _SCRIPT_EDITOR = "com.apple.ScriptEditor2"
 # settings format is undocumented; this bit is known from reverse engineering
 # (e.g. the ncprefs.py project) and matches what toggling the switch changes.
 _ALLOW_NOTIFICATIONS = 1 << 25
+_SETTINGS_TIMEOUT = 30.0  # seconds for ``defaults export``: it answers at once unless cfprefsd is wedged
 
 
 def is_allowed() -> Optional[bool]:
@@ -42,14 +42,19 @@ def is_allowed() -> Optional[bool]:
     """
     require_macos()
     try:
-        raw = subprocess.run(["defaults", "export", "com.apple.ncprefs", "-"], capture_output=True, check=True).stdout
+        raw = run_bytes(["defaults", "export", "com.apple.ncprefs", "-"], timeout=_SETTINGS_TIMEOUT)
         settings = plistlib.loads(raw)
-    except Exception:  # best effort: an unreadable format must never break notify()
+    except (CommandError, CommandTimeoutError, NotSupportedError, plistlib.InvalidFileException, ValueError, OSError):
+        return None  # best effort: an unreadable format must never break notify()
+    if not isinstance(settings, dict):
         return None
-
     for app in settings.get("apps", []):
         if isinstance(app, dict) and app.get("bundle-id") == _SCRIPT_EDITOR:
-            return bool(int(app.get("flags", 0)) & _ALLOW_NOTIFICATIONS)
+            try:
+                allowed = bool(int(app.get("flags", 0)) & _ALLOW_NOTIFICATIONS)
+            except (TypeError, ValueError):
+                return None  # a format we don't know: best effort, as above
+            return allowed
     return None
 
 
@@ -76,7 +81,12 @@ def notify(
 
     Raises :class:`~macos.errors.PermissionDeniedError` when notifications are
     turned off for Script Editor, since macOS would silently drop them. Pass
-    ``check_permission=False`` to skip that check.
+    ``check_permission=False`` to skip that check (it reads the settings,
+    through ``defaults``, before every notification).
+
+    The text reaches ``osascript`` as arguments, which other processes of the
+    same user can see in the process list while it runs: don't put a secret
+    in a notification.
     """
     # The text travels as script arguments (``argv``), never spliced into the
     # AppleScript source, so quotes or backslashes in it can't break or inject

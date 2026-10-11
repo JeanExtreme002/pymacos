@@ -266,18 +266,12 @@ def _spans(line: str, needle: str) -> List[Tuple[int, int]]:
     return spans
 
 
-def _words(image: Image, languages: Optional[Sequence[str]] = None) -> List[Tuple[str, Tuple[float, float, float, float]]]:
-    """Every word of the image's text, with its own box (fractions of the image from its top-left)."""
-    _load()
-    with _objc.autorelease_pool():
-        return _words_of(_perform(image, _request(languages, False)))
-
-
 def _picture_words(
     picture: int, languages: Optional[Sequence[str]] = None
 ) -> List[Tuple[str, Tuple[float, float, float, float]]]:
     """
-    :func:`_words` for a ``CGImage`` already drawn (a page of a PDF), handed to Vision as it is.
+    Every word of a ``CGImage`` already drawn (a page of a PDF), with its own box (fractions of the image
+    from its top-left), handed to Vision as it is.
 
     No image file in between: encoding a page as PNG for Vision to decode it
     again is most of the work for a large page.
@@ -850,8 +844,6 @@ _HAND_JOINTS = ["Wrist"] + [
 
 def _snake(name: str) -> str:
     """``LeftShoulder`` -> ``left_shoulder``; ``ThumbCMC`` -> ``thumb_cmc``."""
-    import re
-
     return re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower()
 
 

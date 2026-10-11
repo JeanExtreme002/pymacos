@@ -161,6 +161,8 @@ def _string(target: int, selector: str) -> str:
     # AudioHardwareBase.h, for kAudioObjectPropertyName and
     # kAudioDevicePropertyDeviceUID: "The caller is responsible for releasing
     # the returned CFObject", so the string is released once read.
+    if len(raw) < ctypes.sizeof(ctypes.c_void_p):
+        return ""  # not a CFStringRef: nothing to read, or to release
     with _cf.owned(ctypes.c_void_p.from_buffer_copy(raw).value) as ref:
         return _cf.to_str(ref) or ""
 
@@ -374,17 +376,13 @@ def request_permission() -> bool:
     return _capture.request_permission(_capture.AUDIO)
 
 
-def _four_char(text: str) -> int:
-    return int.from_bytes(text.encode("ascii"), "big")
-
-
 # The format each extension records in: AAC for .m4a, uncompressed PCM for the others.
 _RECORD_FORMATS = {
-    ".m4a": {"AVFormatIDKey": _four_char("aac "), "AVEncoderAudioQualityKey": 96},  # AVAudioQualityHigh
-    ".wav": {"AVFormatIDKey": _four_char("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 0},
-    ".aiff": {"AVFormatIDKey": _four_char("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 1},
-    ".aif": {"AVFormatIDKey": _four_char("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 1},
-    ".caf": {"AVFormatIDKey": _four_char("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 0},
+    ".m4a": {"AVFormatIDKey": _code("aac "), "AVEncoderAudioQualityKey": 96},  # AVAudioQualityHigh
+    ".wav": {"AVFormatIDKey": _code("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 0},
+    ".aiff": {"AVFormatIDKey": _code("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 1},
+    ".aif": {"AVFormatIDKey": _code("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 1},
+    ".caf": {"AVFormatIDKey": _code("lpcm"), "AVLinearPCMBitDepthKey": 16, "AVLinearPCMIsBigEndianKey": 0},
 }
 
 
@@ -988,7 +986,7 @@ def _read_samples(
         raise MacOSError("could not read the sound: {}".format(_objc.error_message(error) or "unknown error"))
     _objc.send(reader, "autorelease")
     settings = {
-        "AVFormatIDKey": _four_char("lpcm"),
+        "AVFormatIDKey": _code("lpcm"),
         "AVSampleRateKey": rate,
         "AVNumberOfChannelsKey": channels,
         "AVLinearPCMBitDepthKey": 16,
@@ -1013,9 +1011,9 @@ def _read_samples(
         dictionary,
         argtypes=(_objc.id, _objc.id),
     )
-    _objc.send(output, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None)
     if not output or not _objc.send(reader, "canAddOutput:", output, argtypes=(_objc.id,), restype=_objc.BOOL):
         raise MacOSError("could not read the sound as samples")
+    _objc.send(output, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None)
     _objc.send(reader, "addOutput:", output, argtypes=(_objc.id,), restype=None)
     _objc.send(reader, "setTimeRange:", _media.time_range(0, length), argtypes=(_media.CMTimeRange,), restype=None)
     if not _objc.send(reader, "startReading", restype=_objc.BOOL):

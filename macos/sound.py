@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Set, Union
 
-from . import _objc
+from . import _objc, defaults
 from ._objc import BOOL
 from ._system import framework, require_macos
 
@@ -109,8 +109,13 @@ def play(sound: Union[str, "os.PathLike[str]"], *, volume: float = 1.0, wait: bo
         _objc.send(player, "release", restype=None)
 
     if wait:
-        time.sleep(duration)
-        finish()
+        try:
+            time.sleep(duration)
+        except BaseException:
+            _objc.send(player, "stop", restype=BOOL)  # Ctrl-C: the sound stops with the script
+            raise
+        finally:
+            finish()
     else:
         timer = threading.Timer(duration + 0.5, finish)
         timer.daemon = True
@@ -127,8 +132,6 @@ def beep() -> None:
 
 def alert_sound() -> Optional[str]:
     """The name of the alert sound, as in :func:`names`; ``None`` for macOS's own."""
-    from . import defaults
-
     path = defaults.read(defaults.GLOBAL, "com.apple.sound.beep.sound")
     return Path(path).stem if path else None
 
@@ -139,8 +142,6 @@ def set_alert_sound(name: Optional[str]) -> None:
 
     Apps pick it up when they're reopened.
     """
-    from . import defaults
-
     if name is None:
         defaults.delete(defaults.GLOBAL, "com.apple.sound.beep.sound")
         return
@@ -155,15 +156,11 @@ def set_alert_sound(name: Optional[str]) -> None:
 
 def alert_volume() -> float:
     """The volume of alert sounds, from 0.0 to 1.0, as a share of the output volume."""
-    from . import defaults
-
     return round(float(defaults.read(defaults.GLOBAL, "com.apple.sound.beep.volume", default=1.0)), 3)
 
 
 def set_alert_volume(volume: float) -> None:
     """Set the volume of alert sounds, from 0.0 to 1.0, apart from music and videos, like System Settings › Sound."""
-    from . import defaults
-
     if not 0.0 <= volume <= 1.0:
         raise ValueError("volume must be from 0.0 to 1.0, not {}".format(volume))
     defaults.write(defaults.GLOBAL, "com.apple.sound.beep.volume", float(volume))
@@ -171,13 +168,9 @@ def set_alert_volume(volume: float) -> None:
 
 def ui_sounds() -> bool:
     """Whether the interface plays sound effects, such as emptying the Trash or taking a screenshot."""
-    from . import defaults
-
     return bool(defaults.read("com.apple.systemsound", "com.apple.sound.uiaudio.enabled", default=1))
 
 
 def set_ui_sounds(on: bool = True) -> None:
     """Play the interface's sound effects, or keep it quiet (``False``). Alerts still play."""
-    from . import defaults
-
     defaults.write("com.apple.systemsound", "com.apple.sound.uiaudio.enabled", 1 if on else 0)

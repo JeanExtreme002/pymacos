@@ -103,8 +103,7 @@ class _FakeEvents:
 
         return CGPoint(*self.pointer)
 
-    def CFRelease(self, event):
-        pass
+    released = ()  # the fake events are numbers, not CF objects: releasing them is a no-op (see fake_events)
 
     flags_state = 0
 
@@ -120,5 +119,6 @@ def fake_events(monkeypatch):
     monkeypatch.setattr(_events, "graphics", lambda: fake)
     monkeypatch.setattr(_events, "has_permission", lambda: True)
     monkeypatch.setattr(_events, "post", lambda event: fake.posted.append(fake.events[event]))
+    monkeypatch.setattr(_events._cf, "release", lambda ref: None)  # the events are fake numbers, not CF objects
     monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"c": (8, False), "?": (44, True), "+": (24, True)})
     return fake

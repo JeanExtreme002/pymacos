@@ -95,7 +95,8 @@ while True:
     restyle(theme)
 ```
 
-With `timeout`, it raises `TimeoutError` if nothing changes in time.
+With `timeout`, it raises {class}`~macos.WaitTimeoutError` (a `TimeoutError`) if
+nothing changes in time.
 
 ## Reference
 

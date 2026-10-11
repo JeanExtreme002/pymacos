@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Union
 
-from . import _objc
+from . import _cf, _objc
 from ._objc import BOOL, NSInteger
 from ._system import framework
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = [
     "copy",
@@ -118,7 +118,8 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 0.2) -
 
     Returns ``None`` if the new content isn't text (an image, files...).
     Clearing the clipboard doesn't count as a copy. Raises
-    :class:`TimeoutError` if nothing is copied within ``timeout`` seconds.
+    :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if nothing is copied
+    within ``timeout`` seconds.
     ``interval`` is how often to check, in seconds.
     """
     if interval <= 0:
@@ -134,7 +135,7 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 0.2) -
             continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("nothing was copied within {}s".format(timeout))
+            raise WaitTimeoutError("nothing was copied within {}s".format(timeout))
         # Never sleep past the deadline, even with a long interval.
         time.sleep(min(interval, remaining))
     return paste()
@@ -262,7 +263,7 @@ def paste_files() -> List[Path]:
             _objc.cls("NSDictionary"),
             "dictionaryWithObject:forKey:",
             _objc.send(_objc.cls("NSNumber"), "numberWithBool:", True, argtypes=(BOOL,)),
-            _objc.nsstring("NSPasteboardURLReadingFileURLsOnlyKey"),
+            _cf.constant(framework("AppKit"), "NSPasteboardURLReadingFileURLsOnlyKey"),  # the real key, not its name
             argtypes=(_objc.id, _objc.id),
         )
         urls = _objc.send(

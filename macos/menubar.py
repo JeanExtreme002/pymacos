@@ -60,9 +60,16 @@ def _clicked(target: int, _cmd: int, sender: int) -> None:
 
 
 def _on_main(change: Callable[[], None]) -> None:
-    """Do an AppKit change now on the main thread, or queue it for :func:`run` from any other."""
+    """
+    Do an AppKit change now on the main thread, or queue it for :func:`run` from any other.
+
+    Done now, it has a pool of its own: outside :func:`run` nothing else
+    drains what it autoreleases (a title's string), which would stay for the
+    rest of the process.
+    """
     if threading.current_thread() is threading.main_thread():
-        change()
+        with _objc.autorelease_pool():
+            change()
     else:
         _calls.append(change)
 
@@ -203,34 +210,37 @@ class Item:
             raise ValueError("a menu bar item needs a title, an icon, or both")
         _require_main_thread("creating a menu bar item")
         _application()
-        # Load the icon first: a bad one must fail before anything is in the menu bar.
-        image = _image(icon, template) if icon is not None else None
-        bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
-        native = _objc.send(bar, "statusItemWithLength:", _VARIABLE_LENGTH, argtypes=(ctypes.c_double,))
-        self._native = int(_objc.send(native, "retain"))
-        self._button = int(_objc.send(self._native, "button"))
-        self._menu = int(_objc.send(_objc.send(_objc.cls("NSMenu"), "alloc"), "init"))
-        # Our enabled flags decide, not AppKit's guess from the action's target.
-        _objc.send(self._menu, "setAutoenablesItems:", False, argtypes=(BOOL,), restype=None)
-        _objc.send(self._native, "setMenu:", self._menu, argtypes=(_objc.id,), restype=None)
-        self._entries: List[MenuItem] = []
-        self._quit_entry: Optional[MenuItem] = None
-        self._quit_line: Optional[int] = None  # the separator above Quit: add() inserts before it
-        self._removing = False  # set by remove() at once, under _lock: no more entries after it
-        self._removed = False  # set once the native objects are released, on the main thread
-        self._title: Optional[str] = None
-        self._tooltip: Optional[str] = None
-        self.set_title(title)
-        if image is not None:
-            self._show_icon(image)
-        if tooltip is not None:
-            self.set_tooltip(tooltip)
-        if quit is not None:
-            line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
-            self._quit_entry = _native_entry(str(quit), _quit_all, None, True, False)
-            for native in (line, self._quit_entry._native):
-                _objc.send(self._menu, "addItem:", native, argtypes=(_objc.id,), restype=None)
-            self._quit_line = line
+        # Its own pool: what AppKit autoreleases here (the status item before it's retained, the
+        # strings) is drained now, not kept until run() turns, or for good when run() never does.
+        with _objc.autorelease_pool():
+            # Load the icon first: a bad one must fail before anything is in the menu bar.
+            image = _image(icon, template) if icon is not None else None
+            bar = _objc.send(_objc.cls("NSStatusBar"), "systemStatusBar")
+            native = _objc.send(bar, "statusItemWithLength:", _VARIABLE_LENGTH, argtypes=(ctypes.c_double,))
+            self._native = int(_objc.send(native, "retain"))
+            self._button = int(_objc.send(self._native, "button"))
+            self._menu = int(_objc.send(_objc.send(_objc.cls("NSMenu"), "alloc"), "init"))
+            # Our enabled flags decide, not AppKit's guess from the action's target.
+            _objc.send(self._menu, "setAutoenablesItems:", False, argtypes=(BOOL,), restype=None)
+            _objc.send(self._native, "setMenu:", self._menu, argtypes=(_objc.id,), restype=None)
+            self._entries: List[MenuItem] = []
+            self._quit_entry: Optional[MenuItem] = None
+            self._quit_line: Optional[int] = None  # the separator above Quit: add() inserts before it
+            self._removing = False  # set by remove() at once, under _lock: no more entries after it
+            self._removed = False  # set once the native objects are released, on the main thread
+            self._title: Optional[str] = None
+            self._tooltip: Optional[str] = None
+            self.set_title(title)
+            if image is not None:
+                self._show_icon(image)
+            if tooltip is not None:
+                self.set_tooltip(tooltip)
+            if quit is not None:
+                line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))  # the menu keeps it
+                self._quit_entry = _native_entry(str(quit), _quit_all, None, True, False)
+                for native in (line, self._quit_entry._native):
+                    _objc.send(self._menu, "addItem:", native, argtypes=(_objc.id,), restype=None)
+                self._quit_line = line
         with _lock:
             _items.append(self)
 
@@ -273,7 +283,8 @@ class Item:
 
     def set_icon(self, icon: Optional[Image], *, template: bool = True) -> None:
         """Show ``icon`` (a file path or the bytes of an image), or remove it with ``None``."""
-        self._show_icon(_image(icon, template) if icon is not None else None)
+        with _objc.autorelease_pool():  # the image is retained; what loading it autoreleased isn't kept
+            self._show_icon(_image(icon, template) if icon is not None else None)
 
     def _show_icon(self, image: Optional[int]) -> None:
         """Put ``image`` (retained, or ``None``) on the button, and drop our reference to it."""
@@ -319,8 +330,9 @@ class Item:
         """
         _require_main_thread("adding a menu entry")
         self._require_present("adding a menu entry")
-        entry = _native_entry(str(title), callback, key, enabled, checked)
-        self._insert(cast(int, entry._native))  # just made: set until remove()
+        with _objc.autorelease_pool():
+            entry = _native_entry(str(title), callback, key, enabled, checked)
+            self._insert(cast(int, entry._native))  # just made: set until remove()
         self._entries.append(entry)
         return entry
 
@@ -345,7 +357,8 @@ class Item:
         """Add a line between entries, above *Quit*."""
         _require_main_thread("adding a menu separator")
         self._require_present("adding a menu separator")
-        self._insert(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))
+        with _objc.autorelease_pool():
+            self._insert(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))  # the menu retains it
 
     def _require_present(self, what: str) -> None:
         with _lock:
@@ -416,7 +429,9 @@ class Timer:
     def __init__(self, seconds: float, callback: Callable[[], object]) -> None:
         self.seconds = seconds
         self.callback = callback
-        self._next = time.monotonic() + seconds
+        # Armed by the first turn of run(): the first call is ``seconds`` after run() starts, not
+        # after every(), which a script usually calls well before.
+        self._next: Optional[float] = None
         self._cancelled = False
 
     def __repr__(self) -> str:
@@ -457,12 +472,19 @@ def quit() -> None:
 
 
 def _due_timers(now: float) -> List[Timer]:
+    due = []
     with _lock:
-        due = [timer for timer in _timers if not timer._cancelled and timer._next <= now]
+        for timer in _timers:
+            if timer._cancelled:
+                continue
+            if timer._next is None:  # the first turn since every(): the first call a full interval from now
+                timer._next = now + timer.seconds
+            elif timer._next <= now:
+                due.append(timer)
     for timer in due:
         # Skip the ticks missed while busy, rather than catching up in a burst:
         # the next one is always a full interval after a late call.
-        following = timer._next + timer.seconds
+        following = cast(float, timer._next) + timer.seconds
         timer._next = following if following > now else now + timer.seconds
     return due
 

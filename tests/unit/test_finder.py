@@ -39,9 +39,11 @@ def test_make_alias_checks_its_paths(tmp_path):
 
 
 def test_watch_tells_what_happened(tmp_path):
+    import collections
+
     from macos.finder import _CREATED, _RENAMED, _kind
 
-    seen = set()
+    seen = collections.OrderedDict()
     new = tmp_path / "new.txt"
     new.write_text("x")
     # FSEvents keeps the "created" flag on later changes: only the first sighting is a creation.
@@ -55,6 +57,23 @@ def test_watch_tells_what_happened(tmp_path):
     assert _kind(new, _CREATED, seen) == "deleted"
     new.write_text("again")
     assert _kind(new, _CREATED, seen) == "created"
+
+
+def test_watch_forgets_the_oldest_paths_it_saw(tmp_path, monkeypatch):
+    import collections
+
+    from macos import finder
+    from macos.finder import _CREATED, _kind
+
+    monkeypatch.setattr(finder, "_SEEN_LIMIT", 3)
+    seen = collections.OrderedDict()
+    files = [tmp_path / "{}.txt".format(index) for index in range(4)]
+    for file in files:
+        file.write_text("x")
+        assert _kind(file, _CREATED, seen) == "created"
+    assert list(seen) == files[1:]  # the first is forgotten: at most 3 are kept
+    assert _kind(files[0], _CREATED, seen) == "created"  # sighted again: as new, the price of a bounded memory
+    assert _kind(files[2], _CREATED, seen) == "modified" and list(seen)[-1] == files[2]  # recent again: kept longest
 
 
 def test_watch_needs_a_folder(tmp_path):
@@ -123,12 +142,29 @@ def test_finder_compress_and_extract_commands(fake_run, tmp_path):
 def test_quick_look_returns_at_once(fake_run, monkeypatch, tmp_path):
     import subprocess
 
+    from macos import finder
+
     started = []
-    monkeypatch.setattr(subprocess, "Popen", lambda args, **kwargs: started.append((args, kwargs["start_new_session"])))
+
+    class Preview:
+        def __init__(self, args, **kwargs):
+            started.append((args, kwargs["start_new_session"]))
+            self.over = False
+
+        def poll(self):
+            return 0 if self.over else None
+
+    monkeypatch.setattr(subprocess, "Popen", Preview)
+    monkeypatch.setattr(finder, "_previews", [])
     (tmp_path / "a.txt").write_text("x")
 
     macos.finder.quick_look(tmp_path / "a.txt")
     assert started == [(["qlmanage", "-p", str(tmp_path / "a.txt")], True)]
+    # The process is kept (no warning about one dropped running) until it's over, then reaped by the next call.
+    assert len(finder._previews) == 1
+    finder._previews[0].over = True
+    macos.finder.quick_look(tmp_path / "a.txt")
+    assert len(finder._previews) == 1 and not finder._previews[0].over
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sets real icons, on files in a temporary folder")
@@ -202,7 +238,7 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(finder, "require_macos", lambda: None)
     monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [])  # nothing indexed: walked
     monkeypatch.setattr(finder.time, "monotonic", tick)
-    with pytest.raises(TimeoutError, match="took more than 25 seconds"):
+    with pytest.raises(macos.WaitTimeoutError, match="took more than 25 seconds"):
         finder.largest(tmp_path, at_least=1024, timeout=25)
 
     clock["now"] = 0.0

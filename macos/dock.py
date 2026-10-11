@@ -16,6 +16,7 @@ Each change restarts the Dock to apply it: it disappears for a second. No
 permission is needed.
 """
 
+import ctypes
 import os
 import time
 from dataclasses import dataclass
@@ -23,9 +24,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote, unquote, urlparse
 
-from . import apps as _apps, defaults
+from . import _objc, apps as _apps, defaults
+from ._objc import BOOL
 from ._system import require_macos, restart_later, run as _run
-from .errors import AppNotFoundError, MacOSError
+from .errors import AppNotFoundError, CommandError, MacOSError
 
 __all__ = [
     "DockApp",
@@ -97,9 +99,18 @@ _SETTLE = 1.5  # seconds a new Dock takes to read its settings, and write them b
 
 
 def _pid() -> Optional[int]:
-    for app in _apps.running(include_background=True):
-        if app.bundle_id == "com.apple.dock":
-            return app.pid
+    """The running Dock's pid: asked by bundle ID, not by listing every process on each poll."""
+    with _objc.autorelease_pool():
+        for handle in _objc.nsarray(
+            _objc.send(
+                _apps._running_application_class(),
+                "runningApplicationsWithBundleIdentifier:",
+                _objc.nsstring("com.apple.dock"),
+                argtypes=(_objc.id,),
+            )
+        ):
+            if not _objc.send(handle, "isTerminated", restype=BOOL):
+                return int(_objc.send(handle, "processIdentifier", restype=ctypes.c_int))
     return None
 
 
@@ -114,8 +125,13 @@ def restart() -> None:
     require_macos()
     old = _pid()
     # Killed, not asked to quit: a quitting Dock saves the settings it had over the change.
-    # launchd starts a new one right away.
-    _run(["killall", "-KILL", "Dock"], timeout=10)  # killall only signals: never long
+    # launchd starts a new one right away. One that isn't running (killed a moment ago, not back
+    # yet) is fine: it reads the settings when it starts.
+    try:
+        _run(["killall", "-KILL", "Dock"], timeout=10)  # killall only signals: never long
+    except CommandError as error:
+        if error.returncode != 1 or "No matching processes" not in error.stderr:
+            raise
     deadline = time.monotonic() + 10
     while True:
         pid = _pid()
@@ -202,14 +218,22 @@ def apps() -> List[DockApp]:
 
 
 def _matches(tile: Dict[str, Any], app: str) -> bool:
+    """Whether ``app`` (a name, with or without ``.app``, a bundle ID or a path) names this tile."""
     data = tile.get("tile-data", {})
     path = _tile_path(tile)
-    wanted = app.casefold()
-    return wanted in (
+    wanted = {app.casefold()}
+    if app.casefold().endswith(".app"):  # "Safari.app", or a path: a bundle ID ending in .app is kept as is
+        wanted.add(app.casefold()[: -len(".app")])
+    candidates = {
         str(data.get("file-label", "")).casefold(),
         str(data.get("bundle-identifier", "")).casefold(),
-        str(path).casefold() if path else "",
-    )
+    }
+    if path:
+        candidates.update({str(path).casefold(), path.name.casefold(), path.stem.casefold()})
+        if str(path).casefold().endswith(".app"):
+            candidates.add(str(path).casefold()[: -len(".app")])
+    candidates.discard("")
+    return bool(wanted & candidates)
 
 
 def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
@@ -224,9 +248,22 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
     if not path.exists():
         raise AppNotFoundError("{!r} is not an installed app".format(app))
     tiles = _tiles()
-    existing = [tile for tile in tiles if _tile_path(tile) == path]
-    if existing:
-        return next(entry for entry in apps() if entry.path == path)
+    paths = [_tile_path(tile) for tile in tiles]  # once: each is a realpath of its own
+    # Kept as a tile of another kind (a folder tile at that path, say), on either side of the Dock:
+    # those go, so the app isn't there twice. On the left, the app takes the first one's slot.
+    strays = [position for position, (tile, where) in enumerate(zip(tiles, paths)) if where == path and not _is_app(tile)]
+    tiles = [tile for position, tile in enumerate(tiles) if position not in strays]
+    others = _others()
+    kept_others = [tile for tile in others if _tile_path(tile) != path]
+    if len(kept_others) != len(others):
+        defaults.write(_DOMAIN, "persistent-others", kept_others)
+    kept = next((tile for tile, where in zip(tiles, paths) if where == path and _is_app(tile)), None)
+    if kept is not None:
+        if strays or len(kept_others) != len(others):
+            defaults.write(_DOMAIN, "persistent-apps", tiles)
+            restart()
+        data = kept.get("tile-data", {})
+        return DockApp(name=data.get("file-label") or path.stem, path=path, bundle_id=data.get("bundle-identifier"))
     bundle_id = _apps._bundle_id(str(path))
     name = path.stem
     tile = {
@@ -237,7 +274,10 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
         },
         "tile-type": "file-tile",
     }
-    _insert(tiles, tile, index)
+    if index is None and strays:
+        tiles.insert(strays[0], tile)  # the tiles before the first stray are untouched: its slot still means the same
+    else:
+        _insert(tiles, tile, index)
     defaults.write(_DOMAIN, "persistent-apps", tiles)
     restart()
     return DockApp(name=name, path=path, bundle_id=bundle_id)
@@ -256,7 +296,8 @@ def remove_app(app: str) -> bool:
     """Take ``app`` (a name, bundle ID or path) out of the Dock; return whether it was there. It stays installed."""
     if not app.strip():
         raise ValueError("remove_app() needs an app's name, bundle ID or path")
-    target = os.path.realpath(os.path.expanduser(app)) if app.endswith(".app") else app
+    # A path is resolved as add_app() resolves it; a bare "Safari.app" is a name, as for add_app().
+    target = os.path.realpath(os.path.expanduser(app)) if _apps._is_path(app) else app
     tiles = _tiles()
     # Apps only: a spacer has no label to tell it apart, nor is it an app.
     kept = [tile for tile in tiles if not (_is_app(tile) and _matches(tile, target))]
@@ -618,6 +659,9 @@ def add_folder(
     """
     Keep ``folder`` in the Dock, next to the Trash, and return it; one kept already is updated.
 
+    An app bundle is a folder to the file system, an app to the Dock: it's
+    refused (``ValueError``), :func:`add_app` is for it.
+
     ::
 
         macos.dock.add_folder("~/Downloads", view="grid", sort="date_added")
@@ -636,6 +680,8 @@ def add_folder(
     path = Path(os.path.realpath(os.path.expanduser(str(folder))))
     if not path.is_dir():
         raise NotADirectoryError(str(path))
+    if path.suffix.lower() == ".app":  # a bundle is a folder to the file system, an app to the Dock
+        raise ValueError("{} is an app: add it with add_app()".format(path))
     tile = {
         "tile-data": {
             "file-data": {"_CFURLString": "file://{}/".format(quote(str(path))), "_CFURLStringType": _FILE_URL},

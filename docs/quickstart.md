@@ -194,8 +194,9 @@ macos.hotkeys.run()
 
 Some features need a privacy permission first (the screen, the camera,
 Accessibility...). When one is missing, you get a clear error instead of a
-silent failure. Everything the package raises derives from
-{class}`~macos.MacOSError`:
+silent failure. Everything macOS refuses or fails derives from
+{class}`~macos.MacOSError`; a bad argument or a missing file raises the usual
+builtin (`ValueError`, `FileNotFoundError`), as in [Errors](errors.md):
 
 ```python
 try:

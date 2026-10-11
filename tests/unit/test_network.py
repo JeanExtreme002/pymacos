@@ -5,7 +5,26 @@ import pytest
 import macos
 
 
-def test_network_ip_follows_the_default_route(commands):
+def test_network_ip_from_the_configuration_daemon(monkeypatch):
+    values = {
+        "State:/Network/Global/IPv4": {"PrimaryInterface": "en7", "Router": "10.0.0.1"},
+        "State:/Network/Interface/en7/IPv4": {"Addresses": ["10.0.0.5"], "SubnetMasks": ["255.255.255.0"]},
+    }
+    monkeypatch.setattr(macos.network, "_dynamic_store", values.get)
+    assert macos.network.interface() == "en7"
+    assert macos.network.ip() == "10.0.0.5"
+    values["State:/Network/Interface/en7/IPv4"] = {"Addresses": []}  # a tunnel without an IPv4 address
+    assert macos.network.ip() is None
+    values["State:/Network/Global/IPv4"] = None  # offline: no primary interface
+    assert macos.network.interface() is None and macos.network.ip() is None
+
+
+def _no_store(key):
+    raise macos.MacOSError("could not read the network configuration")
+
+
+def test_network_ip_follows_the_default_route(commands, monkeypatch):
+    monkeypatch.setattr(macos.network, "_dynamic_store", _no_store)  # then the commands are asked
     commands.answers["-n"] = (0, "   route to: default\n   interface: en7\n", "")
     commands.answers["getifaddr"] = (0, "10.0.0.5\n", "")
 
@@ -14,7 +33,8 @@ def test_network_ip_follows_the_default_route(commands):
     assert commands.calls[-1] == ["ipconfig", "getifaddr", "en7"]
 
 
-def test_network_offline(commands):
+def test_network_offline(commands, monkeypatch):
+    monkeypatch.setattr(macos.network, "_dynamic_store", _no_store)
     commands.answers["-n"] = (1, "", "route: writing to routing socket: not in table")
 
     assert macos.network.interface() is None
