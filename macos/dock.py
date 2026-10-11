@@ -248,13 +248,22 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
     if not path.exists():
         raise AppNotFoundError("{!r} is not an installed app".format(app))
     tiles = _tiles()
-    if any(_is_app(tile) and _tile_path(tile) == path for tile in tiles):
-        kept = next((entry for entry in apps() if entry.path == path), None)
-        if kept is not None:
-            return kept
-    # There as a tile of another kind (a folder tile at that path, say): the app takes its slot, so it isn't there twice.
-    slot = next((position for position, tile in enumerate(tiles) if _tile_path(tile) == path), None)
-    tiles = [tile for tile in tiles if _tile_path(tile) != path]
+    paths = [_tile_path(tile) for tile in tiles]  # once: each is a realpath of its own
+    # Kept as a tile of another kind (a folder tile at that path, say), on either side of the Dock:
+    # those go, so the app isn't there twice. On the left, the app takes the first one's slot.
+    strays = [position for position, (tile, where) in enumerate(zip(tiles, paths)) if where == path and not _is_app(tile)]
+    tiles = [tile for position, tile in enumerate(tiles) if position not in strays]
+    others = _others()
+    kept_others = [tile for tile in others if _tile_path(tile) != path]
+    if len(kept_others) != len(others):
+        defaults.write(_DOMAIN, "persistent-others", kept_others)
+    kept = next((tile for tile, where in zip(tiles, paths) if where == path and _is_app(tile)), None)
+    if kept is not None:
+        if strays or len(kept_others) != len(others):
+            defaults.write(_DOMAIN, "persistent-apps", tiles)
+            restart()
+        data = kept.get("tile-data", {})
+        return DockApp(name=data.get("file-label") or path.stem, path=path, bundle_id=data.get("bundle-identifier"))
     bundle_id = _apps._bundle_id(str(path))
     name = path.stem
     tile = {
@@ -265,8 +274,8 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
         },
         "tile-type": "file-tile",
     }
-    if index is None and slot is not None:
-        tiles.insert(slot, tile)  # the tiles before it are untouched by the filter: the slot still means the same
+    if index is None and strays:
+        tiles.insert(strays[0], tile)  # the tiles before the first stray are untouched: its slot still means the same
     else:
         _insert(tiles, tile, index)
     defaults.write(_DOMAIN, "persistent-apps", tiles)
@@ -649,6 +658,9 @@ def add_folder(
 ) -> DockFolder:
     """
     Keep ``folder`` in the Dock, next to the Trash, and return it; one kept already is updated.
+
+    An app bundle is a folder to the file system, an app to the Dock: it's
+    refused (``ValueError``), :func:`add_app` is for it.
 
     ::
 

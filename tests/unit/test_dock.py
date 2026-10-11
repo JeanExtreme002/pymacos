@@ -163,6 +163,30 @@ def test_dock_add_app_replaces_a_tile_of_another_kind_at_that_path(dock_settings
     assert macos.dock.remove_app("Code") is True and len(store["persistent-apps"]) == 2
     with pytest.raises(ValueError, match="is an app"):
         macos.dock.add_folder(app)  # a bundle is a folder to the file system, not to the Dock
+    # With an index asked for, the stray goes and the index counts the apps, as always.
+    store["persistent-apps"] = [
+        {"tile-data": {}, "tile-type": "spacer-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ] + store["persistent-apps"]  # fmt: skip
+    macos.dock.add_app("Code", index=0)  # the spacer left by remove_app() above is still there
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == [None, None, "Code", "Safari"]
+    # Kept as an app already, with a stray folder tile beside it and one on the right side: the strays go.
+    store["persistent-apps"].append(
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"}
+    )  # fmt: skip
+    store["persistent-others"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Users/me/Downloads/", "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    ]  # fmt: skip
+    before = len(restarts)
+    assert macos.dock.add_app("Code").path == app
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == [None, None, "Code", "Safari"]
+    assert len(store["persistent-others"]) == 1 and len(restarts) == before + 1
+    assert macos.dock.add_app("Code").path == app and len(restarts) == before + 1  # nothing to change: no restart
 
 
 def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):

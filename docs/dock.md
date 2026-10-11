@@ -89,7 +89,8 @@ macos.dock.remove_spacers()   # 2
 
 ## Folders
 
-{func}`~macos.dock.add_folder` keeps a folder next to the Trash. `display` is
+{func}`~macos.dock.add_folder` keeps a folder next to the Trash (an app
+bundle is refused: that's {func}`~macos.dock.add_app`'s). `display` is
 its icon, a `"stack"` of its items (the default) or the `"folder"`; `view` is
 how it opens, `"automatic"` (the default), `"fan"`, `"grid"` or `"list"`; and
 `sort` orders its items by `"name"`, `"date_added"` (the default),
