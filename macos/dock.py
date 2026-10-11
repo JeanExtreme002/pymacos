@@ -252,11 +252,8 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
         kept = next((entry for entry in apps() if entry.path == path), None)
         if kept is not None:
             return kept
-    # There as a tile of another kind (a folder tile at that path, say): that one goes, so the app isn't there twice.
-    if index is None:
-        others = [position for position, tile in enumerate(tiles) if _tile_path(tile) == path]
-        if others:
-            index = sum(1 for tile in tiles[: others[0]] if _is_app(tile))  # its place, among the apps
+    # There as a tile of another kind (a folder tile at that path, say): the app takes its slot, so it isn't there twice.
+    slot = next((position for position, tile in enumerate(tiles) if _tile_path(tile) == path), None)
     tiles = [tile for tile in tiles if _tile_path(tile) != path]
     bundle_id = _apps._bundle_id(str(path))
     name = path.stem
@@ -268,7 +265,10 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
         },
         "tile-type": "file-tile",
     }
-    _insert(tiles, tile, index)
+    if index is None and slot is not None:
+        tiles.insert(slot, tile)  # the tiles before it are untouched by the filter: the slot still means the same
+    else:
+        _insert(tiles, tile, index)
     defaults.write(_DOMAIN, "persistent-apps", tiles)
     restart()
     return DockApp(name=name, path=path, bundle_id=bundle_id)
@@ -668,6 +668,8 @@ def add_folder(
     path = Path(os.path.realpath(os.path.expanduser(str(folder))))
     if not path.is_dir():
         raise NotADirectoryError(str(path))
+    if path.suffix.lower() == ".app":  # a bundle is a folder to the file system, an app to the Dock
+        raise ValueError("{} is an app: add it with add_app()".format(path))
     tile = {
         "tile-data": {
             "file-data": {"_CFURLString": "file://{}/".format(quote(str(path))), "_CFURLStringType": _FILE_URL},

@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, framework, killall, require_macos, restart_later, run as _run
+from ._system import applescript, framework, require_macos, restart_process, run as _run
 from .errors import MacOSError
 
 __all__ = [
@@ -788,9 +788,8 @@ _FINDER = "com.apple.finder"
 
 def restart() -> None:
     """Relaunch Finder, so it reads its settings again (the ``set_show_*`` functions do it for you)."""
-    if restart_later("Finder", restart):
-        return
-    killall("Finder")  # macOS opens it again right away, with its windows (unless quit from its menu, see set_quit_menu)
+    # macOS opens it again right away, with its windows (unless quit from its menu, see set_quit_menu).
+    restart_process("Finder")
 
 
 def _setting(domain: str, key: str, default: bool = False) -> bool:

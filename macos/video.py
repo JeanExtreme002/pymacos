@@ -911,8 +911,10 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
                 # Whatever stopped it (a bad frame, Ctrl-C): the writer is told, so it closes its file
                 # and frees the encoder now, not when the pool drains. Only here, before the finish is
                 # asked for: a writer that is finishing must not be cancelled on top of that (its status
-                # says "writing" until it's done, so the status can't tell the two apart).
-                _objc.send(writer, "cancelWriting", restype=None)
+                # says "writing" until it's done, so the status can't tell the two apart). And only one
+                # still writing: one that failed on its own is done already.
+                if _objc.send(writer, "status", restype=_objc.NSInteger) == _WRITING:
+                    _objc.send(writer, "cancelWriting", restype=None)
                 raise
             _finish_writing(writer, writer_input)
     return target

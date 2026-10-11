@@ -154,11 +154,15 @@ def test_dock_add_app_replaces_a_tile_of_another_kind_at_that_path(dock_settings
         {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
          "tile-type": "directory-tile"},
     ] + store["persistent-apps"]  # fmt: skip
+    store["persistent-apps"].insert(1, {"tile-data": {}, "tile-type": "spacer-tile"})  # folder, spacer, Safari
     added = macos.dock.add_app("Code")
     tiles = store["persistent-apps"]
-    assert added.path == app and len(tiles) == 2 and tiles[0]["tile-type"] == "file-tile"  # where the folder was
-    assert [tile["tile-data"].get("file-label") for tile in tiles] == ["Code", "Safari"]
-    assert macos.dock.remove_app("Code") is True and len(store["persistent-apps"]) == 1
+    assert added.path == app and len(tiles) == 3 and tiles[0]["tile-type"] == "file-tile"  # the folder's exact slot
+    assert [tile["tile-type"] for tile in tiles] == ["file-tile", "spacer-tile", "file-tile"]
+    assert [tile["tile-data"].get("file-label") for tile in tiles] == ["Code", None, "Safari"]
+    assert macos.dock.remove_app("Code") is True and len(store["persistent-apps"]) == 2
+    with pytest.raises(ValueError, match="is an app"):
+        macos.dock.add_folder(app)  # a bundle is a folder to the file system, not to the Dock
 
 
 def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):

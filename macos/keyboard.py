@@ -765,8 +765,9 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
     shortcut for yourself, see :mod:`macos.hotkeys`). It goes on until you
     ``break`` out of the loop, or ``timeout`` seconds pass. Needs the *Input
     Monitoring* permission: without it, the call itself raises
-    :class:`~macos.PermissionDeniedError`, before the loop starts. macOS
-    hides the keys typed in password fields. A modifier pressed on its own
+    :class:`~macos.PermissionDeniedError`, before the loop starts. Loop on
+    the thread that called it: the keys are heard on that thread's run loop.
+    macOS hides the keys typed in password fields. A modifier pressed on its own
     (Shift, Cmd, Option, Ctrl, Fn) isn't a key press to macOS, and isn't
     reported: it shows in the ``modifiers`` of the next key.
     """
