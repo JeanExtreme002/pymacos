@@ -20,6 +20,10 @@ def test_press_holds_the_modifiers_around_the_key(fake_events):
     ]
 
 
+def test_watch_says_modifiers_alone_are_not_reported():
+    assert "modifier pressed on its own" in macos.keyboard.watch.__doc__
+
+
 def test_press_a_modifier_alone_sets_its_flag(fake_events):
     macos.keyboard.press("shift")
     macos.keyboard.press("cmd+option")

@@ -24,6 +24,7 @@ logged in. A job missed while the Mac slept runs when it wakes up.
 """
 
 import datetime
+import math
 import os
 import plistlib
 import re
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
 from ._system import LAUNCHCTL_TIMEOUT, add_note, launchd_disabled, launchd_user_domain, require_macos, run
-from .errors import CommandError
+from .errors import CommandError, MacOSError
 
 __all__ = ["Job", "add", "remove", "jobs", "get", "run_now", "pause", "resume"]
 
@@ -145,6 +146,8 @@ def _watched(when_changed: Union[PathLike, Sequence[PathLike], None]) -> List[st
 def _days(weekdays: Optional[Sequence[str]]) -> List[int]:
     if not weekdays:
         return []
+    if isinstance(weekdays, str):
+        raise TypeError("weekdays must be a list of days, not a single string: use [{!r}]".format(weekdays))
     days = []
     for day in weekdays:
         short = day.strip().lower()[:3]
@@ -191,9 +194,11 @@ def add(
 
     It runs with this Python (``python=`` picks another, such as a virtual
     environment's), in the script's folder, with ``args`` as its
-    arguments; its output goes to :attr:`Job.log`. Adding a name again
-    replaces that job; if launchd refuses the new one, the old one is put
-    back and the error raised. macOS shows a "Background Items Added" notification
+    arguments; its output goes to :attr:`Job.log`. ``args`` are written to the
+    job's file and show in the process list at every run, so keep secrets out
+    of them: the script can read them from :mod:`macos.keychain` instead.
+    Adding a name again replaces that job; if launchd refuses the new one,
+    the old one is put back and the error raised. macOS shows a "Background Items Added" notification
     the first time, and lists the job in System Settings › General › Login
     Items & Extensions.
 
@@ -202,12 +207,19 @@ def add(
     them again, for Python itself.
     """
     _check_name(name)
+    if isinstance(args, (str, bytes)):
+        raise TypeError("args must be a list of arguments, not a single string: use [{!r}]".format(args))
     if isinstance(every, datetime.timedelta):
         every = every.total_seconds()
     if every is not None and at is not None:
         raise ValueError("use either every or at, not both")
-    if every is not None and every < 1:
-        raise ValueError("every must be at least 1 second, not {}".format(every))
+    if every is not None:
+        if isinstance(every, bool) or not isinstance(every, (int, float)):
+            raise TypeError("every must be a number of seconds or a timedelta, not {!r}".format(every))
+        if not math.isfinite(every) or every < 1:
+            raise ValueError("every must be at least 1 second, not {}".format(every))
+        if every != int(every):
+            raise ValueError("every must be whole seconds (launchd counts seconds), not {}".format(every))
     if weekdays and at is None:
         raise ValueError("weekdays only apply with at")
     times, days = _times(at), _days(weekdays)
@@ -218,7 +230,13 @@ def add(
     source = Path(script).expanduser().absolute()
     if not source.is_file():
         raise FileNotFoundError(str(source))
-    interpreter = str(Path(python).expanduser().absolute()) if python is not None else sys.executable
+    if python is None:
+        interpreter = sys.executable
+    else:
+        chosen = Path(python).expanduser().absolute()
+        if not chosen.is_file():
+            raise FileNotFoundError(str(chosen))
+        interpreter = str(chosen)
     log = _log(name)
     log.parent.mkdir(parents=True, exist_ok=True)
     job = {
@@ -246,12 +264,13 @@ def add(
     # half-installed plist launchd would pick up at the next login). One that
     # can't be read raises here, before the old job is touched.
     previous: Optional[bytes] = path.read_bytes() if path.exists() else None
-    was_paused = previous is not None and name in _paused()
+    paused = _paused()  # read once: remove() and the job returned use it too
+    was_paused = previous is not None and name in paused
     plist = plistlib.dumps(job)  # before anything changes: a value it can't hold raises here
     try:
         # Removing the old job can fail after unloading it, and writing the new
         # plist (a full disk): those also put the old job back.
-        remove(name)  # unload the old one first (and forget it was paused)
+        _remove(name, paused)  # unload the old one first (and forget it was paused)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plist)
         _run(["launchctl", "bootstrap", _domain(), str(path)])
@@ -260,8 +279,9 @@ def add(
         if problem:
             add_note(error, problem)
         raise
-    found = get(name)
-    assert found is not None
+    found = _job(path, ())  # just added: not paused
+    if found is None:
+        raise MacOSError("the job {!r} was added, but its file {} can't be read back".format(name, path))
     return found
 
 
@@ -269,9 +289,13 @@ def remove(name: str) -> bool:
     """Stop and delete the job ``name`` (and a run in progress); return whether there was one. Its log stays."""
     _check_name(name)
     require_macos()
+    return _remove(name, _paused())
+
+
+def _remove(name: str, paused: Sequence[str]) -> bool:
     path = _plist(name)
     _bootout(name)
-    if name in _paused():
+    if name in paused:
         _run(["launchctl", "enable", _target(name)])  # a paused job's name is free again
     if path.exists():
         path.unlink()
@@ -355,8 +379,12 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
         return None
     if not isinstance(data, dict):
         return None  # a file edited by hand into something else: not one of ours to list
+    # The name is the file's: that's what get(), remove() and pause() go by. A file whose label
+    # says otherwise (edited or copied by hand) would have those act on one job and report another.
+    name = path.stem[len(_PREFIX):]
+    if not path.stem.startswith(_PREFIX) or data.get("Label") != _PREFIX + name:
+        return None
     try:
-        name = str(data.get("Label", ""))[len(_PREFIX):]
         listed = data.get("ProgramArguments")
         arguments = [str(argument) for argument in listed] if isinstance(listed, list) else []
         calendar = data.get("StartCalendarInterval") or []
@@ -372,11 +400,12 @@ def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
     except (TypeError, ValueError, OverflowError):  # a time or a day that isn't a (finite) number, a log path that isn't text
         return None
     running, status = _state(name)
+    interval = data.get("StartInterval")
     return Job(
         name=name,
         script=Path(arguments[1]) if len(arguments) > 1 else Path(),
         args=tuple(arguments[2:]),
-        every=data.get("StartInterval"),
+        every=interval if isinstance(interval, int) and not isinstance(interval, bool) else None,
         at=times,
         weekdays=days,
         at_login=bool(data.get("RunAtLoad")),

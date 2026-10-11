@@ -28,8 +28,9 @@ help:
 	@echo "  $(YELLOW)install-docs$(NC)     - Install the dependencies to build the documentation"
 	@echo ""
 	@echo "Checks:"
-	@echo "  $(YELLOW)test$(NC)             - Run all tests, including live tests against this Mac"
-	@echo "  $(YELLOW)test-unit$(NC)        - Run only the unit tests (no live tests)"
+	@echo "  $(YELLOW)test$(NC)             - Run the unit tests (safe: nothing on this Mac changes)"
+	@echo "  $(YELLOW)test-live$(NC)        - Run the live tests too: they use the clipboard, volume, dialogs... of this Mac"
+	@echo "  $(YELLOW)test-unit$(NC)        - Same as test"
 	@echo "  $(YELLOW)test-coverage$(NC)    - Run all tests with a coverage report"
 	@echo "  $(YELLOW)lint$(NC)             - Run the linter (flake8)"
 	@echo "  $(YELLOW)type-check$(NC)       - Run the type checker (mypy)"
@@ -72,18 +73,21 @@ install-docs:
 	$(PIP) install -r $(DOCS_DIR)/requirements.txt
 	$(PIP) install -e .
 
-# Run all tests. The live ones talk to the real system: they restore the
-# clipboard and delete the Keychain items they create.
-.PHONY: test
-test:
-	@echo "$(GREEN)Running tests...$(NC)"
-	$(PYTHON) -m pytest $(TEST_DIR) -v
-
-# Run only the unit tests, which don't touch the system (they also run on Linux)
-.PHONY: test-unit
-test-unit:
+# The unit tests, which don't touch the system (they also run on Linux): the
+# default, so a first `make test` on someone's Mac mutes nothing and opens no dialog.
+.PHONY: test test-unit
+test test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	$(PYTHON) -m pytest $(TEST_DIR) -v -m "not live"
+
+# Everything, live tests included. They talk to the real system: they restore
+# the clipboard and the volume, delete the Keychain items they create, and
+# steal the focus for a moment. See CONTRIBUTING.md for what they touch and
+# the PYMACOS_*_TESTS switches that unlock the rest.
+.PHONY: test-live
+test-live:
+	@echo "$(GREEN)Running all tests, live ones included...$(NC)"
+	$(PYTHON) -m pytest $(TEST_DIR) -v -rs
 
 # Run tests with coverage
 .PHONY: test-coverage
@@ -104,7 +108,7 @@ type-check:
 	@echo "$(GREEN)Running type checker (mypy)...$(NC)"
 	$(PYTHON) -m mypy $(PACKAGE_NAME)
 
-# Everything CI runs on a pull request, except the docs build
+# Everything CI runs on a pull request, except the docs build and the live tests
 .PHONY: check
 check: lint type-check test
 	@echo "$(GREEN)All checks passed!$(NC)"

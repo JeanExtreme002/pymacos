@@ -53,6 +53,15 @@ def test_entities_without_the_language_model():
         macos.language.entities("東京でティム・クックに会いました", language="ja")
 
 
+def test_keywords_under_a_script_subtag():
+    # macOS files Chinese word classes under "zh-Hans", which is also what detect() answers: no "zh" model.
+    if not macos.language._has_scheme("zh-Hans", "LexicalClass"):
+        pytest.skip("this Mac has no Chinese word classes")
+    text = "今天天气很好，我们去公园散步吧。"
+    assert macos.language.detect(text) == "zh-Hans"
+    assert "公园" in macos.language.keywords(text)
+
+
 def test_keywords():
     text = "The new MacBook Pro has amazing battery life and the displays are gorgeous."
 

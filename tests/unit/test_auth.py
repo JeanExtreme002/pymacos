@@ -12,6 +12,10 @@ def test_auth_argument_checks():
         macos.auth.confirm("  ")
 
 
+class _Replies(list):
+    """The answers to come, plus the fake NSErrors the tests make up."""
+
+
 @pytest.fixture
 def prompts(monkeypatch):
     """
@@ -24,10 +28,16 @@ def prompts(monkeypatch):
 
     from macos import _objc, auth
 
-    replies, blocks, sent = [], [], []
+    replies, blocks, sent = _Replies(), [], []
+
+    errors = {}  # a fake NSError pointer -> (code, description)
 
     def send(receiver, selector, *args, **kwargs):
         sent.append(selector)
+        if selector == "code":
+            return errors[receiver][0]
+        if selector == "localizedDescription":
+            return errors[receiver][1]
         if selector.startswith("evaluatePolicy:"):
             assert args[2] == len(blocks)  # the current block, the newest
             answer = replies.pop(0)
@@ -44,6 +54,8 @@ def prompts(monkeypatch):
     monkeypatch.setattr(auth, "_context", lambda: 1)
     monkeypatch.setattr(_objc, "send", send)
     monkeypatch.setattr(_objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(_objc, "pystring", lambda text: text)
+    replies.errors = errors
     monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
     monkeypatch.setattr(_objc, "run_until", lambda condition, timeout: condition())
     monkeypatch.setattr(_objc, "block", block)
@@ -191,3 +203,22 @@ def test_a_guarded_callback_without_arguments_gets_no_event(monkeypatch):
 
     assert events._takes_event(on_sleep) is False and on_sleep() == "locked"
     assert events._takes_event(on_event) is True
+
+
+def test_confirm_tells_declined_from_cant_ask(prompts):
+    replies, blocks, _ = prompts
+    replies.errors.update({11: (-2, "Canceled by user."), 12: (-1004, "User interaction is required."),
+                           13: (-5, "Passcode not set."), 14: (-10, "Context invalidated.")})  # fmt: skip
+    replies.extend([lambda made: made[-1](False, 11)])
+    assert macos.auth.confirm("deploy") is False  # the user said no
+    replies.extend([lambda made: made[-1](False, 12)])
+    with pytest.raises(macos.NotSupportedError, match="can't ask for authentication here.*LAError -1004"):
+        macos.auth.confirm("deploy")  # over SSH: nobody could have declined
+    replies.extend([lambda made: made[-1](False, 13)])
+    with pytest.raises(macos.NotSupportedError, match="Passcode not set"):
+        macos.auth.confirm("deploy")
+    replies.extend([lambda made: made[-1](False, 14)])
+    with pytest.raises(macos.MacOSError, match="taken down"):
+        macos.auth.confirm("deploy")
+    replies.extend([True])
+    assert macos.auth.confirm("deploy") is True  # and the next prompt is unaffected

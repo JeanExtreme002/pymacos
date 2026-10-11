@@ -600,3 +600,29 @@ def test_libsystem_is_loaded_once_with_its_signatures():
     assert lib is _libc.lib() and lib.proc_pidinfo.restype is ctypes.c_int
     assert os.getpid() in _libc.pids() and _libc.tick() > 0
     assert macos.system.memory() > 0 and 0.0 <= macos.system.memory_usage().percent <= 1.0
+
+
+def test_control_center_restart_is_batched(monkeypatch):
+    from macos import _system, system
+
+    killed = []
+    monkeypatch.setattr(system, "killall", lambda name: killed.append(name))
+    system._restart_control_center()
+    assert killed == ["ControlCenter"]
+    with _system.batched_restarts():
+        system._restart_control_center()
+        system._restart_control_center()
+        assert killed == ["ControlCenter"]  # put off to the end of the batch
+    assert killed == ["ControlCenter", "ControlCenter"]  # once, not twice
+
+
+def test_int_preferences_tolerate_hand_edited_values(monkeypatch):
+    from macos import system
+
+    assert system._as_int(2, 0) == 2 and system._as_int("3", 0) == 3 and system._as_int(True, 0) == 1
+    assert system._as_int("always", 0) == 0 and system._as_int(["x"], None) is None
+    stored = {"ShowDate": "sometimes"}
+    monkeypatch.setattr(system.defaults, "read", lambda domain, key, default=None, **kwargs: stored.get(key, default))
+    assert system.clock_format()["date"] == "auto"
+    stored = {"NSStatusItemSpacing": "wide"}
+    assert system.menu_bar_spacing() is None

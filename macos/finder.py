@@ -20,6 +20,7 @@ tags show up in Finder's sidebar and in Spotlight.
 """
 
 import collections
+import subprocess
 import ctypes
 import fnmatch
 import os
@@ -28,7 +29,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Tuple, Union
 
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
@@ -516,20 +517,30 @@ def _core_services() -> ctypes.CDLL:
     return services
 
 
-def _kind(path: Path, flags: int, seen: Set[Path]) -> str:
+_SEEN_LIMIT = 4096  # paths a watch remembers: beyond, the oldest are forgotten (see _kind)
+
+
+def _kind(path: Path, flags: int, seen: "MutableMapping[Path, None]") -> str:
     """
     What happened to ``path``.
 
     FSEvents' flags pile up: a file's later changes still carry the
     "created" flag, and a rename flags both names. So a path that no longer
     exists was deleted (or moved away), and only the first sighting of a
-    created path counts as its creation.
+    created path counts as its creation. ``seen`` is the paths sighted so
+    far, newest last: an ``OrderedDict`` kept to :data:`_SEEN_LIMIT` entries,
+    so a watch running for days over a busy folder doesn't grow with it. A
+    path forgotten that way is a first sighting again: its next change, still
+    flagged "created" by FSEvents, reads as ``created`` once more.
     """
     if not os.path.lexists(str(path)):
-        seen.discard(path)
+        seen.pop(path, None)
         return "deleted"
     first = path not in seen
-    seen.add(path)
+    seen.pop(path, None)  # back to the end: the most recent
+    seen[path] = None
+    while len(seen) > _SEEN_LIMIT:
+        seen.popitem(last=False)  # type: ignore[call-arg]  # the oldest
     if flags & _RENAMED and not flags & _CREATED:
         return "renamed"
     if flags & _CREATED and first:
@@ -589,7 +600,7 @@ def watch(
             raise TypeError("pattern must be a str or a list of str, not {!r}".format(pattern))
     pending: "collections.deque[Event]" = collections.deque()
     errors: List[Exception] = []
-    seen: Set[Path] = set()
+    seen: "collections.OrderedDict[Path, None]" = collections.OrderedDict()
 
     def changed(stream: int, info: int, count: int, paths: int, flags: "ctypes._Pointer", ids: "ctypes._Pointer") -> None:
         try:
@@ -598,6 +609,7 @@ def watch(
                 changed_path = Path(os.fsdecode(names[index]))
                 if flags[index] & _RESCAN:
                     # Whatever the pattern: the files it would match may be among the lost events.
+                    seen.clear()  # what was sighted may be gone, or new, unseen: start over
                     if changed_path != folder and folder not in changed_path.parents:
                         pending.append(Event(folder, "rescan", True))  # lost above the folder: all of it
                     elif recursive or changed_path == folder:
@@ -781,8 +793,8 @@ def restart() -> None:
     killall("Finder")  # macOS opens it again right away, with its windows (unless quit from its menu, see set_quit_menu)
 
 
-def _setting(domain: str, key: str) -> bool:
-    return bool(defaults.read(domain, key, default=False))
+def _setting(domain: str, key: str, default: bool = False) -> bool:
+    return bool(defaults.read(domain, key, default=default))
 
 
 def _set(domain: str, key: str, on: bool) -> None:
@@ -802,12 +814,12 @@ def set_show_hidden_files(on: bool = True) -> None:
 
 def show_extensions() -> bool:
     """Whether Finder shows every file name's extension (``.pdf``, ``.txt``...)."""
-    return _setting("NSGlobalDomain", "AppleShowAllExtensions")
+    return _setting(defaults.GLOBAL, "AppleShowAllExtensions")
 
 
 def set_show_extensions(on: bool = True) -> None:
     """Show every file name's extension in Finder, like Finder › Settings › Advanced. Relaunches Finder."""
-    _set("NSGlobalDomain", "AppleShowAllExtensions", on)
+    _set(defaults.GLOBAL, "AppleShowAllExtensions", on)
 
 
 def show_path_bar() -> bool:
@@ -859,27 +871,33 @@ def extract(archive: PathLike, destination: Optional[PathLike] = None) -> Path:
     return target
 
 
+_previews: List["subprocess.Popen[bytes]"] = []  # the Quick Look processes started: kept, so each is reaped once it ends
+
+
 def quick_look(path: PathLike) -> None:
     """
     Show a file in Quick Look, the preview Space opens in Finder, and return at once.
 
     The preview stays until the user closes it.
     """
-    import subprocess
-
     source = _existing(path)
     require_macos()
-    subprocess.Popen(
-        ["qlmanage", "-p", str(source)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,  # outlives the script, as a preview opened from Finder does
+    # The processes already over are reaped here, instead of lingering as zombies until the script
+    # ends; the ones still open are kept, so Python doesn't warn about a process dropped running.
+    _previews[:] = [preview for preview in _previews if preview.poll() is None]
+    _previews.append(
+        subprocess.Popen(
+            ["qlmanage", "-p", str(source)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # outlives the script, as a preview opened from Finder does
+        )
     )
 
 
 def show_desktop_icons() -> bool:
     """Whether the desktop shows its files and folders (and mounted disks)."""
-    return _setting_default(_FINDER, "CreateDesktop", True)
+    return _setting(_FINDER, "CreateDesktop", True)
 
 
 def set_show_desktop_icons(on: bool = True) -> None:
@@ -889,10 +907,6 @@ def set_show_desktop_icons(on: bool = True) -> None:
     The files stay on the Desktop, in its folder. Relaunches Finder.
     """
     _set(_FINDER, "CreateDesktop", on)
-
-
-def _setting_default(domain: str, key: str, default: bool) -> bool:
-    return bool(defaults.read(domain, key, default=default))
 
 
 _VIEWS = {"icons": "icnv", "list": "Nlsv", "columns": "clmv", "gallery": "glyv"}
@@ -980,7 +994,7 @@ def set_search_scope(scope: str) -> None:
 
 def show_full_path_in_title() -> bool:
     """Whether Finder windows show the folder's full path in their title."""
-    return _setting_default(_FINDER, "_FXShowPosixPathInTitle", False)
+    return _setting(_FINDER, "_FXShowPosixPathInTitle", False)
 
 
 def set_show_full_path_in_title(on: bool = True) -> None:
@@ -990,7 +1004,7 @@ def set_show_full_path_in_title(on: bool = True) -> None:
 
 def folders_first() -> bool:
     """Whether folders come before files when windows are sorted by name."""
-    return _setting_default(_FINDER, "_FXSortFoldersFirst", False)
+    return _setting(_FINDER, "_FXSortFoldersFirst", False)
 
 
 def set_folders_first(on: bool = True) -> None:
@@ -1001,7 +1015,7 @@ def set_folders_first(on: bool = True) -> None:
 
 def extension_change_warning() -> bool:
     """Whether Finder asks before a file's extension is changed."""
-    return _setting_default(_FINDER, "FXEnableExtensionChangeWarning", True)
+    return _setting(_FINDER, "FXEnableExtensionChangeWarning", True)
 
 
 def set_extension_change_warning(on: bool = True) -> None:
@@ -1011,7 +1025,7 @@ def set_extension_change_warning(on: bool = True) -> None:
 
 def remove_old_trash_items() -> bool:
     """Whether items are deleted from the Trash after 30 days."""
-    return _setting_default(_FINDER, "FXRemoveOldTrashItems", False)
+    return _setting(_FINDER, "FXRemoveOldTrashItems", False)
 
 
 def set_remove_old_trash_items(on: bool = True) -> None:
@@ -1031,7 +1045,7 @@ def drives_on_desktop() -> Dict[str, bool]:
     """
     Which disks show on the desktop: ``{"internal": False, "external": True, "removable": True, "servers": False}``.
     """
-    return {kind: _setting_default(_FINDER, key, default) for kind, (key, default) in _DESKTOP_DRIVES.items()}
+    return {kind: _setting(_FINDER, key, default) for kind, (key, default) in _DESKTOP_DRIVES.items()}
 
 
 def set_show_drives_on_desktop(
@@ -1062,7 +1076,7 @@ def set_show_drives_on_desktop(
 
 def quit_menu() -> bool:
     """Whether Finder has a Quit item (⌘Q), so it can be closed like other apps."""
-    return _setting_default(_FINDER, "QuitMenuItem", False)
+    return _setting(_FINDER, "QuitMenuItem", False)
 
 
 def set_quit_menu(on: bool = True) -> None:

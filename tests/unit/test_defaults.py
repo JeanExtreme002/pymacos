@@ -12,6 +12,10 @@ def test_defaults_argument_checks():
         macos.defaults.keys("")
     with pytest.raises(ValueError, match="use delete"):
         macos.defaults.write("com.example.app", "key", None)
+    with pytest.raises(ValueError, match="key must not be empty"):
+        macos.defaults.write("com.example.app", " ", 1)
+    with pytest.raises(ValueError, match="key must not be empty"):
+        macos.defaults.delete("com.example.app", "")
 
 
 class _UnwritablePreferences:

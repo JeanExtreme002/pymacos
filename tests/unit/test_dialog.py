@@ -135,3 +135,41 @@ def test_run_decodes_exact_output_and_errors(fake_run, monkeypatch):
     monkeypatch.setattr(_system.subprocess, "run", tool)
     with pytest.raises(macos.CommandError, match="falhou"):
         _system.run(["tool"], input="é\r\n", exact_newlines=True)
+
+
+def test_dialog_refuses_a_string_for_options_and_types(fake_run):
+    with pytest.raises(TypeError, match="options must be a list"):
+        macos.dialog.choose("abc")  # would offer "a", "b" and "c"
+    with pytest.raises(TypeError, match="types must be a list"):
+        macos.dialog.choose_file(types="pdf")
+    assert fake_run.calls == []
+
+
+def test_dialog_confirm_checks_its_buttons(fake_run):
+    for ok, cancel in (("", "Cancel"), ("OK", " "), ("Same", "Same")):
+        with pytest.raises(ValueError, match="buttons"):
+            macos.dialog.confirm("Sure?", ok=ok, cancel=cancel)
+    assert fake_run.calls == []
+
+
+def test_dialog_pickers_check_the_folder(fake_run, tmp_path):
+    with pytest.raises(FileNotFoundError):
+        macos.dialog.choose_file(folder=tmp_path / "nowhere")
+    (tmp_path / "file.txt").write_text("")
+    with pytest.raises(NotADirectoryError):
+        macos.dialog.choose_folder(folder=tmp_path / "file.txt")
+    fake_run.stdout = "ok\n{}\0\n".format(tmp_path)
+    assert macos.dialog.choose_folder(folder=tmp_path) == tmp_path
+    assert fake_run.args[-1] == str(tmp_path.resolve())
+
+
+def test_dialog_says_why_osascript_refused(fake_run):
+    fake_run.returncode, fake_run.stderr = 1, "execution error: No user interaction allowed. (-1713)"
+    with pytest.raises(macos.MacOSError, match="no user session"):
+        macos.dialog.alert("hi")
+    fake_run.stderr = "execution error: Not authorized to send Apple events to System Events. (-1743)"
+    with pytest.raises(macos.PermissionDeniedError, match="Automation"):
+        macos.dialog.alert("hi")
+    fake_run.stderr = "execution error: something else (-2741)"
+    with pytest.raises(macos.CommandError):
+        macos.dialog.alert("hi")

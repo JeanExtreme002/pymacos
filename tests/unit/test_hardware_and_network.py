@@ -54,6 +54,7 @@ def test_startup_items(tmp_path, monkeypatch):
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
     monkeypatch.setattr(system, "launchd_disabled", lambda domain: {"com.example.helper": True} if domain == "system" else {})
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: domain == "gui/501")
+    monkeypatch.setattr(system, "_launchd_running", lambda domain: None)  # no listing: asked one by one
 
     found = {item.label: item for item in system.startup_items()}
     sync, helper = found["com.example.sync"], found["com.example.helper"]
@@ -136,6 +137,7 @@ def test_startup_item_with_broken_arguments(tmp_path, monkeypatch):
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
     monkeypatch.setattr(system, "launchd_disabled", lambda domain: {})
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: None)
+    monkeypatch.setattr(system, "_launchd_running", lambda domain: None)
     found = {item.label: (item.program, item.arguments) for item in system.startup_items()}
     assert found == {"com.example.number": (None, ()), "com.example.text": (None, ())}  # listed, not split into letters
 
@@ -152,5 +154,40 @@ def test_launchctl_switches_win_over_the_plist(tmp_path, monkeypatch):
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
     monkeypatch.setattr(system, "launchd_disabled", lambda domain: switches)
     monkeypatch.setattr(system, "_launchd_state", lambda domain, label: None)
+    monkeypatch.setattr(system, "_launchd_running", lambda domain: None)
     found = {item.label: item.enabled for item in system.startup_items()}
     assert found == {"com.example.overridden": True, "com.example.turned_off": False, "com.example.plain": False}
+
+
+def test_startup_items_running_from_one_listing(tmp_path, monkeypatch):
+    import plistlib
+
+    for label in ("com.example.up", "com.example.down", "com.example.unloaded"):
+        (tmp_path / (label + ".plist")).write_bytes(plistlib.dumps({"Label": label, "Program": "/bin/true"}))
+    monkeypatch.setattr(system, "_STARTUP_FOLDERS", ((str(tmp_path), "agent", False),))
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(system, "launchd_disabled", lambda domain: {})
+    monkeypatch.setattr(system, "_launchd_running", lambda domain: {"com.example.up": True, "com.example.down": False})
+    monkeypatch.setattr(system, "_launchd_state", lambda domain, label: pytest.fail("asked one by one"))
+    found = {item.label: item.running for item in system.startup_items()}
+    assert found == {"com.example.up": True, "com.example.down": False, "com.example.unloaded": False}
+
+
+def test_launchd_running_parses_the_services_block(fake_run):
+    fake_run.stdout = (
+        "gui/501 = {\n\ttype = user\n\tservices = {\n"
+        "\t\t   60618   (pe) \tcom.apple.syncdefaultsd\n"
+        "\t\t       0      0 \tcom.example.idle\n"
+        "\t\t     416      - \tcom.example.busy\n"
+        "\t}\n\tendpoints = {\n\t}\n}\n"
+    )
+    assert system._launchd_running("gui/501") == {
+        "com.apple.syncdefaultsd": True, "com.example.idle": False, "com.example.busy": True
+    }  # fmt: skip
+    assert fake_run.args == ["launchctl", "print", "gui/501"]
+    fake_run.stdout = "nothing like a listing"
+    assert system._launchd_running("gui/501") is None
+    # No listing: the job is asked about alone, and with no "state =" line in the answer, nothing is known.
+    assert system._running_state(None, "gui/501", "x") is None
+    assert fake_run.args == ["launchctl", "print", "gui/501/x"]

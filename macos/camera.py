@@ -339,6 +339,9 @@ def record(
 
         macos.camera.record("hello.mov", 5)
         macos.video.convert("hello.mov", "hello.mp4", quality="medium")
+
+    Ctrl-C stops the recording early and keeps what was recorded until then.
+    If the recording fails, a file already at ``path`` stays as it was.
     """
     if seconds <= 0:
         raise ValueError("seconds must be positive, not {}".format(seconds))
@@ -352,11 +355,15 @@ def record(
     # Recorded beside the target, at a path where nothing is yet (the recorder refuses to replace a file),
     # and moved over it once saved: a recording that fails leaves the file that was there as it was.
     with _files.replacing(target) as temporary:
-        _record(temporary, seconds, camera, audio)
+        interrupted = _record(temporary, seconds, camera, audio)
+    if interrupted is not None:
+        raise interrupted  # the movie is saved: now the Ctrl-C goes on
     return target
 
 
-def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audio: bool) -> None:
+def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audio: bool) -> Optional[KeyboardInterrupt]:
+    """Record into ``target``; a Ctrl-C while recording ends it early and is returned, once the movie is written."""
+    interrupted: Optional[KeyboardInterrupt] = None
     with _objc.autorelease_pool():
         inputs = [_input(_device(camera))]
         if audio:
@@ -392,12 +399,19 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
                 if not _objc.run_until(lambda: delegate in _started or delegate in _results, _TIMEOUT):
                     raise MacOSError("the camera didn't start recording within {} seconds".format(_TIMEOUT))
                 end = time.monotonic() + seconds
-                _objc.run_until(lambda: time.monotonic() >= end or delegate in _results, seconds + 1)
+                try:
+                    _objc.run_until(lambda: time.monotonic() >= end or delegate in _results, seconds + 1)
+                except KeyboardInterrupt as error:
+                    interrupted = error  # stopped on purpose: the movie recorded so far is finished and kept
             finally:
                 _objc.send(output, "stopRecording", restype=None)
+            # Waited for even after Ctrl-C: the movie is only written out once the recorder reports it done.
             _wait(delegate, "video")
         finally:
             _forget(delegate)
             _objc.send(session, "stopRunning", restype=None)
     if not target.exists():
+        if interrupted is not None:
+            raise interrupted  # stopped before anything was saved: the Ctrl-C, not a failure of ours
         raise MacOSError("the video wasn't saved")
+    return interrupted

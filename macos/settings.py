@@ -20,11 +20,12 @@ import inspect
 import math
 import os
 from pathlib import Path
+import warnings
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import appearance, dock, finder, keyboard, mouse, screen, sound, system, trackpad, windows
 from ._system import add_note, batched_restarts, require_macos
-from .errors import NotSupportedError
+from .errors import MacOSError, NotSupportedError
 
 __all__ = ["export", "apply", "names"]
 
@@ -481,7 +482,10 @@ def export() -> Dict[str, Dict[str, Any]]:
     """
     This Mac's settings, as JSON-ready values by section: ``{"dock": {"autohide": True, ...}, ...}``.
 
-    Settings this Mac doesn't have (a keyboard backlight, Night Shift...) are left out.
+    Settings this Mac doesn't have (a keyboard backlight, Night Shift...) are
+    left out, and so is one that couldn't be read (a permission macOS refused,
+    a command that failed), with a :class:`RuntimeWarning` saying which: the
+    rest is still exported.
     """
     require_macos()
     found: Dict[str, Dict[str, Any]] = {}
@@ -491,6 +495,10 @@ def export() -> Dict[str, Dict[str, Any]]:
                 found.setdefault(section, {})[name] = setting.read()
             except NotSupportedError:
                 continue  # this Mac lacks it
+            except MacOSError as problem:
+                warnings.warn(
+                    "{}.{} couldn't be read, and was left out: {}".format(section, name, problem), RuntimeWarning, stacklevel=2
+                )
     return found
 
 

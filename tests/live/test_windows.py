@@ -1,11 +1,12 @@
 """Tests of :mod:`macos.windows` against the real system. Skipped outside macOS."""
 
-import os
 import time
 
 import pytest
 
 import macos
+
+from tests.helpers import ON_GITHUB
 
 
 def test_windows(test_window):
@@ -29,7 +30,7 @@ def test_windows(test_window):
     assert abs(y + height / 2 - (area_y + area_height / 2)) <= 1
 
     assert window.fullscreen is False
-    if os.environ.get("CI"):  # it switches to a Space of its own: not on the user's Mac
+    if ON_GITHUB:  # it switches to a Space of its own: not on the user's Mac
         window.set_fullscreen()  # returns once the animation is done
         assert window.fullscreen
         window.set_fullscreen(False)

@@ -276,7 +276,9 @@ def convert(
         macos.video.convert("talk.mov", "talk.m4a")                        # the sound only
         macos.video.convert("clip.mov", "intro.mp4", start=0, duration=10)
 
-    Replaces ``output`` if it exists. Uses ``avconvert``, which ships with macOS.
+    Replaces ``output`` if it exists, which may be the source itself; a
+    conversion that fails leaves the file that was there as it was. Uses
+    ``avconvert``, which ships with macOS.
     """
     original = _existing(source)
     target = Path(output).expanduser().absolute()
@@ -305,30 +307,23 @@ def convert(
         preset = "PresetHEVCHighestQuality" if hevc and quality == "high" else _QUALITY[quality]
         if hevc and quality != "high":
             raise ValueError("hevc=True only has the 'high' quality; pass height= to make it smaller")
-    if _same_file(original, target):
-        # avconvert --replace would delete the source before reading it.
-        raise ValueError("convert() can't write over its source; pick another output")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    args = ["avconvert", "--source", str(original), "--output", str(target), "--preset", preset, "--replace"]
+    args = ["avconvert", "--source", str(original), "--preset", preset]
     if start is not None:
         args += ["--start", str(start)]
     if duration is not None:
         args += ["--duration", str(duration)]
-    _run(args)
-    return target
+    return _avconvert(original, target, args)
 
 
-def _same_file(first: Path, second: Path) -> bool:
+def _avconvert(source: Path, target: Path, args: List[str]) -> Path:
     """
-    Whether two paths are the same file (through a link or another spelling, too).
+    Run ``avconvert`` (``args``, without ``--output``) into a file beside ``target``, then move it over ``target``.
 
-    ``second`` is resolved first, so ``sub/../clip.mov`` is ``clip.mov`` even while ``sub``
-    doesn't exist yet (the output's folders are made later).
+    The output may be the source: avconvert reads it while writing the new
+    file elsewhere. A conversion that fails, or is interrupted, leaves a
+    file already at ``target`` as it was.
     """
-    try:
-        return first == second or os.path.samefile(str(first), os.path.realpath(str(second)))
-    except OSError:  # one of them doesn't exist
-        return False
+    return _files.write_atomically(target, lambda name: _run([*args, "--output", name]))
 
 
 def _frames_at(
@@ -532,23 +527,20 @@ def trim(source: PathLike, output: PathLike, start: float = 0.0, duration: Optio
     and ``duration``, which re-encodes::
 
         macos.video.trim("lecture.mov", "question.mov", start=1800, duration=90)
+
+    ``output`` may be the source itself; a cut that fails leaves the file
+    that was there as it was.
     """
     if start < 0 or (duration is not None and duration <= 0):
         raise ValueError("start must not be negative and duration must be positive")
     original = _existing(source)
     target = _target(output)
-    if _same_file(original, target):
-        # avconvert --replace would delete the source before reading it: compare
-        # files, not spellings ("Clip.mov" is "clip.mov" on a case-insensitive disk).
-        raise ValueError("trim() can't write over its source; pick another output")
     length = info(original).duration
     if start >= length:
         raise ValueError("start={} is past the end of the {:.3f}-second video".format(start, length))
-    args = ["avconvert", "--source", str(original), "--output", str(target), "--preset", "PresetPassthrough", "--replace"]
+    args = ["avconvert", "--source", str(original), "--preset", "PresetPassthrough"]
     args += ["--start", str(start), "--duration", str(min(duration, length - start) if duration else length - start)]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _run(args)
-    return target
+    return _avconvert(original, target, args)
 
 
 def concat(videos: Sequence[PathLike], output: PathLike) -> Path:
@@ -807,6 +799,9 @@ def _copy_picture(source: int, target: int, length: float) -> None:
         _objc.send(copy, "setPreferredTransform:", transform, argtypes=(_objc.CGAffineTransform,), restype=None)
 
 
+_BGRA = int.from_bytes(b"BGRA", "big")  # kCVPixelFormatType_32BGRA
+
+
 def _pixel_buffer(picture: int, width: int, height: int) -> int:
     """An owned ``CVPixelBuffer`` of ``width`` x ``height``: ``picture`` fitted in, on black."""
     from .image import _srgb
@@ -849,9 +844,6 @@ def _pixel_buffer(picture: int, width: int, height: int) -> int:
         _cf.release(buffer.value)
         raise
     return int(buffer.value or 0)
-
-
-_BGRA = int.from_bytes(b"BGRA", "big")  # kCVPixelFormatType_32BGRA
 
 
 _WRITING, _WRITTEN, _WRITE_FAILED = 1, 2, 3  # AVAssetWriterStatus
@@ -913,48 +905,62 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
             _objc.send(writer, "addInput:", writer_input, argtypes=(_objc.id,), restype=None)
             if not _objc.send(writer, "startWriting", restype=_objc.BOOL):
                 raise MacOSError("could not start writing {}".format(target))
-            _objc.send(writer, "startSessionAtSourceTime:", _media.time(0), argtypes=(_media.CMTime,), restype=None)
-            for index, picture in enumerate(pictures):
-                # A pool per frame: what encoding one autoreleases goes with it, not after the last.
-                with _objc.autorelease_pool():
-                    deadline = time.monotonic() + _WRITER_PATIENCE
-                    while not _objc.send(writer_input, "isReadyForMoreMediaData", restype=_objc.BOOL):
-                        if _objc.send(writer, "status", restype=_objc.NSInteger) != _WRITING:
-                            raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
-                        if time.monotonic() > deadline:
-                            _objc.send(writer, "cancelWriting", restype=None)
-                            raise MacOSError("the video encoder stopped taking frames")
-                        time.sleep(0.005)
-                    buffer = _pixel_buffer(picture, width, height)
-                    try:
-                        # index / fps seconds, exactly: value index * 600, timescale fps * 600.
-                        moment = _media.CMTime(index * 600, int(round(fps * 600)), 1, 0)
-                        appended = _objc.send(
-                            adaptor,
-                            "appendPixelBuffer:withPresentationTime:",
-                            buffer,
-                            moment,
-                            argtypes=(ctypes.c_void_p, _media.CMTime),
-                            restype=_objc.BOOL,
-                        )
-                    finally:
-                        _cf.release(buffer)
-                    if not appended:
-                        raise MacOSError("could not add frame {} to the video".format(index + 1))
-            _objc.send(writer_input, "markAsFinished", restype=None)
-            _objc.send(
-                writer,
-                "finishWritingWithCompletionHandler:",
-                _media.ignore_completion(),
-                argtypes=(ctypes.c_void_p,),
-                restype=None,
-            )
-            status = lambda: _objc.send(writer, "status", restype=_objc.NSInteger)  # noqa: E731
-            if not _objc.run_until(lambda: status() != _WRITING, 600):
-                raise MacOSError("the video didn't finish writing")
-            if status() != _WRITTEN:
-                raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
+            try:
+                _write_session(writer, writer_input, adaptor, pictures, fps, width, height)
+            except BaseException:
+                # Whatever stopped it (a bad frame, Ctrl-C): the writer is told, so it closes its file
+                # and frees the encoder now, not when the pool drains. Only while it still writes: one
+                # that is finishing (or failed, or is done) must not be cancelled on top of that.
+                if _objc.send(writer, "status", restype=_objc.NSInteger) == _WRITING:
+                    _objc.send(writer, "cancelWriting", restype=None)
+                raise
     return target
+
+
+def _write_session(
+    writer: int, writer_input: int, adaptor: int, pictures: Iterable[int], fps: float, width: int, height: int
+) -> None:
+    """Feed ``pictures`` to a started ``writer`` and wait for it to finish the file."""
+    _objc.send(writer, "startSessionAtSourceTime:", _media.time(0), argtypes=(_media.CMTime,), restype=None)
+    for index, picture in enumerate(pictures):
+        # A pool per frame: what encoding one autoreleases goes with it, not after the last.
+        with _objc.autorelease_pool():
+            deadline = time.monotonic() + _WRITER_PATIENCE
+            while not _objc.send(writer_input, "isReadyForMoreMediaData", restype=_objc.BOOL):
+                if _objc.send(writer, "status", restype=_objc.NSInteger) != _WRITING:
+                    raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
+                if time.monotonic() > deadline:
+                    raise MacOSError("the video encoder stopped taking frames")
+                time.sleep(0.005)
+            buffer = _pixel_buffer(picture, width, height)
+            try:
+                # index / fps seconds, exactly: value index * 600, timescale fps * 600.
+                moment = _media.CMTime(index * 600, int(round(fps * 600)), 1, 0)
+                appended = _objc.send(
+                    adaptor,
+                    "appendPixelBuffer:withPresentationTime:",
+                    buffer,
+                    moment,
+                    argtypes=(ctypes.c_void_p, _media.CMTime),
+                    restype=_objc.BOOL,
+                )
+            finally:
+                _cf.release(buffer)
+            if not appended:
+                raise MacOSError("could not add frame {} to the video".format(index + 1))
+    _objc.send(writer_input, "markAsFinished", restype=None)
+    _objc.send(
+        writer,
+        "finishWritingWithCompletionHandler:",
+        _media.ignore_completion(),
+        argtypes=(ctypes.c_void_p,),
+        restype=None,
+    )
+    status = lambda: _objc.send(writer, "status", restype=_objc.NSInteger)  # noqa: E731
+    if not _objc.run_until(lambda: status() != _WRITING, 600):
+        raise MacOSError("the video didn't finish writing")
+    if status() != _WRITTEN:
+        raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
 
 
 def _load_image(path: Path, longest: Optional[int]) -> int:

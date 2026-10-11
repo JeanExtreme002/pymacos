@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.document`. They run on any platform."""
 
+import sys
+
 import pytest
 
 import macos
@@ -21,6 +23,20 @@ def test_text_points_pdfs_to_the_pdf_module(fake_run, tmp_path):
     source.write_bytes(b"%PDF-1.4")
     with pytest.raises(ValueError, match="macos.pdf.text"):
         macos.document.text(source)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="builds the reading options with Foundation")
+def test_html_reading_options(tmp_path):
+    from macos import _objc
+
+    page = tmp_path / "page.html"
+    page.write_text("<p>hi</p>")
+    with _objc.autorelease_pool():
+        options = macos.document._options(page)
+        assert _objc.send(options, "objectForKey:", _objc.nsstring("CharacterEncoding"), argtypes=(_objc.id,))
+        notes = tmp_path / "notes.rtf"
+        notes.write_text("{\\rtf1 hi}")
+        assert macos.document._options(notes) is None  # RTF says its own encoding and WebKit doesn't read it
 
 
 def _in_a_thread(work):

@@ -51,6 +51,25 @@ def test_replacing_a_file_keeps_its_permissions(tmp_path, umask_022):
     assert target.read_bytes() == b"new" and _mode(target) == 0o664
 
 
+def test_replacing_a_file_drops_its_special_bits(tmp_path, umask_022):
+    target = tmp_path / "sticky.txt"
+    target.write_bytes(b"old")
+    os.chmod(str(target), 0o1664)  # the sticky bit: not something the new content earned
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"new")
+    assert _mode(target) == 0o664
+
+
+def test_a_new_file_follows_the_umask_of_the_moment(tmp_path, umask_022):
+    # A program may go private (os.umask) between two writes: the second must not keep the first's mode.
+    with _files.replacing(tmp_path / "public") as temporary:
+        temporary.write_bytes(b"x")
+    os.umask(0o077)
+    with _files.replacing(tmp_path / "private") as temporary:
+        temporary.write_bytes(b"x")
+    assert _mode(tmp_path / "public") == 0o644 and _mode(tmp_path / "private") == 0o600
+
+
 def test_a_failure_leaves_the_target_as_it_was(tmp_path):
     target = tmp_path / "keep.txt"
     target.write_bytes(b"old")

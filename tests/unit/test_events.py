@@ -71,6 +71,27 @@ def test_events_wait_returns_the_awaited_event(monkeypatch):
     assert events.wait("wake", timeout=0.1) is None
 
 
+def test_events_run_and_wait_refuse_a_worker_thread(monkeypatch):
+    import threading
+
+    # The notifications arrive on the main thread's run loop: elsewhere the wait would never end.
+    events.on("wake", print)
+    outcomes = []
+
+    def worker():
+        for call in (lambda: events.run(timeout=1), lambda: events.wait("wake", timeout=1)):
+            try:
+                call()
+            except macos.MacOSError as error:
+                outcomes.append(str(error))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert len(outcomes) == 2 and all("main thread" in outcome for outcome in outcomes)
+
+
 def test_events_names_cover_every_source():
     assert set(events.NAMES) >= {
         "space_changed", "app_hidden", "app_unhidden", "power_connected", "power_disconnected",

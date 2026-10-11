@@ -28,6 +28,69 @@ def dock_settings(monkeypatch, tmp_path):
     return store, restarts, app
 
 
+def test_dock_remove_app_takes_whatever_add_app_took(dock_settings):
+    store, restarts, app = dock_settings
+
+    # The same spellings add_app() accepts: the name with or without .app, the bundle ID, the path.
+    for spelling in ("Safari.app", "safari.APP", "com.apple.Safari", "/Applications/Safari.app", "/Applications/Safari"):
+        store["persistent-apps"] = [
+            {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Safari.app/", "_CFURLStringType": 15},
+                           "file-label": "Safari", "bundle-identifier": "com.apple.Safari"}, "tile-type": "file-tile"},
+        ]  # fmt: skip
+        assert macos.dock.remove_app(spelling) is True, spelling
+        assert store["persistent-apps"] == []
+    added = macos.dock.add_app("Code.app")
+    assert macos.dock.remove_app("Code.app") is True and added.path == app
+    assert macos.dock.remove_app("Code.app") is False
+    # A bundle ID that ends in ".app" is a bundle ID: nothing is cut off it.
+    store["persistent-apps"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Tool.app/", "_CFURLStringType": 15},
+                       "file-label": "Tool", "bundle-identifier": "com.vendor.tool.app"}, "tile-type": "file-tile"},
+    ]  # fmt: skip
+    assert macos.dock.remove_app("com.vendor.tool.app") is True and store["persistent-apps"] == []
+
+
+def test_dock_restart_tolerates_a_dock_that_is_not_running(monkeypatch, commands):
+    pids = [None, None, 7]
+    monkeypatch.setattr(dock, "_pid", lambda: pids.pop(0) if len(pids) > 1 else pids[0])
+    monkeypatch.setattr(dock.time, "sleep", lambda seconds: None)
+    commands.answers["-KILL"] = (1, "", "No matching processes belonging to you were found")
+
+    dock.restart()  # killed a moment ago, not back yet: it reads the settings when it starts
+    assert commands.calls[-1] == ["killall", "-KILL", "Dock"]
+    commands.answers["-KILL"] = (1, "", "Operation not permitted")
+    with pytest.raises(macos.CommandError, match="not permitted"):
+        dock.restart()
+
+
+def test_dock_pid_asks_for_the_dock_alone(monkeypatch):
+    sent = []
+
+    class ObjC:
+        id = object
+        BOOL = bool
+
+        def send(self, receiver, selector, *args, **kwargs):
+            sent.append(selector)
+            return {"isTerminated": False, "processIdentifier": 321}.get(selector, 1)
+
+        def nsarray(self, obj):
+            return [11]
+
+        def nsstring(self, text):
+            return text
+
+        def autorelease_pool(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+    monkeypatch.setattr(dock, "_objc", ObjC())
+    monkeypatch.setattr(dock._apps, "_running_application_class", lambda: 1)
+    assert dock._pid() == 321
+    assert sent[0] == "runningApplicationsWithBundleIdentifier:"  # one call, not a scan of every process
+
+
 def test_dock_settings(dock_settings):
     store, restarts, _ = dock_settings
 

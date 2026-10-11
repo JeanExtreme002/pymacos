@@ -72,7 +72,8 @@ def test_is_allowed_reads_the_notification_settings(monkeypatch, apps, expected)
     def fake(args, **kwargs):
         return subprocess.CompletedProcess(args, 0, plistlib.dumps({"apps": apps}), b"")
 
-    monkeypatch.setattr(macos.notifications.subprocess, "run", fake)
+    monkeypatch.setattr(_system.subprocess, "run", fake)
+    del macos.notifications._known[:]
 
     assert macos.notifications.is_allowed() is expected
 
@@ -83,6 +84,43 @@ def test_is_allowed_is_unknown_when_the_settings_are_unreadable(monkeypatch):
     def fake(args, **kwargs):
         return subprocess.CompletedProcess(args, 0, b"not a plist", b"")
 
-    monkeypatch.setattr(macos.notifications.subprocess, "run", fake)
+    monkeypatch.setattr(_system.subprocess, "run", fake)
+    del macos.notifications._known[:]
 
     assert macos.notifications.is_allowed() is None
+
+
+def test_is_allowed_gives_up_on_a_wedged_defaults(monkeypatch):
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+
+    def hung(args, **kwargs):
+        assert kwargs["timeout"]
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(_system.subprocess, "run", hung)
+    del macos.notifications._known[:]
+    assert macos.notifications.is_allowed() is None
+
+
+def test_notify_reads_the_settings_once_for_a_burst(monkeypatch):
+    import plistlib
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    reads = []
+
+    def fake(args, **kwargs):
+        if args[:2] == ["defaults", "export"]:
+            reads.append(args)
+            allowed = [{"bundle-id": "com.apple.ScriptEditor2", "flags": 41951246}]
+            return subprocess.CompletedProcess(args, 0, plistlib.dumps({"apps": allowed}), b"")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", fake)
+    del macos.notifications._known[:]
+    for _ in range(5):
+        macos.notify("progress")
+    assert len(reads) == 1  # known for a few seconds: not read again for every notification
+    monkeypatch.setattr(macos.notifications, "_KNOWN_FOR", 0.0)
+    macos.notify("progress")
+    assert len(reads) == 2  # once the answer is stale, it's read again
+    del macos.notifications._known[:]

@@ -31,6 +31,16 @@ def test_hotkeys_argument_checks():
         hotkeys.register("hyper+k", lambda: None)
 
 
+@pytest.mark.parametrize("keys", ["shift", "cmd", "fn", "cmd+shift"])
+def test_a_modifier_on_its_own_is_not_a_shortcut(keys):
+    # The tap listens to key presses; a modifier alone is a flags change, which it would never see.
+    with pytest.raises(ValueError, match="modifier on its own"):
+        hotkeys.register(keys, lambda: None)
+    with pytest.raises(ValueError, match="modifier on its own"):
+        hotkeys.wait(keys, timeout=0.1)
+    assert keys not in {hotkey.keys for hotkey in hotkeys._registered.values()}
+
+
 @pytest.fixture
 def registered(monkeypatch):
     # A US keyboard's letters, without asking macOS.
@@ -149,6 +159,25 @@ def test_an_error_in_the_tap_lets_the_key_through_and_comes_out_of_the_listener(
     monkeypatch.setattr(_events._objc, "spin", lambda seconds: None)
     with pytest.raises(KeyError, match="bug"):
         list(listener.drain(1))
+
+
+def test_listen_makes_the_tap_before_the_first_event_is_asked_for(fake_tap, monkeypatch):
+    # The permission check happens in the call itself, not inside the caller's loop.
+    monkeypatch.setattr(fake_tap, "CGEventTapCreate", lambda *args: None)
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {})
+    with pytest.raises(macos.PermissionDeniedError, match="no tap"):
+        _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no tap")
+    with pytest.raises(macos.PermissionDeniedError, match="Input Monitoring"):
+        macos.keyboard.watch()
+    with pytest.raises(macos.PermissionDeniedError, match="Input Monitoring"):
+        macos.mouse.watch()
+
+
+def test_a_listen_never_iterated_still_closes_its_tap(fake_tap):
+    watching = _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no")
+    assert fake_tap.callback is not None and fake_tap.closed == []  # made at once
+    watching.close()
+    assert fake_tap.closed == [True, "port"]
 
 
 def test_listen_raises_what_convert_raised(fake_tap, monkeypatch):

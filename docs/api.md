@@ -979,6 +979,7 @@ explain how to use each part.
 .. autoexception:: macos.NotSupportedError
 .. autoexception:: macos.PermissionDeniedError
 .. autoexception:: macos.PromptTimeoutError
+.. autoexception:: macos.WaitTimeoutError
 .. autoexception:: macos.AppNotFoundError
 .. autoexception:: macos.ShortcutNotFoundError
 .. autoexception:: macos.KeychainError

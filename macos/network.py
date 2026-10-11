@@ -81,14 +81,30 @@ def is_online() -> bool:
 _QUICK = 30.0  # seconds for route, ipconfig and networksetup, which answer at once unless wedged
 
 
+_UNAVAILABLE = object()  # the configuration daemon couldn't be asked: a command is, instead
+
+
+def _store_value(key: str) -> Any:
+    """A value of the system's network configuration: ``None`` when it has none, ``_UNAVAILABLE`` when it can't be read."""
+    try:
+        return _dynamic_store(key)
+    except (MacOSError, OSError):
+        return _UNAVAILABLE
+
+
 def interface() -> Optional[str]:
     """The network interface internet traffic goes through, e.g. ``'en0'``, or ``None`` when offline."""
+    # In-process and locale-free: the primary interface, as the configuration daemon keeps it.
+    found = _store_value("State:/Network/Global/IPv4")
+    if found is not _UNAVAILABLE:
+        primary = found.get("PrimaryInterface") if isinstance(found, dict) else None  # no entry at all: offline
+        return str(primary) if primary else None
     try:
         output = _run(["route", "-n", "get", "default"], timeout=_QUICK)
     except CommandError:  # no default route
         return None
-    found = re.search(r"interface:\s*(\S+)", output)
-    return found.group(1) if found else None
+    match = re.search(r"interface:\s*(\S+)", output)
+    return match.group(1) if match else None
 
 
 def ip() -> Optional[str]:
@@ -96,6 +112,12 @@ def ip() -> Optional[str]:
     name = interface()
     if name is None:
         return None
+    found = _store_value("State:/Network/Interface/{}/IPv4".format(name))
+    if found is not _UNAVAILABLE:
+        addresses = found.get("Addresses") if isinstance(found, dict) else None
+        if isinstance(addresses, list) and addresses and addresses[0]:
+            return str(addresses[0])
+        return None  # the interface has no IPv4 address (e.g. a VPN tunnel)
     try:
         address = _run(["ipconfig", "getifaddr", name], timeout=_QUICK).strip()
     except CommandError:  # the interface has no IPv4 address (e.g. a VPN tunnel)

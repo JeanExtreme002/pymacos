@@ -109,6 +109,10 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 
 [tool.pytest.ini_options]
+# -rs: the live tests that need a permission or a device this machine lacks skip
+# themselves; listing them tells a full run from a green one with gaps.
+addopts = "-rs"
+xfail_strict = true
 markers = [
     "live: talks to the real system (macOS only); may touch the clipboard, Keychain and running apps",
 ]

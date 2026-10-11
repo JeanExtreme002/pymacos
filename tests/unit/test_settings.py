@@ -714,11 +714,11 @@ def test_security_status(monkeypatch):
         "csrutil": "System Integrity Protection status: unknown (Custom Configuration).\n",
     }
     monkeypatch.setattr(system, "require_macos", lambda: None)
-    monkeypatch.setattr(system, "_run", lambda args: answers[args[0]])
+    monkeypatch.setattr(system, "_run", lambda args, **kwargs: answers[args[0]])
 
     assert system.security_status() == system.SecurityStatus(filevault=True, firewall=True, gatekeeper=False, sip=None)
 
-    def failing(args):
+    def failing(args, **kwargs):
         raise macos.MacOSError("no")
 
     monkeypatch.setattr(system, "_run", failing)

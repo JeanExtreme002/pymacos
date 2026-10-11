@@ -20,7 +20,8 @@ def test_every_needs_a_positive_interval(seconds):
 def test_timers_skip_missed_ticks_instead_of_bursting():
     timer = macos.menubar.every(1.0, lambda: None)
     try:
-        timer._next = 10.0
+        assert timer._next is None  # not counting yet: run() hasn't started
+        assert menubar._due_timers(9.0) == [] and timer._next == 10.0  # the first turn arms it, a full interval ahead
         assert menubar._due_timers(9.9) == []
         assert menubar._due_timers(10.0) == [timer]
         assert timer._next == 11.0

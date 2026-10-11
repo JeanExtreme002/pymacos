@@ -45,10 +45,26 @@ BROWSERS = tuple(_KINDS)
 
 _UNSCRIPTABLE = ("Firefox", "Firefox Developer Edition", "Firefox Nightly", "Arc", "Opera", "Orion", "Zen Browser")
 
-_RECORD, _FIELD = "\x1e", "\x1f"  # ASCII record and unit separators: never in a title or URL
+_RECORD, _FIELD = "\x1e", "\x1f"  # ASCII record and unit separators, which the script keeps out of the fields
+
+# A page can put any character in its title, the separators included: the script takes them out
+# of every field, so one odd title can't split its own record, nor hide the tabs listed after it.
+_CLEAN = """
+on clean(s)
+    set saved to AppleScript's text item delimiters
+    repeat with sep in {ASCII character 30, ASCII character 31}
+        set AppleScript's text item delimiters to (contents of sep)
+        set s to text items of s
+        set AppleScript's text item delimiters to " "
+        set s to s as text
+    end repeat
+    set AppleScript's text item delimiters to saved
+    return s
+end clean
+"""
 
 _LIST = {
-    _SAFARI: """
+    _SAFARI: _CLEAN + """
 on run argv
     set out to ""
     tell application "{app}"
@@ -63,6 +79,8 @@ on run argv
                     if u is missing value then set u to ""
                     set n to name of t
                     if n is missing value then set n to ""
+                    set n to my clean(n)
+                    set u to my clean(u)
                     set out to out & wid & (ASCII character 31) & i & (ASCII character 31) & (i = active) & ¬
                         (ASCII character 31) & n & (ASCII character 31) & u & (ASCII character 30)
                 end repeat
@@ -72,7 +90,7 @@ on run argv
     return out
 end run
 """,
-    _CHROMIUM: """
+    _CHROMIUM: _CLEAN + """
 on run argv
     set out to ""
     tell application "{app}"
@@ -86,6 +104,8 @@ on run argv
                 if u is missing value then set u to ""
                 set n to title of t
                 if n is missing value then set n to ""
+                set n to my clean(n)
+                set u to my clean(u)
                 set out to out & wid & (ASCII character 31) & i & (ASCII character 31) & (i = active) & ¬
                     (ASCII character 31) & n & (ASCII character 31) & u & (ASCII character 30)
             end repeat
@@ -253,10 +273,13 @@ def tabs(app: Optional[str] = None) -> List[Tab]:
     if browser is None or not _is_running(browser):
         return []
     found = []
-    for record in _script(browser, _LIST[_KINDS[browser]]).rstrip("\n").split(_RECORD):
+    records = _script(browser, _LIST[_KINDS[browser]]).rstrip("\n").split(_RECORD)
+    if records[-1] == "":
+        records.pop()  # every record ends with the separator (and no browser: nothing at all)
+    for record in records:
         fields = record.split(_FIELD)
         if len(fields) != 5:
-            continue
+            raise MacOSError("{} listed its tabs in a form this version of pymacos can't read".format(browser))
         window, index, active, title, url = fields
         found.append(Tab(title=title, url=url, app=browser, window=int(window), index=int(index), active=active == "true"))
     return found

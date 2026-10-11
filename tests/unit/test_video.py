@@ -1,46 +1,79 @@
 """Unit tests for :mod:`macos.video`. They run on any platform."""
 
+from pathlib import Path
+
 import pytest
 
 import macos
 
 
-def test_video_convert_command(commands, tmp_path):
-    macos.video.convert(__file__, tmp_path / "out.mp4", quality="medium", start=5, duration=10.5)
-    assert commands.calls[-1] == [
+@pytest.fixture
+def avconvert(monkeypatch):
+    """Stands in for avconvert: records each command and writes the file it was asked for."""
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(list(args))
+        if args[0] == "avconvert":
+            Path(args[args.index("--output") + 1]).write_bytes(b"converted")
+        return ""
+
+    monkeypatch.setattr(macos.video, "_run", run)
+    return calls
+
+
+def test_video_convert_command(avconvert, tmp_path):
+    target = tmp_path / "out.mp4"
+    assert macos.video.convert(__file__, target, quality="medium", start=5, duration=10.5) == target
+    args = avconvert[-1]
+    assert args[:-1] == [
         "avconvert",
         "--source",
         __file__,
-        "--output",
-        str(tmp_path / "out.mp4"),
         "--preset",
         "PresetMediumQuality",
-        "--replace",
         "--start",
         "5",
         "--duration",
         "10.5",
+        "--output",
     ]
+    # Written beside the target, under its own name, then moved over it: never --replace.
+    assert Path(args[-1]).name == "out.mp4" and Path(args[-1]).parent.parent == tmp_path
+    assert target.read_bytes() == b"converted" and [path.name for path in tmp_path.iterdir()] == ["out.mp4"]
     macos.video.convert(__file__, tmp_path / "out.mov", hevc=True, height=2160)
-    assert commands.calls[-1][6] == "PresetHEVC3840x2160"
+    assert avconvert[-1][4] == "PresetHEVC3840x2160"
     macos.video.convert(__file__, tmp_path / "out.m4v", height=720)
-    assert commands.calls[-1][6] == "Preset1280x720"
+    assert avconvert[-1][4] == "Preset1280x720"
 
 
-def test_trim_refuses_to_write_over_its_source_by_another_name(tmp_path):
+def test_convert_and_trim_may_write_over_their_source(avconvert, monkeypatch, tmp_path):
+    monkeypatch.setattr(macos.video, "info", lambda path: macos.video.VideoInfo(10.0, 640, 480, 30.0, "h264", True))
     source = tmp_path / "clip.mov"
-    source.write_bytes(b"")
-    (tmp_path / "link.mov").symlink_to(source)
-    (tmp_path / "sub").mkdir()
-    # avconvert --replace would delete the source before reading it.
-    with pytest.raises(ValueError, match="over its source"):
-        macos.video.trim(source, tmp_path / "link.mov", 1)
-    with pytest.raises(ValueError, match="over its source"):
-        macos.video.trim(source, tmp_path / "sub" / ".." / "clip.mov", 1)
-    # A folder that doesn't exist yet, which trim() would make before avconvert runs.
-    with pytest.raises(ValueError, match="over its source"):
-        macos.video.trim(source, tmp_path / "new" / ".." / "clip.mov", 1)
-    assert not (tmp_path / "new").exists()
+    source.write_bytes(b"not really a video")
+    link = tmp_path / "link.mov"
+    link.symlink_to(source)
+    for output in (source, str(source), link):
+        source.write_bytes(b"not really a video")
+        macos.video.convert(source, output)
+        assert source.read_bytes() == b"converted"  # read where it was, written elsewhere, then moved over
+    source.write_bytes(b"not really a video")
+    macos.video.trim(source, source, 1)
+    assert source.read_bytes() == b"converted"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["clip.mov", "link.mov"]
+
+
+def test_a_conversion_that_fails_leaves_the_old_output_alone(monkeypatch, tmp_path):
+    def refuse(args, **kwargs):
+        Path(args[args.index("--output") + 1]).write_bytes(b"half")
+        raise macos.CommandError(args, 1, "no good")
+
+    monkeypatch.setattr(macos.video, "_run", refuse)
+    target = tmp_path / "out.mp4"
+    target.write_bytes(b"yesterday")
+    with pytest.raises(macos.CommandError):
+        macos.video.convert(__file__, target)
+    assert target.read_bytes() == b"yesterday" and [path.name for path in tmp_path.iterdir()] == ["out.mp4"]
 
 
 def test_video_argument_checks(tmp_path):
@@ -94,17 +127,6 @@ def test_video_argument_checks(tmp_path):
         macos.video.frames(__file__, every=0)
 
 
-def test_convert_refuses_to_write_over_its_source(commands, tmp_path):
-    source = tmp_path / "clip.mp4"
-    source.write_bytes(b"not really a video")
-    link = tmp_path / "link.mp4"
-    link.symlink_to(source)
-    for output in (source, str(source), link):
-        with pytest.raises(ValueError, match="can't write over its source"):
-            macos.video.convert(source, output)
-    assert commands.calls == [] and source.read_bytes() == b"not really a video"
-
-
 @pytest.fixture
 def fake_frames(monkeypatch):
     """Stands in for AVFoundation's frame reader: a frame is its time, and what's released is recorded."""
@@ -138,3 +160,35 @@ def test_batches_hold_about_256_mb_of_frames():
     assert macos.video._batch(3840, 2160) == 8  # 4K: 33 MB a frame
     assert macos.video._batch(320, 160) == 64
     assert macos.video._batch(100000, 100000) == 1
+
+
+def test_a_frame_that_cant_be_encoded_cancels_the_writer(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from macos import video
+
+    sent = []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append(selector)
+        return True if selector in ("startWriting", "isReadyForMoreMediaData") else 1
+
+    monkeypatch.setattr(video, "_load", lambda: None)
+    monkeypatch.setattr(video._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(video._objc, "send", send)
+    monkeypatch.setattr(video._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(video._objc, "nsstring", lambda text: 2)
+    monkeypatch.setattr(video._objc, "nsarray_of", lambda items: 3)
+    monkeypatch.setattr(video._objc, "file_url", lambda path: 4)
+    monkeypatch.setattr(video._media, "time", lambda seconds: 0)
+
+    def bad_frame(picture, width, height):
+        raise macos.MacOSError("could not make a video frame")
+
+    monkeypatch.setattr(video, "_pixel_buffer", bad_frame)
+    target = tmp_path / "out.mov"
+    with pytest.raises(macos.MacOSError, match="video frame"):
+        video._write_frames([11, 12], target, 30, 100, 100)
+    # The writer is told to stop, not left to be found by the pool, and nothing is left at the target.
+    assert sent[-1] == "cancelWriting" and "startWriting" in sent
+    assert not target.exists() and list(tmp_path.iterdir()) == []

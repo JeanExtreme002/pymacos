@@ -10,6 +10,12 @@ import macos
 def test_pdf_argument_checks(tmp_path):
     with pytest.raises(ValueError, match="multiple of 90"):
         macos.pdf.rotate(__file__, 45, tmp_path / "out.pdf")
+    with pytest.raises(ValueError, match="int multiple of 90"):
+        macos.pdf.rotate(__file__, 90.0, tmp_path / "out.pdf")  # a float would reach ctypes as a C long
+    with pytest.raises(ValueError, match=r"\(title, page\)"):
+        macos.pdf.set_bookmarks(__file__, [("Intro",)], tmp_path / "out.pdf")
+    with pytest.raises(ValueError, match=r"\(title, page\)"):
+        macos.pdf.set_bookmarks(__file__, ["Intro"], tmp_path / "out.pdf")
     with pytest.raises(ValueError, match="empty"):
         macos.pdf.encrypt(__file__, tmp_path / "out.pdf", "")
     with pytest.raises(ValueError, match="at least one"):
@@ -168,13 +174,17 @@ def test_bookmarks(tmp_path):
     picture.write_bytes(small_png(100, 100))
     book = macos.pdf.from_images([picture] * 3, tmp_path / "book.pdf")
     assert macos.pdf.bookmarks(book) == []
-    contents = [("Intro", 1), ("Chapter 1", 2), ("1.1", 2, 1), ("1.1.1", 3, 2), ("Chapter 2", 3)]
+    # Tuples or lists (as json.loads gives them), mixed.
+    contents = [("Intro", 1), ["Chapter 1", 2], ("1.1", 2, 1), ["1.1.1", 3, 2], ("Chapter 2", 3)]
     marked = macos.pdf.set_bookmarks(book, contents, tmp_path / "marked.pdf")
     assert [(mark.title, mark.page, mark.level) for mark in macos.pdf.bookmarks(marked)] == [
         ("Intro", 1, 0), ("Chapter 1", 2, 0), ("1.1", 2, 1), ("1.1.1", 3, 2), ("Chapter 2", 3, 0)
     ]  # fmt: skip
     assert macos.pdf.bookmarks(macos.pdf.set_bookmarks(marked, [], tmp_path / "cleared.pdf")) == []
-    for wrong, message in (([("Deep", 1, 1)], "deeper than"), ([("x", 9)], "out of range"), ([(" ", 1)], "must not be empty")):
+    for wrong, message in (
+        ([("Deep", 1, 1)], "deeper than"), ([("x", 9)], "out of range"), ([(" ", 1)], "must not be empty"),
+        (["Intro"], "a bookmark is"), ([("Intro",)], "a bookmark is"),  # a bare string, a tuple too short
+    ):
         with pytest.raises(ValueError, match=message):
             macos.pdf.set_bookmarks(book, wrong, tmp_path / "never.pdf")
 

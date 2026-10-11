@@ -108,6 +108,13 @@ _listeners = _events.Listeners()
 def _combination(keys: str) -> Tuple[int, int]:
     """The key code and modifier flags of a shortcut such as ``"cmd+shift+k"``."""
     modifiers, code, shifted = keyboard._parse(keys)
+    if code in keyboard._MODIFIER_FLAGS:
+        # A modifier pressed on its own is a flags change to macOS, not a key press: the tap,
+        # which listens to key presses, would never see it, and the shortcut would never fire.
+        raise ValueError(
+            "{!r} is a modifier on its own, which can't be a shortcut: end it with a key, such as "
+            "'cmd+shift+k' or 'f5'".format(keys)
+        )
     flags = 0
     for flag, _ in modifiers:
         flags |= flag

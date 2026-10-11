@@ -75,15 +75,26 @@ def _is_utf8(source: Path) -> bool:
     return True
 
 
-def _options(source: Path) -> Optional[int]:
-    """Read text and HTML as UTF-8, unless it isn't or an HTML page names its own encoding."""
+def _reads_as_utf8(source: Path) -> bool:
+    """Whether to read a text or HTML file as UTF-8: it is, and an HTML page doesn't name its own encoding."""
     if source.suffix.lower() not in (".txt", ".text", ".html", ".htm"):
-        return None  # the other formats say their encoding themselves
+        return False  # the other formats say their encoding themselves
     if source.suffix.lower() in (".html", ".htm"):
         with open(str(source), "rb") as handle:
             if _CHARSET.search(handle.read(4096)):
-                return None
-    if not _is_utf8(source):
+                return False
+    return _is_utf8(source)
+
+
+def _options(source: Path) -> Optional[int]:
+    """
+    The reading options (autoreleased): UTF-8 for text and HTML that is.
+
+    No boundary for what an HTML page may fetch: ``ReadAccessURL`` (``NSReadAccessURLDocumentOption``)
+    is for the asynchronous HTML loading API, and the synchronous one used here fetches ``file://`` from
+    anywhere on this Mac with or without it (checked). The docstrings say so.
+    """
+    if not _reads_as_utf8(source):
         return None
     number = _objc.send(_objc.cls("NSNumber"), "numberWithUnsignedInteger:", _UTF8, argtypes=(ctypes.c_ulong,))
     return _objc.send(
@@ -124,8 +135,12 @@ def text(path: PathLike) -> str:
 
         macos.document.text("minutes.docx")   # 'Meeting minutes\\n...'
 
-    For a PDF, see :func:`macos.pdf.text`. HTML is read as in :func:`convert`:
-    its pictures and style sheets are fetched, and it needs the main thread.
+    For a PDF, see :func:`macos.pdf.text`. HTML is read as in :func:`convert`,
+    by WebKit: the page's pictures and style sheets are fetched while it's
+    read, from the web and from files on this Mac (``file://``) alike. Don't
+    read HTML you don't trust: it can make this Mac fetch addresses of its
+    choosing, or read local files. HTML pages and web archives need the main
+    thread.
     """
     source = _existing(path)
     with _objc.autorelease_pool():

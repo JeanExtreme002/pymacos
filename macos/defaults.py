@@ -23,11 +23,9 @@ most apps only read them when they start, so restart them to see a change.
 import ctypes
 import functools
 from contextlib import contextmanager
-from functools import lru_cache
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 from . import _cf
-from ._system import framework
 from .errors import PermissionDeniedError
 
 __all__ = ["read", "write", "delete", "keys", "restored", "GLOBAL"]
@@ -39,25 +37,9 @@ _GLOBAL_NAMES = {GLOBAL, "-g", "-globalDomain", ".GlobalPreferences"}
 _MISSING = object()
 
 
-@lru_cache(maxsize=None)
 def _preferences() -> ctypes.CDLL:
-    cf = framework("CoreFoundation")
-    pointer = ctypes.c_void_p
-    cf.CFPreferencesCopyAppValue.argtypes = (pointer, pointer)
-    cf.CFPreferencesCopyAppValue.restype = pointer
-    cf.CFPreferencesSetAppValue.argtypes = (pointer, pointer, pointer)
-    cf.CFPreferencesSetAppValue.restype = None
-    cf.CFPreferencesAppSynchronize.argtypes = (pointer,)
-    cf.CFPreferencesAppSynchronize.restype = ctypes.c_bool
-    cf.CFPreferencesCopyKeyList.argtypes = (pointer, pointer, pointer)
-    cf.CFPreferencesCopyKeyList.restype = pointer
-    cf.CFPreferencesSetValue.argtypes = (pointer, pointer, pointer, pointer, pointer)
-    cf.CFPreferencesSetValue.restype = None
-    cf.CFPreferencesSynchronize.argtypes = (pointer, pointer, pointer)
-    cf.CFPreferencesSynchronize.restype = ctypes.c_bool
-    cf.CFPreferencesCopyValue.argtypes = (pointer, pointer, pointer, pointer)
-    cf.CFPreferencesCopyValue.restype = pointer
-    return cf
+    """CoreFoundation, with the CFPreferences calls declared (once, in :func:`macos._cf.lib`: the handle is shared)."""
+    return _cf.lib()
 
 
 def _host(current_host: bool) -> Optional[int]:
@@ -96,9 +78,11 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
         )
 
 
-def _check(domain: str) -> None:
+def _check(domain: str, key: Optional[str] = None) -> None:
     if not domain or not domain.strip():
         raise ValueError("domain must not be empty")
+    if key is not None and (not isinstance(key, str) or not key.strip()):
+        raise ValueError("key must not be empty")
 
 
 def _domain(domain: str) -> int:
@@ -167,7 +151,7 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
     another user's, the system's, a sandboxed app's container) raises
     :class:`~macos.errors.PermissionDeniedError`.
     """
-    _check(domain)
+    _check(domain, key)
     if value is None:
         raise ValueError("value must not be None; use delete() to remove a key")
     with _cf.owned(_cf.from_python(value)) as converted:
@@ -180,7 +164,7 @@ def delete(domain: str, key: str, *, current_host: bool = False) -> bool:
 
     Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable.
     """
-    _check(domain)
+    _check(domain, key)
     existed = _own(domain, key, _MISSING, current_host) is not _MISSING
     _store(domain, key, None, current_host)
     return existed

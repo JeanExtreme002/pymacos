@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 from ._system import require_macos, run_bytes
-from .errors import CommandError, NotSupportedError
+from .errors import CommandError, MacOSError, NotSupportedError
 
 __all__ = ["search", "search_name", "metadata"]
 
@@ -159,4 +159,11 @@ def metadata(path: PathLike) -> Dict[str, Any]:
         raise FileNotFoundError(str(target))
 
     # The plist as mdls wrote it, in bytes: plistlib reads its encoding from its header.
-    return dict(plistlib.loads(run_bytes(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT)))
+    raw = run_bytes(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT)
+    try:
+        found = plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ValueError) as error:  # ValueError: expat's, for text that isn't XML
+        raise MacOSError("mdls returned something that isn't a property list for {}: {}".format(target, error)) from None
+    if not isinstance(found, dict):
+        raise MacOSError("mdls returned something unexpected for {}: {!r}".format(target, type(found).__name__))
+    return dict(found)

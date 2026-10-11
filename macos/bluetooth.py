@@ -149,9 +149,14 @@ def devices() -> List[Device]:
     """
     output = _run(["system_profiler", "SPBluetoothDataType", "-json"], timeout=PROFILER_TIMEOUT)
     try:
-        sections = json.loads(output).get("SPBluetoothDataType") or []
+        report = json.loads(output)
     except ValueError:
         raise MacOSError("system_profiler returned something unexpected") from None
+    if not isinstance(report, dict):
+        raise MacOSError("system_profiler returned something unexpected")
+    sections = report.get("SPBluetoothDataType") or []
+    if not isinstance(sections, list):
+        raise MacOSError("system_profiler returned something unexpected")
     found: List[Device] = []
     seen: Set[Tuple[str, str]] = set()
     for section in sections:

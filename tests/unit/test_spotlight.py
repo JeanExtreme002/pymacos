@@ -155,6 +155,15 @@ def test_spotlight_metadata(monkeypatch, tmp_path):
     assert macos.spotlight.metadata(target) == values
     with pytest.raises(FileNotFoundError):
         macos.spotlight.metadata(tmp_path / "missing")
+    for odd in (b"not a plist at all", plistlib.dumps(["a", "list"])):
+        values_bytes = odd
+
+        def odd_output(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, values_bytes, b"")
+
+        monkeypatch.setattr(_system.subprocess, "run", odd_output)
+        with pytest.raises(macos.MacOSError, match="mdls returned"):
+            macos.spotlight.metadata(target)
 
 
 def test_spotlight_query_that_looks_like_an_option_stays_the_query(mdfind, tmp_path):

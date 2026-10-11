@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import _cf, _events, _iokit, _objc, _sc, apps
+from . import _cf, _events, _files, _iokit, _objc, _sc, apps
 from ._system import framework
 from .errors import MacOSError
 
@@ -353,7 +353,7 @@ class _USBWatch(_Watch):
         io = _iokit.lib()
         self.iterators: List[int] = []
         self.callbacks = []
-        self.port = io.IONotificationPortCreate(0)
+        self.port = io.IONotificationPortCreate(_iokit.MAIN_PORT)
         if not self.port:
             raise MacOSError("could not watch the USB devices: IOKit gave no notification port")
         for kind, name in ((b"IOServiceFirstMatch", "usb_connected"), (b"IOServiceTerminate", "usb_disconnected")):
@@ -451,6 +451,9 @@ def _observer(listener: _events.Listener, cleanup: ExitStack) -> int:
 
 def _listen(names: List[str], on_event: Callable[[Event], bool], timeout: Optional[float]) -> None:
     """Observe ``names`` and turn the run loop until ``stop()``, the timeout, or ``on_event`` returning ``True``."""
+    # The notification centers deliver on the main thread's run loop, which only this thread turns
+    # when it is the main one: elsewhere nothing would ever arrive, and the wait would never end.
+    _files.require_main_thread("macos.events.run() and wait()")
     listener = _events.Listener()
     # Counted in first: a stop() while the observers are being set up is kept.
     with _listeners.listening(listener), _objc.autorelease_pool(), ExitStack() as cleanup:
@@ -517,10 +520,11 @@ def run(*, timeout: Optional[float] = None) -> None:
     """
     Listen for the events that have callbacks, and call them, until :func:`stop` or ``timeout`` seconds.
 
-    Call it from the main thread: macOS delivers these events there.
-    Callbacks run one at a time; an exception in one stops :func:`run` and
-    propagates. Ctrl-C stops it too. Raises :class:`ValueError` when no
-    callback is registered.
+    Call it from the main thread: macOS delivers these events there, so from
+    any other thread it raises :class:`~macos.MacOSError` instead of waiting
+    for events that never come. Callbacks run one at a time; an exception in
+    one stops :func:`run` and propagates. Ctrl-C stops it too. Raises
+    :class:`ValueError` when no callback is registered.
     """
     with _lock:
         names = sorted({handler.name for handler in _handlers})
@@ -543,6 +547,8 @@ def run(*, timeout: Optional[float] = None) -> None:
 def wait(name: str, *, timeout: Optional[float] = None) -> Optional[Event]:
     """
     Wait until ``name`` happens, and return the :class:`Event`; ``None`` if ``timeout`` seconds pass first.
+
+    Call it from the main thread, like :func:`run`.
 
     ::
 

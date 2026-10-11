@@ -18,7 +18,7 @@ import functools
 import inspect
 import threading
 from functools import lru_cache
-from typing import Any, Callable, List, Optional, TypeVar
+from typing import Any, Callable, List, NamedTuple, Optional, TypeVar
 
 from . import _objc
 from ._system import framework
@@ -74,15 +74,41 @@ def is_available(*, only_touch_id: bool = False) -> bool:
 _prompt = threading.Lock()
 _waiting: List[Optional[int]] = [None]  # the thread whose prompt is up
 _state = threading.Lock()
-_answers: List[bool] = []
+_answers: List["_Answer"] = []
 _generation = [0]
 _DRAIN = 2.0  # seconds to wait for a dismissed prompt's own reply
 
+# LAError codes (LAPublicDefines.h). The user's doing, or the prompt's: the answer is "no".
+_DECLINED = {
+    -1,  # kLAErrorAuthenticationFailed: wrong password or fingerprint, too many times
+    -2,  # kLAErrorUserCancel
+    -3,  # kLAErrorUserFallback: asked for the password instead, and only_touch_id refused
+    -4,  # kLAErrorSystemCancel: another app came to the front, the Mac slept...
+    -9,  # kLAErrorAppCancel: the prompt was invalidated (a timeout here)
+}
+_INVALID_CONTEXT = -10  # kLAErrorInvalidContext: the context was invalidated before the prompt: a bug here
+# Everything else means the question couldn't be asked: no passcode set (-5), no biometry
+# (-6, -7), biometry locked out (-8), no companion (-11), biometry not paired or disconnected
+# (-12, -13), no user session to show a prompt in (-1004, over SSH or in a service)...
 
-def _reply(generation: int, success: bool) -> None:
+
+class _Answer(NamedTuple):
+    success: bool
+    code: Optional[int]
+    message: Optional[str]
+
+
+def _reply(generation: int, success: bool, error: int) -> None:
+    code = message = None
+    if not success and error:
+        try:
+            code = int(_objc.send(error, "code", restype=_objc.NSInteger))
+            message = _objc.pystring(_objc.send(error, "localizedDescription"))
+        except Exception:  # an exception must not cross back into Objective-C: a "no" without a reason
+            pass
     with _state:
         if generation == _generation[0]:  # a retired block's reply answers nothing
-            _answers.append(bool(success))
+            _answers.append(_Answer(bool(success), code, message))
 
 
 @lru_cache(maxsize=None)
@@ -90,9 +116,21 @@ def _handler(generation: int) -> int:
     """The reply block of ``generation``, ``void (^)(BOOL success, NSError *error)``, made once: blocks live for good."""
 
     def reply(success: bool, error: int) -> None:
-        _reply(generation, success)
+        _reply(generation, success, error)
 
     return _objc.block(reply, b"v@?B@", ctypes.c_bool, ctypes.c_void_p)
+
+
+def _outcome(answer: "_Answer") -> bool:
+    """What a prompt's reply means: ``True``, ``False`` (declined), or an error when it couldn't be asked."""
+    if answer.success or answer.code is None or answer.code in _DECLINED:
+        return answer.success
+    reason = answer.message or "LocalAuthentication error {}".format(answer.code)
+    if answer.code == _INVALID_CONTEXT:
+        raise MacOSError("the authentication prompt was taken down before it was answered: {}".format(reason))
+    raise NotSupportedError(
+        "macOS can't ask for authentication here: {} (LAError {})".format(reason.rstrip("."), answer.code)
+    )
 
 
 def _answered() -> bool:
@@ -109,7 +147,10 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     (or approve on their Apple Watch); ``only_touch_id=True`` accepts only the
     fingerprint. Cancelling, failing, or ``timeout`` seconds without an answer
     return ``False``. Raises :class:`~macos.errors.NotSupportedError` when
-    ``only_touch_id=True`` and Touch ID isn't available.
+    ``only_touch_id=True`` and Touch ID isn't available, and when macOS can't
+    ask at all: no password set, biometry locked out, or no user session to
+    show the prompt in (over SSH, in a service), so a "no" always means the
+    user declined.
 
     One prompt at a time: calls from other threads wait their turn. A call
     made while this thread is already waiting for an answer (from a menu
@@ -156,7 +197,7 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
                         del _answers[:]
                     return False
                 with _state:
-                    return _answers.pop(0)
+                    answer = _answers.pop(0)
             except BaseException:
                 # Interrupted (Ctrl-C...) while the prompt may still be up: retire
                 # its block first, so whatever it answers later goes nowhere, then
@@ -171,6 +212,8 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
                 raise
             finally:
                 _objc.send(context, "release", restype=None)
+            # Answered: what it means (an error here is the answer, not an interruption to clean up after).
+            return _outcome(answer)
         finally:
             _waiting[0] = None
 

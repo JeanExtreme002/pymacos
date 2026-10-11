@@ -65,6 +65,10 @@ class PromptTimeoutError(MacOSError, TimeoutError):
     """The user left a permission prompt (camera, microphone) unanswered until the time ran out."""
 
 
+class WaitTimeoutError(MacOSError, TimeoutError):
+    """What was waited for (a copy to the clipboard, say) didn't happen before the time ran out."""
+
+
 class ShortcutNotFoundError(CommandError, LookupError):
     """No shortcut in the Shortcuts app has the given name or identifier."""
 

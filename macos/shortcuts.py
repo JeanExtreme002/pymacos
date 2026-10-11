@@ -82,33 +82,40 @@ def run(
     args = ["shortcuts", "run"]
     text_file = None
 
-    if isinstance(input, str):
-        # The command only takes input as files. A text file becomes text
-        # for the shortcut, so write the string to one.
-        descriptor, text_file = tempfile.mkstemp(prefix="shortcut-input-", suffix=".txt")
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(input)
-        args += ["--input-path", text_file]
-    elif input is not None:
-        paths = [input] if isinstance(input, os.PathLike) else _list(input)
-        for path in paths:
-            resolved = Path(path).expanduser().absolute()
-            if not resolved.exists():
-                raise FileNotFoundError(str(resolved))
-            args += ["--input-path", str(resolved)]
-
-    if output is not None:
-        args += ["--output-path", str(Path(output).expanduser().absolute())]
-    args += ["--", name]
-
     try:
-        result = _run(args, timeout)
-    except CommandError as error:
-        # The error message is localized, so ask the app whether the shortcut
-        # exists instead of parsing it.
-        if not _exists(name):
-            raise ShortcutNotFoundError(error.cmd, error.returncode, error.stderr) from None
-        raise
+        if isinstance(input, str):
+            # The command only takes input as files. A text file becomes text
+            # for the shortcut, so write the string to one. Made inside the
+            # try: whatever fails from here on, the file goes.
+            descriptor, text_file = tempfile.mkstemp(prefix="shortcut-input-", suffix=".txt")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(input)
+            args += ["--input-path", text_file]
+        elif input is not None:
+            paths = [input] if isinstance(input, os.PathLike) else _list(input)
+            for path in paths:
+                resolved = Path(path).expanduser().absolute()
+                if not resolved.exists():
+                    raise FileNotFoundError(str(resolved))
+                args += ["--input-path", str(resolved)]
+
+        if output is not None:
+            args += ["--output-path", str(Path(output).expanduser().absolute())]
+        args += ["--", name]
+
+        try:
+            result = _run(args, timeout)
+        except CommandError as error:
+            # The error message is localized, so ask the app whether the shortcut
+            # exists instead of parsing it. When even that fails, the run's own
+            # error is the one to see, not the listing's.
+            try:
+                exists = _exists(name)
+            except CommandError:
+                exists = True
+            if not exists:
+                raise ShortcutNotFoundError(error.cmd, error.returncode, error.stderr) from None
+            raise
     finally:
         if text_file is not None:
             os.unlink(text_file)

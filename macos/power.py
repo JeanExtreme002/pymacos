@@ -41,8 +41,7 @@ __all__ = [
     "sleep_blockers",
 ]
 
-kIOPMAssertionLevelOn = 255
-kIOReturnSuccess = 0
+_ASSERTION_ON = 255  # kIOPMAssertionLevelOn
 
 
 def _battery_registry(*names: str) -> Dict[str, Optional[int]]:
@@ -165,8 +164,8 @@ def keep_awake(*, display: bool = False, reason: str = "pymacos keep_awake") -> 
     kind = "PreventUserIdleDisplaySleep" if display else "PreventUserIdleSystemSleep"
     assertion = ctypes.c_uint32()
     with _cf.owned(_cf.string(kind)) as kind_ref, _cf.owned(_cf.string(reason)) as reason_ref:
-        status = io.IOPMAssertionCreateWithName(kind_ref, kIOPMAssertionLevelOn, reason_ref, ctypes.byref(assertion))
-    if status != kIOReturnSuccess:
+        status = io.IOPMAssertionCreateWithName(kind_ref, _ASSERTION_ON, reason_ref, ctypes.byref(assertion))
+    if status != _iokit.SUCCESS:
         raise MacOSError("could not create the power assertion (IOReturn {:#x})".format(status & 0xFFFFFFFF))
 
     try:
@@ -231,7 +230,7 @@ def _adapter(found: Any) -> Optional[Adapter]:
     watts = found.get("Watts")
     return Adapter(
         watts=int(watts) if isinstance(watts, (int, float)) and watts else None,
-        name=found.get("Name") or found.get("Description") or None,
+        name=str(found.get("Name") or found.get("Description") or "") or None,
         manufacturer=found.get("Manufacturer") or None,
         voltage=number("Voltage", 1000),  # the IOKit gives millivolts
         current=number("Current", 1000),  # and milliamperes
@@ -289,7 +288,7 @@ def sleep_blockers() -> List[SleepBlocker]:
     io = _iokit.lib()
     found = _cf.CFTypeRef()
     status = io.IOPMCopyAssertionsByProcess(ctypes.byref(found))
-    if status != kIOReturnSuccess:
+    if status != _iokit.SUCCESS:
         raise MacOSError("could not read the power assertions (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     with _cf.owned(found.value) as assertions:
         # The keys are process IDs, as numbers: not a property list, so each value converts on its own.
@@ -310,7 +309,7 @@ def _sleep_blockers(entries: Any) -> List[SleepBlocker]:
         if not isinstance(entry, dict):
             continue
         kind = entry.get("AssertType")
-        if kind not in _KEEPS_AWAKE or entry.get("AssertLevel", kIOPMAssertionLevelOn) != kIOPMAssertionLevelOn:
+        if kind not in _KEEPS_AWAKE or entry.get("AssertLevel", _ASSERTION_ON) != _ASSERTION_ON:
             continue
         since = _local(entry.get("AssertStartWhen"))
         timeout = entry.get("TimeoutSeconds")

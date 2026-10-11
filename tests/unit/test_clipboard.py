@@ -29,8 +29,9 @@ def test_clipboard_wait_for_change_waits_for_the_content_after_a_clear(monkeypat
 def test_clipboard_wait_for_change_times_out(monkeypatch):
     monkeypatch.setattr(macos.clipboard, "change_count", lambda: 1)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(macos.WaitTimeoutError) as caught:
         macos.clipboard.wait_for_change(timeout=0.01, interval=0.001)
+    assert isinstance(caught.value, TimeoutError) and isinstance(caught.value, macos.MacOSError)
 
 
 def test_clipboard_wait_for_change_never_sleeps_past_the_timeout(monkeypatch):
