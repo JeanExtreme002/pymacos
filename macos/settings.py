@@ -521,7 +521,8 @@ _PARTIAL = {
     ("finder", "drives_on_desktop"),
     ("finder", "desktop_view"),
     ("system", "clock_format"),
-    ("system", "menu_bar_items"),
+    # Not menu_bar_items: its reader sees one of the two preferences its setter writes, so a match
+    # there can hide a mismatch in the other. It's always written, as before.
 }
 
 

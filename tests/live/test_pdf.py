@@ -41,7 +41,7 @@ def test_pdf_read_merge_extract_and_render(tmp_path):
 
     page = macos.pdf.render(document, 1, size=2048)
     assert page.startswith(b"\x89PNG")
-    assert "Page one says hello" in macos.vision.text(page)
+    assert "says hello" in macos.vision.text(page)  # macOS 15's Vision may drop the short "one"
 
 
 def test_pdf_render_is_exact_and_follows_rotation(tmp_path):
@@ -511,8 +511,17 @@ def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
     source = tmp_path / "in.pdf"
     source.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Ana Souza"))
     done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
-    assert done.matches == {"Ana Souza": 2} and done.pages == {1: 1}  # on the page, and in the XMP packet
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}  # the packet goes, but only the page counts
     assert b"Souza" not in _raw_text(done.path)
+
+    # Found only in the packet (here, as a date macOS could have written there itself), a target isn't found.
+    import re
+
+    dated = tmp_path / "dated.pdf"
+    dated.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="2026-10-13"))
+    with pytest.raises(ValueError, match="isn't in the PDF"):
+        macos.pdf.redact(dated, re.compile(r"\d{4}-\d{2}-\d{2}"), tmp_path / "dated-out.pdf")
+    assert not (tmp_path / "dated-out.pdf").exists()
 
     # One that doesn't hold a target stays, as everything else that doesn't.
     kept = tmp_path / "kept.pdf"

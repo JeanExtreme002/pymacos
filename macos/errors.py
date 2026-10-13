@@ -66,7 +66,12 @@ class PromptTimeoutError(MacOSError, TimeoutError):
 
 
 class WaitTimeoutError(MacOSError, TimeoutError):
-    """What was waited for (a copy, an appearance change, a geocoding answer, a folder walked) didn't happen in time."""
+    """
+    What was waited for didn't happen in time.
+
+    A copy, an appearance change, a geocoding answer, a folder walked, a Bluetooth or VPN switch, the
+    Dock restarting, a default app's confirmation, a window's full-screen change.
+    """
 
 
 class ShortcutNotFoundError(CommandError, LookupError):

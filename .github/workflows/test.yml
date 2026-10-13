@@ -39,9 +39,9 @@ jobs:
     - name: Unit tests
       # --cov-fail-under is the real coverage gate: deterministic and
       # independent of any external service. Codecov (below) only reports.
-      # It measures the unit tests alone: which live tests run depends on the
-      # runner (no battery, no Bluetooth, no network...), so a gate on the
-      # whole suite could fail for reasons unrelated to the change.
+      # It measures the unit tests alone, on every Python: which live tests run
+      # depends on the runner (no battery, no Bluetooth, no network...). The
+      # whole suite is gated only once, below, well under what it reaches.
       # The XML is for Codecov even when this step fails and the live tests are
       # skipped; when they run, they rewrite it with both suites' coverage.
       run: pytest tests/unit -v --cov=macos --cov-report=term --cov-report=xml --cov-fail-under=70

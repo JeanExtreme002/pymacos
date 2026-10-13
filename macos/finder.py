@@ -566,10 +566,12 @@ def _as_on_disk(path: PathLike) -> Path:
     what changed in the disk's own: compared with the path as given, nothing inside would match.
     """
     real = os.path.realpath(os.path.expanduser(str(path)))
+    if not os.path.isdir(real):
+        return Path(real)  # only folders are watched; opening a named pipe would wait for a writer
     try:
         import fcntl
 
-        query = fcntl.F_GETPATH  # macOS only: what the kernel calls the open file
+        query: int = getattr(fcntl, "F_GETPATH")  # macOS only (not in Linux's stubs): what the kernel calls the open file
     except (ImportError, AttributeError):
         return Path(real)
     try:

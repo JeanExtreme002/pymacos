@@ -322,6 +322,8 @@ def test_redact_targets():
     assert [m.group() for m in ana.finditer("Ana, Banana, Anapolis, ANA.")] == ["Ana", "ANA"]  # whole words only
     assert _patterns("-00")[0][1].search("789-00")  # an edge that isn't a letter or digit needs no word around it
     assert _patterns("Jose")[0][1].search("José") is None and _patterns("José")[0][1].search("JOSÉ.")
+    # Typed with a combining accent, a name still ends with a letter: "Joséphine" isn't "José".
+    assert _patterns("Jose\u0301")[0][1].search("Jos\xe9phine") is None and _patterns("Jose\u0301")[0][1].search("Jos\xe9.")
     counts = [0, 0]
     assert _scrub("Contrato de Ana Souza, CPF 123.456.789-00", [("", words), ("", cpf)], counts) == (
         "Contrato de " + "█" * 9 + ", CPF " + "█" * 14
@@ -368,6 +370,16 @@ line) <FEFF0041006E0061> <416E61>"
     assert list(_strings(b"/Opt [(Free) (Pro)]")) == ["Free", "Pro", "FreePro"]  # in an object: each, and joined
     # What PDFKit writes itself as it saves is no part of the document.
     assert list(_strings(b"/Producer (macOS Quartz PDFContext) /ModDate (D:20261013) /Title (Plan)")) == ["Plan"]
+    # Nor the file's identifier, random bytes new at each save that may read as digits.
+    assert list(_strings(b"/ID [<3636A0FF> <36360000>] /Size 9 /Title (Plan)")) == ["Plan"]
+    assert list(_strings(b"/ID [(66) (66)] /Title (Plan)")) == ["Plan"]
+    # A word drawn in two pieces on one line, each placed on its own as PDFKit writes them, is one word;
+    # what's drawn on another line, or moved to by the leading, isn't part of it.
+    pieces = (
+        b"BT 18 0 0 18 72 700 Tm /TT1 1 Tf (Ban) Tj ET BT 18 0 0 18 104 700 Tm /TT2 1 Tf (ana) Tj ET "
+        b"BT 18 0 0 18 72 680 Tm (Ana) Tj ET BT /F1 18 Tf 72 650 Td (x) Tj 0 0 Td [(y) (y)] TJ 0 -20 Td (z) Tj T* (w) Tj ET"
+    )
+    assert list(_strings(pieces, drawing=True)) == ["Banana", "Ana", "xyy", "z", "w"]
 
     from macos.pdf import _file_strings
 

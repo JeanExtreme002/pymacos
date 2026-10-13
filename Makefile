@@ -89,8 +89,8 @@ test-live:
 	@echo "$(GREEN)Running all tests, live ones included...$(NC)"
 	$(PYTHON) -m pytest $(TEST_DIR) -v -rs
 
-# The unit tests with coverage: the figure CI gates on (the live tests'
-# coverage depends on the Mac they run on)
+# The unit tests with coverage: the figure CI gates on for every Python (it
+# gates both suites together on one, where the live tests' coverage is known)
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(GREEN)Running unit tests with coverage...$(NC)"

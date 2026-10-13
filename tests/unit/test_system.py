@@ -249,6 +249,8 @@ def test_mount_image(fake_run, tmp_path):
     assert fake_run.args == ["hdiutil", "detach", "/Volumes/Tool", "-force"]
     macos.system.unmount_image("-force")  # a mount point named like an option is still a path
     assert fake_run.args == ["hdiutil", "detach", str(Path("-force").absolute())]
+    macos.system.unmount_image("disk4")  # hdiutil also takes a disk's name: left as it is
+    assert fake_run.args == ["hdiutil", "detach", "disk4"]
     with pytest.raises(FileNotFoundError):
         macos.system.mount_image(tmp_path / "missing.dmg")
 

@@ -1752,8 +1752,10 @@ def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.P
         elif isinstance(item, str) and item.strip():
             words = r"\s+".join(_spellings(word) for word in item.split())
             # Whole words: no letter or digit right before or after, where the text itself starts or ends with one.
-            before = r"(?<!\w)" if re.match(r"\w", item.strip()) else ""
-            after = r"(?!\w)" if re.search(r"\w$", item.strip()) else ""
+            # Read composed: "José" typed with a combining accent ends with a letter all the same.
+            edges = unicodedata.normalize("NFC", item.strip())
+            before = r"(?<!\w)" if re.match(r"\w", edges) else ""
+            after = r"(?!\w)" if re.search(r"\w$", edges) else ""
             found.append((item, re.compile(before + words + after, re.IGNORECASE)))
         else:
             raise ValueError("redact() takes texts and compiled patterns, not {!r}".format(item))
@@ -2137,6 +2139,32 @@ _UNREADABLE = re.compile(
 )
 _STRING_START = re.compile(rb"<<|>>|[(\[\]<]")
 _WRITTEN_BY_PDFKIT = re.compile(rb"/(?:Producer|CreationDate|ModDate)\s*$")
+# The file's identifier: two strings of random bytes, new at each save, which may read as digits or letters.
+_FILE_ID = re.compile(rb"/ID\s*\[\s*(?:(?:<[0-9A-Fa-f\s]*>|\([^()]*\))\s*)?$")
+# The operators of a page's drawing that place text: a new text object (which starts at the origin),
+# its matrix set (its last number, the baseline), a move (its second number, down or up), a new line.
+_NUMBER = rb"[-+]?(?:\d+\.?\d*|\.\d+)"
+_PLACING = re.compile(
+    rb"(?<![A-Za-z*])(?:(BT)|((?:" + _NUMBER + rb"\s+){5})(" + _NUMBER + rb")\s+Tm|" + _NUMBER + rb"\s+(" + _NUMBER
+    + rb")\s+T[dD]|(T\*))(?![A-Za-z*])|(['\"])"
+)
+
+
+def _baseline(gap: bytes, baseline: Optional[float]) -> Optional[float]:
+    """Where the text drawn after ``gap`` sits, up the page, from where the text before it sat; ``None``: unknown."""
+    for found in _PLACING.finditer(gap):
+        start, _, matrix, moved, line, quote = found.groups()
+        if start:
+            baseline = 0.0
+        elif matrix is not None:
+            baseline = float(matrix)
+        elif moved is not None:
+            baseline = None if baseline is None else baseline + float(moved)
+        elif line or quote:
+            baseline = None  # moved by the leading, which isn't read here: a line of its own
+    return baseline
+
+
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}
 
 
@@ -2183,28 +2211,47 @@ def _literal(data: bytes, start: int) -> Tuple[bytes, int]:
 def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
     """
     The strings in PDF source, each on its own, and those of an array joined. Not those PDFKit writes
-    itself as it saves: the ``/Producer``, and the dates, which aren't text.
+    itself as it saves: the ``/Producer``, the dates, which aren't text, and the file's random ``/ID``.
 
     In a page's ``drawing``, an array is a ``TJ``: one line of text cut into pieces to space them,
-    down to single letters ("DO" of "DOES"). Only the line it makes is read there, never its pieces.
+    down to single letters ("DO" of "DOES"). Only the line it makes is read there, never its pieces;
+    and the strings drawn on one line are read together: a word drawn in two fonts is two strings
+    ("Ban", "ana"), each placed on its own as PDFKit writes them, and neither is a word of its own.
     """
-    groups: List[List[str]] = []
+    groups: List[Tuple[int, List[str]]] = []  # the arrays open, with where each starts
+    run: List[str] = []  # in a drawing: the strings on the line so far
+    shown = 0  # in a drawing: where the last of them ends
+    line: Optional[float] = None  # in a drawing: that line's baseline
     position = 0
+
+    def drawn(text: str, start: int, end: int) -> Iterator[str]:
+        nonlocal run, shown, line
+        baseline = _baseline(data[shown:start], line)
+        if run and (baseline is None or line is None or abs(baseline - line) > 0.01):
+            yield "".join(run)
+            run = []
+        run.append(text)
+        shown, line = end, baseline
+
     while True:
         found = _STRING_START.search(data, position)
         if not found:
+            if run:
+                yield "".join(run)
             return
         token = found.group()
         position = found.end()
         if token in (b"<<", b">>"):
             continue
         if token == b"[":
-            groups.append([])
+            groups.append((found.start(), []))
             continue
         if token == b"]":
             if groups:
-                parts = groups.pop()
-                if len(parts) > 1:
+                opened, parts = groups.pop()
+                if drawing and not groups:
+                    yield from drawn("".join(parts), opened, position)
+                elif len(parts) > 1:
                     yield "".join(parts)
             continue
         if token == b"(":
@@ -2215,7 +2262,8 @@ def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
             if end < 0 or not re.fullmatch(rb"[0-9A-Fa-f]*", digits):
                 continue
             raw, position = bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii")), end + 1
-        if _WRITTEN_BY_PDFKIT.search(data[max(0, found.start() - 32):found.start()]):
+        before = data[max(0, found.start() - 128):found.start()]
+        if _WRITTEN_BY_PDFKIT.search(before[-32:]) or _FILE_ID.search(before):
             continue
         if raw.startswith(b"\xfe\xff"):
             text = raw[2:].decode("utf-16-be", "replace")
@@ -2224,9 +2272,12 @@ def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
         else:
             text = raw.decode("latin-1")
         if groups:
-            groups[-1].append(text)
+            groups[-1][1].append(text)
             if drawing:
                 continue
+        elif drawing:
+            yield from drawn(text, found.start(), position)
+            continue
         yield text
 
 
@@ -2319,7 +2370,8 @@ class Redaction:
     matches: Dict[str, int]
     """
     How many times each target was found and blacked out, by the target as given (a pattern by its
-    source): on the pages, in form fields and comments, in the metadata and in the bookmarks.
+    source): on the pages, in form fields and comments, in the metadata and in the bookmarks. Not in
+    the XMP packet, which is left out when it holds one, but isn't counted.
     """
     pages: Dict[int, int]
     """The pages redrawn, with how many matches each had: check them before sharing the PDF."""
@@ -2398,16 +2450,17 @@ def redact(
         root = _objc.send(document, "outlineRoot")
         if root:
             _scrub_outline(root, patterns, counts)
+        # Not counted: the XMP packet mostly repeats the title and author found above, and holds what
+        # macOS wrote itself (dates, identifiers), which must not pass for a target found.
         packet = _xmp(document)
-        in_packet = [_occurrences([packet], pattern) if packet else 0 for _, pattern in patterns]
-        counts = [count + extra for count, extra in zip(counts, in_packet)]
+        in_packet = any(_occurrences([packet], pattern) for _, pattern in patterns) if packet else False
         missing = [repr(label) for (label, _), count in zip(patterns, counts) if not count]
         if missing:
             raise ValueError(
                 "{} isn't in the PDF, so nothing was written: check the spelling, "
                 "or run macos.pdf.ocr() first on a scan".format(", ".join(missing))
             )
-        if any(in_packet):
+        if in_packet:
             # PDFKit has no way to change the XMP packet, and writes it back as it was: a new document,
             # with the same pages, metadata and bookmarks, has none.
             document = _rebuilt(document)

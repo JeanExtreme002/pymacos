@@ -97,6 +97,7 @@ never breaks code that works with the previous one.
   includes raising where it used to return (`False`, `None`, `[]`), raising
   an exception the old one's `except` clauses don't catch (a subclass of it
   is fine), and refusing a call it used to accept (another thread, an
-  argument it took). Such a change waits for the next major release; until then, keep the old behaviour where you can and warn
-  (`DeprecationWarning`) that it will change, saying what to do instead.
+  argument it took). Such a change waits for the next major release; until
+  then, keep the old behaviour where you can and warn (`DeprecationWarning`)
+  that it will change, saying what to do instead.
 - A release's notes list every such change, under *Changed*.

@@ -82,6 +82,9 @@ def test_watch_needs_a_folder(tmp_path):
     (tmp_path / "file.txt").write_text("x")
     with pytest.raises(NotADirectoryError):
         macos.finder.wait_for_change(tmp_path / "file.txt")
+    os.mkfifo(str(tmp_path / "pipe"))  # opening it to read would wait for a writer forever
+    with pytest.raises(NotADirectoryError):
+        next(macos.finder.watch(tmp_path / "pipe"))
 
 
 def test_watch_pattern():

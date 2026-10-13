@@ -613,8 +613,12 @@ def unmount_image(mount_point: Union[str, "os.PathLike[str]"], *, force: bool = 
     doesn't answer for a minute raises :class:`~macos.errors.CommandTimeoutError`. ``force=True``
     unmounts it even while a program has files open on it.
     """
-    # Absolute, so a mount point named like an option ("-force") is taken as the path it is.
-    _release(["hdiutil", "detach", str(Path(mount_point).expanduser().absolute()), *(["-force"] if force else [])])
+    target = str(Path(mount_point).expanduser())
+    if target.startswith("-"):
+        # A mount point named like an option ("-force") is taken as the path it is. Only then made
+        # absolute: hdiutil also takes a disk's name ("disk4"), which a folder in front would break.
+        target = os.path.abspath(target)
+    _release(["hdiutil", "detach", target, *(["-force"] if force else [])])
 
 
 @dataclass(frozen=True)

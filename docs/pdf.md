@@ -319,7 +319,9 @@ What else in the file holds a match goes too:
 - a bookmark's link (a web address, another file) that holds a match: the
   bookmark stays, without its link;
 - the XMP metadata packet some apps add beside the title and author: when it
-  holds a match, it's left out of the result;
+  holds a match, it's left out of the result. It doesn't count in the
+  {class}`~macos.pdf.Redaction`: it mostly repeats the title and author, and
+  holds dates and identifiers macOS wrote itself;
 - text a page's crop hides: when it holds a match, the page is redrawn too,
   and the hidden part goes.
 

@@ -10,4 +10,4 @@ import macos
 def test_shortcuts():
     assert isinstance(macos.shortcuts.list(), list)
     with pytest.raises(macos.ShortcutNotFoundError):
-        macos.shortcuts.run("Definitely Not A Shortcut {}".format(uuid.uuid4()))
+        macos.shortcuts.run("Definitely Not A Shortcut {}".format(uuid.uuid4()), timeout=60)  # never hang a run

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
+from ._files import write_atomically
 from ._system import LAUNCHCTL_TIMEOUT, add_note, launchd_disabled, launchd_user_domain, require_macos, run
 from .errors import CommandError, MacOSError
 
@@ -285,7 +286,7 @@ def add(
         # plist (a full disk): those also put the old job back.
         _remove(name, paused)  # unload the old one first (and forget it was paused)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(plist)
+        write_atomically(path, lambda temporary: Path(temporary).write_bytes(plist))  # never half a plist
         _run(["launchctl", "bootstrap", _domain(), str(path)])
     except BaseException as error:
         problem = _restore(name, path, previous, was_paused)
@@ -296,6 +297,9 @@ def add(
     if found is None:
         raise MacOSError("the job {!r} was added, but its file {} can't be read back".format(name, path))
     return found
+
+
+_ADMIN_GROUP = 80  # the admin group's id on every Mac
 
 
 def _swappable(path: Path) -> Optional[str]:
@@ -315,7 +319,10 @@ def _swappable(path: Path) -> Optional[str]:
             return None  # can't tell: no warning made up
         if status.st_uid not in (me, 0):
             return "{} belongs to another user".format(current)
-        if status.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        # A folder only the admin group may write in (Homebrew's, /Applications) gives its members
+        # nothing they don't have already: they can use sudo.
+        group = stat.S_IWGRP if status.st_gid != _ADMIN_GROUP else 0
+        if status.st_mode & (group | stat.S_IWOTH):
             if current == real:
                 return "other users may change {}".format(current)
             if not status.st_mode & stat.S_ISVTX:
@@ -364,7 +371,7 @@ def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool)
         except OSError:
             unchanged = False
         if not unchanged:
-            path.write_bytes(previous)  # skipped otherwise: a read-only plist would refuse, and keep it unloaded
+            write_atomically(path, lambda temporary: Path(temporary).write_bytes(previous))  # only when it changed
         if was_paused:
             _run(["launchctl", "disable", _target(name)])  # a paused job stays unloaded
         else:

@@ -124,3 +124,8 @@ def test_shortcut_that_deletes_its_text_input_still_returns_its_output(commands,
 
     monkeypatch.setattr(_system.subprocess, "run", run)
     assert macos.shortcuts.run("Tidy", input="text") == "Done"  # not FileNotFoundError from the clean-up
+
+
+def test_listing_shortcuts_never_hangs(fake_run):
+    macos.shortcuts.list()
+    assert fake_run.calls[-1]["timeout"] == macos.shortcuts._LIST_TIMEOUT
