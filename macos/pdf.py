@@ -1913,9 +1913,12 @@ def _uncropped_texts(document: int) -> Dict[int, str]:
         }
 
 
-# What the apps that write an XMP packet put there themselves, by local name: dates, identifiers, the
-# history of saves, the tool's name. Not something a document says.
-_XMP_BOOKKEEPING = r"(?:\w*Date|\w*ID|when|about|Producer|CreatorTool|softwareAgent|action|changed)"
+# What the apps that write an XMP packet put there themselves, by qualified name: the xmp: dates, the
+# media management (xmpMM:, stEvt:, stRef:: identifiers, history of saves), the PDF producer, and, as
+# attributes only, the toolkit that wrote the packet and the resource it describes. Only in those
+# namespaces: elsewhere a name ending in "ID" or "Date" (pdfx:PatientID) is something the document says.
+_XMP_BOOKKEEPING = r"(?:xmp:\w*Date|xmpMM:\w+|stEvt:\w+|stRef:\w+|pdf:Producer)"
+_XMP_BOOKKEEPING_ATTRIBUTES = r"(?:{}|x:xmptk|rdf:about)".format(_XMP_BOOKKEEPING)
 
 
 def _xmp(document: int, *, said_only: bool = False) -> Optional[str]:
@@ -1935,7 +1938,7 @@ def _xmp(document: int, *, said_only: bool = False) -> Optional[str]:
         packet = _cf.to_bytes(data).decode("utf-8", "replace")
     if said_only:
         packet = re.sub(r"<\?.*?\?>", " ", packet, flags=re.DOTALL)  # <?xpacket begin="" id="..."?>
-        element = r"<([\w.-]+:{0})\b[^>]*?(?:/>|>.*?</\1\s*>)".format(_XMP_BOOKKEEPING)
+        element = r"<({0})\b[^>]*?(?:/>|>.*?</\1\s*>)".format(_XMP_BOOKKEEPING)
         packet = re.sub(element, " ", packet, flags=re.DOTALL)
 
     def values(tag: "re.Match[str]") -> str:
@@ -1945,7 +1948,7 @@ def _xmp(document: int, *, said_only: bool = False) -> Optional[str]:
         return " " + " ".join(
             double or single
             for name, double, single in found
-            if not name.startswith("xmlns") and not (said_only and re.fullmatch(r"(?:[\w.-]+:)?" + _XMP_BOOKKEEPING, name))
+            if not name.startswith("xmlns") and not (said_only and re.fullmatch(_XMP_BOOKKEEPING_ATTRIBUTES, name))
         ) + " "
 
     return html.unescape(re.sub(r"<[^>]*>", values, packet))

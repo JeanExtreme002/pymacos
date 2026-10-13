@@ -475,12 +475,12 @@ def test_redact_reads_the_whole_annotation_dictionary(tmp_path):
     assert b"Ask Ana" not in _raw_text(done.path) and b"Souza" not in _raw_text(done.path)
 
 
-def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=None):
+def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=None, xmp_more=""):
     """A one-page PDF, written by hand, with an XMP packet naming its creator and a bookmark leading to a link."""
     drawing = "BT /F1 18 Tf 72 700 Td ({}) Tj ET".format(page_text)
     objects = [
         "<< /Type /Catalog /Pages 2 0 R{}{} >>".format(
-            " /Metadata 6 0 R" if xmp_creator or xmp_date else "", " /Outlines 7 0 R" if bookmark_link else ""
+            " /Metadata 6 0 R" if xmp_creator or xmp_date or xmp_more else "", " /Outlines 7 0 R" if bookmark_link else ""
         ),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
@@ -488,11 +488,13 @@ def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=N
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
     xmp = (
-        '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
-        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
-        "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator><xmp:CreateDate>{}</xmp:CreateDate>"
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c015 84.159810, 2016/09/10-02:41:30">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"'
+        ' xmlns:pdfx="http://ns.adobe.com/pdfx/1.3/" xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#">'
+        "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator><xmp:CreateDate>{}</xmp:CreateDate>{}"
         "</rdf:Description></rdf:RDF></x:xmpmeta>"
-    ).format(xmp_creator or "", xmp_date or "")
+    ).format(xmp_creator or "", xmp_date or "", xmp_more)
     objects.append("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{}\nendstream".format(len(xmp), xmp))
     objects.append("<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>")
     objects.append("<< /Title (Profile) /Parent 7 0 R /A << /S /URI /URI ({}) >> >>".format(bookmark_link or ""))
@@ -530,6 +532,20 @@ def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
     with pytest.raises(ValueError, match="isn't in the PDF"):
         macos.pdf.redact(dated, re.compile(r"\d{4}-\d{2}-\d{2}"), tmp_path / "dated-out.pdf")
     assert not (tmp_path / "dated-out.pdf").exists()
+    # Nor the toolkit's own date, or a step of the history, which tools write there too.
+    for pattern in (r"\d{4}/\d{2}/\d{2}", r"application/\w+"):
+        with pytest.raises(ValueError, match="isn't in the PDF"):
+            history = '<stEvt:parameters>from application/x-indesign to application/pdf</stEvt:parameters>'
+            tooled = tmp_path / "tooled.pdf"
+            tooled.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_more=history))
+            macos.pdf.redact(tooled, re.compile(pattern), tmp_path / "tooled-out.pdf")
+
+    # What the document says is found, whatever its property is named: a custom ID, the creating tool.
+    for said in ('<pdfx:PatientID>Ana Souza</pdfx:PatientID>', '<xmp:CreatorTool>Ana Souza</xmp:CreatorTool>'):
+        custom = tmp_path / "custom.pdf"
+        custom.write_bytes(_pdf_with_extras("Contract", xmp_more=said))
+        done = macos.pdf.redact(custom, "Ana Souza", tmp_path / "custom-out.pdf")
+        assert done.matches == {"Ana Souza": 1} and b"Souza" not in _raw_text(done.path)
 
     # One that doesn't hold a target stays, as everything else that doesn't.
     kept = tmp_path / "kept.pdf"

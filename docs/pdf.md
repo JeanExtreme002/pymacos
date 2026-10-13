@@ -321,8 +321,9 @@ What else in the file holds a match goes too:
 - the XMP metadata packet some apps add beside the title and author: when it
   holds a match, it's left out of the result. It counts in the
   {class}`~macos.pdf.Redaction` only for a target found nowhere else (it
-  mostly repeats the title and author), and never by the dates and
-  identifiers apps write there themselves;
+  mostly repeats the title and author), and not by the dates, identifiers
+  and history of saves apps write there in their usual places (`xmp:` dates,
+  `xmpMM:`, the toolkit's name);
 - text a page's crop hides: when it holds a match, the page is redrawn too,
   and the hidden part goes.
 
