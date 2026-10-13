@@ -141,17 +141,23 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 0.2) -
     return paste()
 
 
-def watch(*, timeout: Optional[float] = None, interval: float = 0.2) -> Iterator[Optional[str]]:
+def watch(
+    *, timeout: Optional[float] = None, interval: float = 0.2, include_sensitive: bool = True
+) -> Iterator[Optional[str]]:
     """
     Yield each new thing copied, as text (``None`` for images, files...), for a clipboard history::
 
-        for text in macos.clipboard.watch():
+        for text in macos.clipboard.watch(include_sensitive=False):
             if text:
                 history.append(text)
 
     It goes on until you ``break`` out of the loop, or ``timeout`` seconds
     pass. macOS doesn't announce copies, so it checks every ``interval``
     seconds, as :func:`wait_for_change` does.
+
+    ``include_sensitive=False`` skips what's marked as concealed or transient
+    (a password copied with ``copy(sensitive=True)``, or by a password
+    manager), as clipboard managers do: a history shouldn't keep it.
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
@@ -162,15 +168,25 @@ def watch(*, timeout: Optional[float] = None, interval: float = 0.2) -> Iterator
         count = change_count()
         if count != seen and not _is_empty():
             content = paste()
+            skipped = not include_sensitive and _is_sensitive()
             if change_count() != count:
                 continue  # copied again while reading: read the newer copy instead
             seen = count
-            yield content
+            if not skipped:
+                yield content
             continue
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             return
         time.sleep(interval if remaining is None else min(interval, remaining))
+
+
+def _is_sensitive() -> bool:
+    """Whether what's on the clipboard carries a concealed or transient marker (see :func:`copy`)."""
+    with _objc.autorelease_pool():
+        types = _objc.send(_pasteboard(), "types")
+        found = {_objc.pystring(kind) for kind in _objc.nsarray(types)}
+    return any(marker in found for marker in _MARKERS)
 
 
 def _is_empty() -> bool:

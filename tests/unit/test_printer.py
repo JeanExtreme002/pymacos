@@ -145,7 +145,7 @@ def test_print_file_checks(cups, tmp_path, monkeypatch):
 
 def test_set_default(cups, fake_run):
     printer.set_default("Home Inkjet")
-    assert fake_run.args == ["lpoptions", "-d", "Home"]
+    assert fake_run.args == ["lpoptions", "-d", "Home"] and fake_run.calls[-1]["timeout"]
 
 
 def test_structs_match_libcups():

@@ -90,6 +90,28 @@ def test_spotlight_limit_stops_reading(mdfind):
     assert fake.killed
 
 
+def test_spotlight_stops_a_search_past_its_timeout(mdfind, monkeypatch):
+    import threading
+
+    fake = mdfind(["/0"])
+    stopped = threading.Event()
+    first = fake.__call__
+
+    def stuck(args, **kwargs):  # mdfind hands over one path, then hangs until it's killed
+        process = first(args, **kwargs)
+        records = iter([b"/0\0"])
+        process.stdout.read1 = lambda size: next(records, None) or (stopped.wait(10), b"")[1]
+        process.kill = lambda: (setattr(process, "killed", True), stopped.set())
+        return process
+
+    monkeypatch.setattr(macos.spotlight.subprocess, "Popen", stuck)
+    with pytest.raises(macos.CommandTimeoutError, match="'mdfind' didn't finish within 0.2 seconds"):
+        macos.spotlight.search("x", timeout=0.2)
+    assert fake.killed
+    with pytest.raises(ValueError, match="timeout must be positive"):
+        macos.spotlight.search_name("x", timeout=0)
+
+
 def test_spotlight_invalid_query(mdfind):
     mdfind(["Failed to create query for 'kMDItemFoo =='."], returncode=1)
 

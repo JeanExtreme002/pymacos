@@ -34,7 +34,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
 from ._system import applescript, framework, require_macos, restart_process, run as _run
-from .errors import MacOSError, WaitTimeoutError
+from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
 
 __all__ = [
     "reveal",
@@ -558,6 +558,34 @@ def _matches(name: str, pattern: Union[str, Sequence[str], None]) -> bool:
     return any(fnmatch.fnmatchcase(name.casefold(), wanted.casefold()) for wanted in patterns)
 
 
+def _as_on_disk(path: PathLike) -> Path:
+    """
+    ``path`` made absolute and real, spelled as the disk spells it: ``~/downloads`` is ``~/Downloads``.
+
+    A Mac's disk ignores case, so a folder opens whatever case it's given in, but FSEvents names
+    what changed in the disk's own: compared with the path as given, nothing inside would match.
+    """
+    real = os.path.realpath(os.path.expanduser(str(path)))
+    if not os.path.isdir(real):
+        return Path(real)  # only folders are watched; opening a named pipe would wait for a writer
+    try:
+        import fcntl
+
+        query: int = getattr(fcntl, "F_GETPATH")  # macOS only (not in Linux's stubs): what the kernel calls the open file
+    except (ImportError, AttributeError):
+        return Path(real)
+    try:
+        handle = os.open(real, os.O_RDONLY)
+    except OSError:
+        return Path(real)  # it isn't there, or can't be opened: the caller says what's wrong
+    try:
+        return Path(os.fsdecode(fcntl.fcntl(handle, query, bytes(1024)).split(b"\0", 1)[0]))  # MAXPATHLEN
+    except OSError:
+        return Path(real)
+    finally:
+        os.close(handle)
+
+
 def watch(
     path: PathLike,
     *,
@@ -586,7 +614,7 @@ def watch(
     Desktop, Documents and Downloads folders ask for access the first time,
     like any access to them.
     """
-    folder = Path(os.path.realpath(os.path.expanduser(str(path))))
+    folder = _as_on_disk(path)
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
     services, run_loop = _core_services(), _cf.lib()  # the run loop's functions are declared there
@@ -1273,8 +1301,9 @@ def largest(
     disk), the whole folder is walked file by file.
 
     Walking a big folder, a whole disk or a network share, can take very
-    long: past ``timeout`` seconds of it, :class:`~macos.WaitTimeoutError` (a
-    ``TimeoutError``) is raised rather than an answer missing files. ``None`` walks for as long as it takes.
+    long: past ``timeout`` seconds of it, Spotlight's answer included,
+    :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) is raised rather
+    than an answer missing files. ``None`` waits for as long as it takes.
     """
     if count < 1:
         raise ValueError("count must be 1 or more, not {}".format(count))
@@ -1308,7 +1337,13 @@ def largest(
     else:
         paths: Iterable[Path]
         try:
-            paths = spotlight.search("kMDItemFSSize >= {}".format(int(at_least)), folder=root)
+            # Within the time left too: a Spotlight that's stuck mustn't keep the answer waiting for good.
+            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.001)
+            paths = spotlight.search("kMDItemFSSize >= {}".format(int(at_least)), folder=root, timeout=remaining)
+        except CommandTimeoutError:
+            raise WaitTimeoutError(
+                "Spotlight didn't answer within {:g} seconds for {}; pass a longer timeout, or None".format(timeout or 0, root)
+            ) from None
         except MacOSError:
             paths = []
         for path in paths:

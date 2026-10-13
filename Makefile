@@ -28,13 +28,15 @@ help:
 	@echo "  $(YELLOW)install-docs$(NC)     - Install the dependencies to build the documentation"
 	@echo ""
 	@echo "Checks:"
-	@echo "  $(YELLOW)test$(NC)             - Run the unit tests (safe: nothing on this Mac changes)"
-	@echo "  $(YELLOW)test-live$(NC)        - Run the live tests too: they use the clipboard, volume, dialogs... of this Mac"
-	@echo "  $(YELLOW)test-unit$(NC)        - Same as test"
-	@echo "  $(YELLOW)test-coverage$(NC)    - Run the unit tests with a coverage report (what CI gates on)"
+	@echo "  $(YELLOW)test$(NC)             - Run the unit and live tests, but not the intrusive ones: nothing on this Mac changes for good"
+	@echo "  $(YELLOW)test-all$(NC)         - Run every test, the intrusive ones too: camera, microphone, browser, launch agent, settings"
+	@echo "  $(YELLOW)test-unit$(NC)        - Run the unit tests only (safe: nothing on this Mac changes)"
+	@echo "  $(YELLOW)test-live$(NC)        - Run the live tests only, but not the intrusive ones"
+	@echo "  $(YELLOW)test-live-all$(NC)    - Run the live tests only, the intrusive ones too"
+	@echo "  $(YELLOW)test-coverage$(NC)    - Run the unit tests with a coverage report (the figure CI gates on for every Python)"
 	@echo "  $(YELLOW)lint$(NC)             - Run the linter (flake8)"
 	@echo "  $(YELLOW)type-check$(NC)       - Run the type checker (mypy)"
-	@echo "  $(YELLOW)check$(NC)            - Run lint, type-check and test"
+	@echo "  $(YELLOW)check$(NC)            - Run lint, type-check and test-unit: what CI runs on a pull request, except the docs and live tests"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  $(YELLOW)docs$(NC)             - Build the HTML documentation (output: $(DOCS_BUILD_DIR))"
@@ -73,24 +75,50 @@ install-docs:
 	$(PIP) install -r $(DOCS_DIR)/requirements.txt
 	$(PIP) install -e .
 
-# The unit tests, which don't touch the system (they also run on Linux): the
-# default, so a first `make test` on someone's Mac mutes nothing and opens no dialog.
-.PHONY: test test-unit
-test test-unit:
+# The switches of the intrusive live tests (CONTRIBUTING.md lists what each does to this Mac): off for
+# `test` and `test-live`, even when set in this shell, and on for `test-all` and `test-live-all`.
+LIVE_SWITCHES = PYMACOS_CAPTURE_TESTS PYMACOS_BROWSER_TESTS PYMACOS_SCHEDULE_TESTS PYMACOS_SETTINGS_TESTS
+WITHOUT_SWITCHES = env $(foreach switch,$(LIVE_SWITCHES),-u $(switch))
+WITH_SWITCHES = env $(foreach switch,$(LIVE_SWITCHES),$(switch)=1)
+
+# The unit tests and the live ones, but not the intrusive ones: nothing is left
+# changed, and after the first run (macOS asks once for the Automation
+# permission) nothing waits for an answer. The live tests still use (and
+# restore) the clipboard and the volume, show a few dialogs and a test window,
+# and steal the focus for a moment: run them when you aren't typing.
+.PHONY: test
+test:
+	@echo "$(GREEN)Running the unit and live tests, but not the intrusive ones...$(NC)"
+	$(WITHOUT_SWITCHES) $(PYTHON) -m pytest $(TEST_DIR) -v -rs
+
+# Everything, the intrusive live tests too: the camera and the microphone turn
+# on, macOS asks for permissions (answer them: unanswered, a test waits, then
+# fails) and announces a launch agent, and settings change before they're put
+# back. Run it at the Mac, and let it finish.
+.PHONY: test-all
+test-all:
+	@echo "$(GREEN)Running every test, the intrusive ones too (camera, microphone, browser, schedule, settings)...$(NC)"
+	$(WITH_SWITCHES) $(PYTHON) -m pytest $(TEST_DIR) -v -rs
+
+# The unit tests, which don't touch the system (they also run on Linux).
+.PHONY: test-unit
+test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
 	$(PYTHON) -m pytest $(TEST_DIR) -v -m "not live"
 
-# Everything, live tests included. They talk to the real system: they restore
-# the clipboard and the volume, delete the Keychain items they create, and
-# steal the focus for a moment. See CONTRIBUTING.md for what they touch and
-# the PYMACOS_*_TESTS switches that unlock the rest.
+# The live tests only, as in `test`, and as in `test-all`.
 .PHONY: test-live
 test-live:
-	@echo "$(GREEN)Running all tests, live ones included...$(NC)"
-	$(PYTHON) -m pytest $(TEST_DIR) -v -rs
+	@echo "$(GREEN)Running live tests, but not the intrusive ones...$(NC)"
+	$(WITHOUT_SWITCHES) $(PYTHON) -m pytest $(TEST_DIR)/live -v -rs
 
-# The unit tests with coverage: the figure CI gates on (the live tests'
-# coverage depends on the Mac they run on)
+.PHONY: test-live-all
+test-live-all:
+	@echo "$(GREEN)Running live tests, the intrusive ones too (camera, microphone, browser, schedule, settings)...$(NC)"
+	$(WITH_SWITCHES) $(PYTHON) -m pytest $(TEST_DIR)/live -v -rs
+
+# The unit tests with coverage: the figure CI gates on for every Python (it
+# gates both suites together on one, where the live tests' coverage is known)
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(GREEN)Running unit tests with coverage...$(NC)"
@@ -111,7 +139,7 @@ type-check:
 
 # Everything CI runs on a pull request, except the docs build and the live tests
 .PHONY: check
-check: lint type-check test
+check: lint type-check test-unit
 	@echo "$(GREEN)All checks passed!$(NC)"
 
 # Build the HTML documentation with the same flags as CI and Read the Docs:

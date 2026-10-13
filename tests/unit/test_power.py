@@ -8,6 +8,7 @@ def test_power_sleep_commands(fake_run):
     assert fake_run.args == ["pmset", "sleepnow"]
     macos.power.sleep_display()
     assert fake_run.args == ["pmset", "displaysleepnow"]
+    assert all(call["timeout"] for call in fake_run.calls)  # a wedged pmset mustn't hang the script
 
 
 def test_battery_health_fields_are_optional():

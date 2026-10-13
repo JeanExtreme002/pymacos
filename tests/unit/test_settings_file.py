@@ -62,6 +62,32 @@ def test_apply_changes_only_what_differs_and_restarts_once(fake_settings):
     assert restarts == ["dock"]  # once, at the end
 
 
+def test_apply_compares_only_the_part_of_a_dict_that_is_given(fake_settings, monkeypatch):
+    values, changes, restarts = fake_settings
+
+    # Any part of an export works: the entries left out don't make the setting differ.
+    assert settings.apply({"trackpad": {"gestures": {"rotate": True}}}) == []
+    assert changes == [] and restarts == []
+    assert settings.apply({"trackpad": {"gestures": {"rotate": False}}}) == ["trackpad.gestures"]
+    assert changes == [("gestures", {"rotate": False})]
+    # A hot corner is compared whole: a modifier left out is no modifier, as set_hot_corner() takes it.
+    corners = {"top_left": {"action": "desktop", "modifier": None}, "top_right": {"action": None, "modifier": "cmd"}}
+    store = {"hot_corners": corners}
+
+    def set_corners(value):
+        if not _system.restart_later("Dock", lambda: restarts.append("dock")):
+            raise AssertionError("changes must happen in a batch")
+        for corner, wanted in value.items():
+            store["hot_corners"][corner] = {"action": wanted.get("action"), "modifier": wanted.get("modifier")}
+
+    monkeypatch.setitem(settings._SETTINGS["dock"], "hot_corners", settings._Setting(lambda: store["hot_corners"], set_corners))
+    assert settings.apply({"dock": {"hot_corners": {"top_left": {"action": "desktop"}}}}) == []
+    assert settings.apply({"dock": {"hot_corners": {"top_right": {"action": None}}}}) == ["dock.hot_corners"]
+    assert store["hot_corners"]["top_right"] == {"action": None, "modifier": None}
+    # Not a partial setting: the whole value is compared, as before.
+    assert settings.apply({"dock": {"size": 48}}) == []
+
+
 def test_apply_refuses_unknown_names_before_changing_anything(fake_settings):
     _, changes, _ = fake_settings
     with pytest.raises(ValueError, match="unknown settings: dock.colour, printer"):
@@ -99,6 +125,16 @@ def test_other_failures_are_not_hidden(fake_settings, monkeypatch):
     assert "size" not in exported["dock"] and exported["dock"]["autohide"] is False
     with pytest.raises(macos.MacOSError, match="Night Shift"):
         settings.apply({"dock": {"size": 64}})
+
+
+def test_export_leaves_out_a_value_it_cannot_make_sense_of(fake_settings, monkeypatch):
+    def garbled():
+        return int("big")  # a preference edited by hand into text, read by a getter that wants a number
+
+    monkeypatch.setitem(settings._SETTINGS["dock"], "size", settings._Setting(garbled, lambda value: None))
+    with pytest.warns(RuntimeWarning, match="dock.size couldn't be read"):
+        exported = settings.export()
+    assert "size" not in exported["dock"] and exported["trackpad"]["gestures"]["rotate"] is True
 
 
 def test_folders_are_exported_relative_to_home(monkeypatch, tmp_path):

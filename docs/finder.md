@@ -180,10 +180,10 @@ they're the folder or right under it; hidden folders deeper in (a project's
 hasn't indexed that disk), the whole folder is walked file by file.
 
 Walking a big folder, a whole disk or a network share, can take very long:
-after `timeout` seconds of it (60 by default) {func}`~macos.finder.largest`
-raises {class}`~macos.WaitTimeoutError` (a `TimeoutError`) rather than return an
-answer missing files. Pass
-`timeout=None` to walk for as long as it takes.
+after `timeout` seconds of it (60 by default), Spotlight's answer included,
+{func}`~macos.finder.largest` raises {class}`~macos.WaitTimeoutError` (a
+`TimeoutError`) rather than return an answer missing files. Pass
+`timeout=None` to wait for as long as it takes.
 
 ## Finder settings
 

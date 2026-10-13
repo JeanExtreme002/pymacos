@@ -137,3 +137,40 @@ def test_copy_image_closes_its_file(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="stop here"):
         clipboard.copy_image(image)
     assert opened and opened[0].closed
+
+
+def test_watch_can_skip_what_is_marked_sensitive(monkeypatch):
+    clipboard = macos.clipboard
+    # (change count, content, marked as concealed or transient) at each check.
+    moments = iter([(1, "old", False), (2, "s3cret", True), (3, "hello", False)])
+    state = {"now": (1, "old", False)}
+
+    monkeypatch.setattr(clipboard, "change_count", lambda: state["now"][0])
+    monkeypatch.setattr(clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(clipboard, "_is_sensitive", lambda: state["now"][2])
+    monkeypatch.setattr(clipboard, "paste", lambda: state["now"][1])
+    monkeypatch.setattr(clipboard.time, "sleep", lambda seconds: state.update(now=next(moments, state["now"])))
+
+    assert next(clipboard.watch(include_sensitive=False)) == "hello"  # the password is skipped
+    moments = iter([(1, "old", False), (2, "s3cret", True)])
+    state["now"] = (1, "old", False)
+    assert next(clipboard.watch()) == "s3cret"  # by default, every copy, as before
+
+
+def test_sensitive_means_either_marker(monkeypatch):
+    from contextlib import nullcontext
+
+    from macos import _objc, clipboard
+
+    types = []
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: "pasteboard")
+    monkeypatch.setattr(_objc, "send", lambda receiver, selector, *args, **kwargs: "types")
+    monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(_objc, "nsarray", lambda array: list(types))
+    monkeypatch.setattr(_objc, "pystring", lambda kind: kind)
+    types[:] = ["public.utf8-plain-text"]
+    assert not clipboard._is_sensitive()
+    types[:] = ["org.nspasteboard.TransientType", "public.utf8-plain-text"]
+    assert clipboard._is_sensitive()
+    types[:] = ["org.nspasteboard.ConcealedType"]
+    assert clipboard._is_sensitive()

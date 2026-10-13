@@ -155,7 +155,8 @@ macos.apps.set_default_for("md", "Visual Studio Code")
 
 Since macOS 26, macOS asks the user to confirm the change, and the function
 waits for the answer (`timeout`, one minute by default); it raises
-{class}`~macos.MacOSError` when the change is declined or the answer doesn't
+{class}`~macos.MacOSError` when the change is declined, and
+{class}`~macos.WaitTimeoutError` (a `MacOSError` too) when the answer doesn't
 come. The default browser
 can't be changed this way: macOS asks for that one in System Settings.
 
@@ -238,7 +239,9 @@ The files are found by the app's bundle ID (in Application Support, Caches,
 Containers, Preferences, Saved Application State, Logs, and the like), which
 only that app uses. Files named after the ID of another installed app are
 left alone, such as Chrome Canary's (`com.google.Chrome.canary`) when
-uninstalling Chrome.
+uninstalling Chrome. An ID shorter than three parts (`com.example`) only
+matches files named exactly after it, not those it begins: they may be any of
+that maker's apps'.
 
 Many apps also keep a folder named after themselves, such as
 `Application Support/Slack`. A name can be shared, though: Firefox Developer

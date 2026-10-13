@@ -82,6 +82,9 @@ def test_watch_needs_a_folder(tmp_path):
     (tmp_path / "file.txt").write_text("x")
     with pytest.raises(NotADirectoryError):
         macos.finder.wait_for_change(tmp_path / "file.txt")
+    os.mkfifo(str(tmp_path / "pipe"))  # opening it to read would wait for a writer forever
+    with pytest.raises(NotADirectoryError):
+        next(macos.finder.watch(tmp_path / "pipe"))
 
 
 def test_watch_pattern():
@@ -236,7 +239,7 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
         return clock["now"]
 
     monkeypatch.setattr(finder, "require_macos", lambda: None)
-    monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None: [])  # nothing indexed: walked
+    monkeypatch.setattr(macos.spotlight, "search", lambda query, folder=None, timeout=None: [])  # nothing indexed: walked
     monkeypatch.setattr(finder.time, "monotonic", tick)
     with pytest.raises(macos.WaitTimeoutError, match="took more than 25 seconds"):
         finder.largest(tmp_path, at_least=1024, timeout=25)
@@ -246,6 +249,20 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
     assert sorted(path.parent.name for path, size in found) == ["folder0", "folder1", "folder2"]
     with pytest.raises(ValueError, match="timeout"):
         finder.largest(tmp_path, timeout=0)
+
+
+def test_largest_gives_spotlight_the_time_left(tmp_path, monkeypatch):
+    asked = []
+
+    def stuck(query, folder=None, timeout=None):
+        asked.append(timeout)
+        raise macos.CommandTimeoutError(["mdfind"], timeout)
+
+    monkeypatch.setattr(finder, "require_macos", lambda: None)
+    monkeypatch.setattr(macos.spotlight, "search", stuck)
+    with pytest.raises(macos.WaitTimeoutError, match="Spotlight didn't answer within 30 seconds"):
+        finder.largest(tmp_path, timeout=30)  # not a walk, file by file, with no time left for it
+    assert 0 < asked[0] <= 30
 
 
 def test_restarting_finder_only_ignores_it_not_running(commands):

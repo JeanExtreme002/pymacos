@@ -132,7 +132,7 @@ def test_connect_vpn_fails(fake_run, monkeypatch):
         macos.network.connect_vpn("Office")
 
     _scutil(monkeypatch, ["Disconnected"])
-    with pytest.raises(macos.MacOSError, match="isn't connected after 0 seconds"):
+    with pytest.raises(macos.WaitTimeoutError, match="isn't connected after 0 seconds"):
         macos.network.connect_vpn("Office", timeout=0)
 
     calls = _scutil(monkeypatch, ["Disconnected"])

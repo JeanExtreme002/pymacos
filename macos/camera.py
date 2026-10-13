@@ -236,12 +236,12 @@ def _delegate(kind: str) -> int:
     return delegate
 
 
-def _wait(delegate: int, what: str) -> Dict[str, Any]:
+def _wait(delegate: int, what: str, timeout: float = _TIMEOUT) -> Dict[str, Any]:
     # The callbacks come on the main queue: turn the run loop while waiting (on the main thread, which
     # photo() and record() check first: another thread's run loop never gets them).
     try:
-        if not _objc.run_until(lambda: delegate in _results, _TIMEOUT):
-            raise MacOSError("the camera didn't finish the {} within {} seconds".format(what, _TIMEOUT))
+        if not _objc.run_until(lambda: delegate in _results, timeout):
+            raise MacOSError("the camera didn't finish the {} within {:g} seconds".format(what, timeout))
         with _lock:
             result = _results[delegate]
     finally:
@@ -406,7 +406,8 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
             finally:
                 _objc.send(output, "stopRecording", restype=None)
             # Waited for even after Ctrl-C: the movie is only written out once the recorder reports it done.
-            _wait(delegate, "video")
+            # A long recording takes longer to close (its last samples, its index): allow for it.
+            _wait(delegate, "video", _TIMEOUT + seconds / 10)
         finally:
             _forget(delegate)
             _objc.send(session, "stopRunning", restype=None)

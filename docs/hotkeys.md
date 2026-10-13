@@ -16,6 +16,8 @@ macos.hotkeys.run()   # until macos.hotkeys.stop() or Ctrl-C
 Listening to the keyboard needs the [Input Monitoring
 permission](permissions.md#input-monitoring), and keeping the shortcut from
 reaching the app in front needs [Accessibility](permissions.md#accessibility).
+{func}`~macos.hotkeys.has_permission` is true when both are granted, and
+{func}`~macos.hotkeys.request_permission` asks for both.
 
 ## Registering shortcuts
 
@@ -36,7 +38,13 @@ exception in a callback stops it and propagates. Holding the keys down doesn't
 repeat the call, and registering a shortcut again replaces its callback.
 {func}`~macos.hotkeys.unregister` removes a shortcut. The keyboard is watched
 on a thread of its own, so a slow callback doesn't hold up typing in other
-apps. To listen from a thread other than the main one with a non-US keyboard
+apps.
+
+The keys a callback presses with {mod}`macos.keyboard` go to the app in front
+as they are, even its own shortcut: a callback can do some work, then pass the
+shortcut on, without calling itself again. Keys pressed from any other thread
+are caught like the user's, so a script can press a registered shortcut to
+trigger it. To listen from a thread other than the main one with a non-US keyboard
 layout, see [Keyboard layouts](keyboard.md#keyboard-layouts).
 
 Function keys, arrows, Home, End, Page Up and Down and Forward Delete match

@@ -193,7 +193,7 @@ def _name(printer: Union[None, str, Printer]) -> str:
 
 def set_default(printer: Union[str, Printer]) -> None:
     """Make ``printer`` (its name or its description) the one files go to when none is named, for you."""
-    _run(["lpoptions", "-d", _name(printer)])
+    _run(["lpoptions", "-d", _name(printer)], timeout=30)  # it only writes a setting: never long
 
 
 def print_file(

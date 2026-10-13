@@ -192,3 +192,32 @@ def test_a_frame_that_cant_be_encoded_cancels_the_writer(monkeypatch, tmp_path):
     # The writer is told to stop, not left to be found by the pool, and nothing is left at the target.
     assert sent[-1] == "cancelWriting" and "startWriting" in sent
     assert not target.exists() and list(tmp_path.iterdir()) == []
+
+
+def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from macos import _media
+
+    sent = []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append(selector)
+        return 0 if selector == "status" else 1
+
+    def interrupted(done, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_media._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(_media._objc, "send", send)
+    monkeypatch.setattr(_media._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_media._objc, "nsstring", lambda text: 2)
+    monkeypatch.setattr(_media._objc, "file_url", lambda path: 3)
+    monkeypatch.setattr(_media, "ignore_completion", lambda: 4)
+    monkeypatch.setattr(_media._objc, "run_until", interrupted)
+    target = tmp_path / "out.mov"
+    with pytest.raises(KeyboardInterrupt):
+        _media.export(5, target)
+    # The session is stopped, not left encoding into the temporary folder, which is gone.
+    assert sent[-1] == "cancelExport"
+    assert list(tmp_path.iterdir()) == []

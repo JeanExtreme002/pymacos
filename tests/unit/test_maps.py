@@ -40,7 +40,7 @@ def test_only_the_main_thread_gets_answers():
     thread = threading.Thread(target=ask)
     thread.start()
     thread.join()
-    assert failures == ["geocoding answers on the main thread: call it from there"]
+    assert len(failures) == 1 and failures[0].startswith("Geocoding must run on the main thread")
 
 
 def test_open_and_directions(fake_run):

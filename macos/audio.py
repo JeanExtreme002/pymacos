@@ -649,10 +649,11 @@ def convert(source: PathLike, output: PathLike, *, quality: str = "high", lossle
 
 
 # Editing: decode to 16-bit PCM, change the samples, encode to the output's format. The samples go
-# through a WAV file on each side, read and written a piece at a time where the edit allows it (trim, fade,
-# gain), so a long recording isn't held in memory whole, let alone several times over.
+# through a WAV file on each side, read and written a piece at a time (trim, concat, fade, gain, reverse),
+# so a long recording isn't held in memory whole, let alone several times over.
 
 _CHUNK_FRAMES = 1 << 16  # frames edited at a time: 256 KiB of 16-bit stereo
+_WAVE_PCM, _WAVE_EXTENSIBLE = 1, 0xFFFE  # WAVE_FORMAT_PCM, WAVE_FORMAT_EXTENSIBLE: the integer samples asked for
 
 
 def _wav_layout(stream: io.BufferedIOBase) -> Tuple[int, int, int, int]:
@@ -671,7 +672,12 @@ def _wav_layout(stream: io.BufferedIOBase) -> Tuple[int, int, int, int]:
         header = stream.read(8)
         kind, length = header[:4], struct.unpack("<I", header[4:8])[0]
         if kind == b"fmt ":
-            channels, rate = struct.unpack("<HI", stream.read(16)[2:8])
+            fields = stream.read(16)
+            if length < 16 or len(fields) < 16:
+                raise MacOSError("afconvert wrote a WAV file whose format is cut short")
+            tag, channels, rate, _, _, bits = struct.unpack("<HHIIHH", fields)
+            if tag not in (_WAVE_PCM, _WAVE_EXTENSIBLE) or bits != 16:
+                raise MacOSError("afconvert wrote a WAV file of another kind than 16-bit PCM")
         elif kind == b"data":
             start, size = offset + 8, min(length, end - offset - 8)
         offset += 8 + length + (length & 1)  # chunks are padded to an even size
@@ -753,18 +759,6 @@ def _encoding_to(
         _afconvert(plain, target, options)
 
 
-def _decode(path: Path, rate: Optional[int] = None, channels: Optional[int] = None) -> Tuple[int, int, "array.array[int]"]:
-    """``(channels, sample rate, 16-bit samples)`` of an audio file, optionally resampled and remixed."""
-    with _decoded(path, rate, channels) as samples:
-        return samples.channels, samples.rate, samples.read(samples.frames)
-
-
-def _encode(samples: "array.array[int]", channels: int, rate: int, output: PathLike, quality: str, lossless: bool) -> Path:
-    with _encoding_to(output, channels, rate, quality, lossless) as write:
-        write(samples)
-    return Path(output).expanduser().absolute()
-
-
 def _clip(value: float) -> int:
     return -32768 if value < -32768 else 32767 if value > 32767 else int(value)
 
@@ -816,10 +810,23 @@ def concat(
     """
     if not files:
         raise ValueError("concat() needs at least one file")
-    channels, rate, joined = _decode(_existing(files[0]))
-    for path in files[1:]:
-        joined.extend(_decode(_existing(path), rate, channels)[2])
-    return _encode(joined, channels, rate, output, quality, lossless)
+    _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
+    paths = [_existing(path) for path in files]
+    with _decoded(paths[0]) as first:
+        channels, rate = first.channels, first.rate
+        with _encoding_to(output, channels, rate, quality, lossless) as write:
+            # File after file, a piece at a time: only one file's samples are decoded at once, on disk.
+            _copy_samples(first, write)
+            for path in paths[1:]:
+                with _decoded(path, rate, channels) as samples:
+                    _copy_samples(samples, write)
+    return Path(output).expanduser().absolute()
+
+
+def _copy_samples(samples: _Samples, write: Callable[["array.array[int]"], None]) -> None:
+    """Write every frame of ``samples``, from where it is, a piece at a time."""
+    while samples.position < samples.frames:
+        write(samples.read(_CHUNK_FRAMES))
 
 
 def fade(
@@ -897,12 +904,19 @@ def reverse(source: PathLike, output: PathLike, *, quality: str = "high", lossle
 
     ``quality`` and ``lossless`` work as in :func:`convert`.
     """
-    channels, rate, samples = _decode(_existing(source))
-    backwards = array.array("h", samples)
-    for channel in range(channels):
-        # Reverse the frames, keeping each frame's channels in order.
-        backwards[channel::channels] = samples[channel::channels][::-1]
-    return _encode(backwards, channels, rate, output, quality, lossless)
+    _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
+    with _decoded(_existing(source)) as samples:
+        channels = samples.channels
+        with _encoding_to(output, channels, samples.rate, quality, lossless) as write:
+            # From the end, a piece at a time: each piece's frames reversed, keeping each frame's channels in order.
+            for end in range(samples.frames, 0, -_CHUNK_FRAMES):
+                samples.seek(max(0, end - _CHUNK_FRAMES))
+                piece = samples.read(end - samples.position)
+                backwards = array.array("h", piece)
+                for channel in range(channels):
+                    backwards[channel::channels] = piece[channel::channels][::-1]
+                write(backwards)
+    return Path(output).expanduser().absolute()
 
 
 def speed(

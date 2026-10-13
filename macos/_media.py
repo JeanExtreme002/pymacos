@@ -224,7 +224,14 @@ def export(
             restype=None,
         )
         done = lambda: _objc.send(session, "status", restype=_objc.NSInteger) >= _COMPLETED  # noqa: E731
-        if not _objc.run_until(done, timeout):
+        try:
+            finished = _objc.run_until(done, timeout)
+        except BaseException:
+            # Ctrl-C (or a callback's error) while it exports: stop the session, or it would keep
+            # encoding in the background into a folder that's about to be deleted.
+            _objc.send(session, "cancelExport", restype=None)
+            raise
+        if not finished:
             _objc.send(session, "cancelExport", restype=None)
             raise MacOSError("the export didn't finish within {} seconds".format(timeout))
         status = _objc.send(session, "status", restype=_objc.NSInteger)

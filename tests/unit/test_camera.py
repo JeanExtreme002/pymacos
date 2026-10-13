@@ -128,8 +128,9 @@ def test_ctrl_c_while_recording_keeps_the_movie_so_far(capture_stubs, monkeypatc
             return True  # the recording began
         raise KeyboardInterrupt  # while it records
 
-    def wait(delegate, what):
+    def wait(delegate, what, timeout=None):
         sent.append("wait:" + what)
+        finishing.append(timeout)
         target.write_bytes(b"movie so far")  # the recorder finishes the file when told to stop
         return {"done": True}
 
@@ -139,12 +140,14 @@ def test_ctrl_c_while_recording_keeps_the_movie_so_far(capture_stubs, monkeypatc
     monkeypatch.setattr(camera._objc, "file_url", lambda path: "url")
     monkeypatch.setattr(camera._objc, "run_until", run_until)
     monkeypatch.setattr(camera, "_wait", wait)
+    finishing = []
 
     interrupted = camera._record(target, 60, None, False)
 
     assert isinstance(interrupted, KeyboardInterrupt)  # handed back once the movie is written, not raised at once
     assert sent == ["startRecordingToOutputFileURL:recordingDelegate:", "stopRecording", "wait:video", "stopRunning"]
     assert target.read_bytes() == b"movie so far"
+    assert finishing == [camera._TIMEOUT + 6]  # a minute's movie gets longer to close than a photo
 
 
 def test_ctrl_c_before_anything_was_recorded_is_the_error(capture_stubs, monkeypatch, tmp_path):
@@ -159,7 +162,7 @@ def test_ctrl_c_before_anything_was_recorded_is_the_error(capture_stubs, monkeyp
     monkeypatch.setattr(camera._objc, "send", lambda receiver, selector, *args, **kwargs: None)
     monkeypatch.setattr(camera._objc, "file_url", lambda path: "url")
     monkeypatch.setattr(camera._objc, "run_until", run_until)
-    monkeypatch.setattr(camera, "_wait", lambda delegate, what: {"done": True})  # but no file came out
+    monkeypatch.setattr(camera, "_wait", lambda delegate, what, timeout=None: {"done": True})  # but no file came out
     with pytest.raises(KeyboardInterrupt):  # the Ctrl-C, not "the video wasn't saved"
         camera._record(tmp_path / "clip.mov", 60, None, False)
 

@@ -91,10 +91,15 @@ To follow every copy, {func}`~macos.clipboard.watch` yields each one, until you
 ```python
 history = []
 
-for text in macos.clipboard.watch():
+for text in macos.clipboard.watch(include_sensitive=False):
     if text:
         history.append(text)
 ```
+
+`include_sensitive=False` skips what's marked as concealed or transient (a
+password copied with `sensitive=True`, see above, or by a password manager), as
+clipboard managers do: a history shouldn't keep it. By default every copy is
+yielded.
 
 ## Detecting changes
 

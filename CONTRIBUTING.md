@@ -13,13 +13,16 @@ pip install -e ".[dev]"
 ```
 
 The `Makefile` wraps every command below: run `make help` to list the targets,
-for example `make check` (lint, type check and tests) or `make docs`.
+for example `make check` (lint, type check and unit tests) or `make docs`.
 
 ## Tests
 
 ```bash
-pytest tests/unit       # unit tests only (these also run on Linux): make test
-pytest                  # everything, including live tests on your Mac: make test-live
+make test               # unit and live tests, but not the intrusive ones (below), even with a switch set
+make test-all           # every test, the intrusive ones included: run it at the Mac
+make test-unit          # unit tests only (these also run on Linux): pytest tests/unit
+make test-live          # live tests only, not the intrusive ones; make test-live-all: with them
+pytest                  # unit and live tests, the intrusive ones only when their switch is set
 pytest tests/unit/test_audio.py tests/live/test_audio.py   # one module
 ```
 
@@ -38,7 +41,7 @@ unmute the volume, show three dialogs for a second each, open a small test
 window and give the focus back, create and delete a Keychain item, a Time
 Machine exclusion and a disk image, and ask once for the Automation permission
 (System Events). The more intrusive ones only run when asked, with an
-environment variable:
+environment variable; `make test-all` and `make test-live-all` set them all:
 
 | Variable | Unlocks |
 |---|---|
@@ -52,6 +55,8 @@ unasked: the machine is thrown away afterwards. `CI` alone unlocks nothing.
 The tests that need a permission the machine lacks (Accessibility, Screen
 Recording, Input Monitoring) skip themselves: `pytest -rs` lists them, so you
 can tell a green run with gaps from a full one.
+`PYMACOS_REQUIRE_PERMISSIONS=1` turns those skips into failures: CI sets it on
+the runners that have the permissions, so losing them can't go unnoticed.
 
 ## Lint and type check
 
@@ -91,4 +96,11 @@ never breaks code that works with the previous one.
 - New arguments are keyword-only and have a default, so existing calls keep
   their meaning.
 - Changing what a function returns or raises counts as breaking, unless the
-  old behaviour contradicted its documentation (that's a bug fix).
+  old behaviour contradicted its documentation (that's a bug fix). That
+  includes raising where it used to return (`False`, `None`, `[]`), raising
+  an exception the old one's `except` clauses don't catch (a subclass of it
+  is fine), and refusing a call it used to accept (another thread, an
+  argument it took). Such a change waits for the next major release; until
+  then, keep the old behaviour where you can and warn (`DeprecationWarning`)
+  that it will change, saying what to do instead.
+- A release's notes list every such change, under *Changed*.

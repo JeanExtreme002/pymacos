@@ -1,5 +1,6 @@
 """Unit tests for platform guards: NotSupportedError outside macOS."""
 
+import inspect
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,11 @@ def test_other_platforms_raise_not_supported(monkeypatch):
 
     with pytest.raises(macos.NotSupportedError, match="only works on macOS"):
         macos.say("x")
+
+
+def _call_id(call):
+    """The call a lambda below makes, as the test's id: ``macos.say("x")``, not ``<lambda>1``."""
+    return inspect.getsource(call).strip().split("\n")[0].replace("lambda: ", "", 1).rstrip(",")
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="checks behaviour outside macOS")
@@ -390,6 +396,7 @@ def test_other_platforms_raise_not_supported(monkeypatch):
         lambda: macos.finder.remove_icon(__file__),
         lambda: macos.finder.has_custom_icon(__file__),
     ],
+    ids=_call_id,
 )
 def test_every_feature_raises_not_supported_outside_macos(call):
     with pytest.raises(macos.NotSupportedError):

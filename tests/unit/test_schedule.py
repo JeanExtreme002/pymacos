@@ -231,7 +231,8 @@ def test_schedule_add_restores_the_replaced_job_when_writing_the_new_plist_fails
     write_bytes = Path.write_bytes
 
     def disk_full(self, data):
-        if self == path and b"<integer>60</integer>" in data:  # the new job's plist, not the old one put back
+        # The new job's plist, not the old one put back: written beside it under the same name, then moved in.
+        if self.name == path.name and b"<integer>60</integer>" in data:
             write_bytes(self, data[:20])  # a partial write
             raise OSError(28, "No space left on device", str(self))
         return write_bytes(self, data)
@@ -444,3 +445,47 @@ def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     listings = [call["args"] for call in fake_run.calls if call["args"][:2] == ["launchctl", "print-disabled"]]
     assert len(listings) == 1
+
+
+def test_schedule_warns_when_other_users_could_change_the_script(fake_run, home):
+    import warnings
+
+    shared = home / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # writable by anyone, no sticky bit: the script could be swapped
+    script = shared / "job.py"
+    script.write_text("print('hi')")
+    with pytest.warns(RuntimeWarning, match="other users may replace what's in"):
+        macos.schedule.add("swapped", script, every=60)
+
+    shared.chmod(0o1777)  # the sticky bit, as on /tmp: only its owner may rename it
+    script.chmod(0o666)
+    with pytest.warns(RuntimeWarning, match="other users may change"):
+        macos.schedule.add("swapped", script, every=60)
+
+    script.chmod(0o644)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.schedule.add("swapped", script, every=60)  # only its owner may change it: no warning
+        macos.schedule.add("backup", home / "backup.py", every=60)
+
+
+def test_schedule_trusts_folders_only_the_admin_group_may_write_in(monkeypatch, tmp_path):
+    from macos import schedule
+
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    real_stat = os.stat
+
+    def stat_as(gid):
+        def fake(path, *args, **kwargs):
+            found = real_stat(path, *args, **kwargs)
+            if path == os.path.realpath(str(tmp_path)):  # Homebrew's folders: drwxrwxr-x you:admin
+                return os.stat_result((0o40775, *found[1:5], gid, *found[6:]))
+            return found
+        return fake
+
+    monkeypatch.setattr(schedule.os, "stat", stat_as(schedule._ADMIN_GROUP))
+    assert schedule._swappable(script) is None  # its members can use sudo anyway
+    monkeypatch.setattr(schedule.os, "stat", stat_as(schedule._ADMIN_GROUP + 1))
+    assert schedule._swappable(script) == "other users may replace what's in {}".format(os.path.realpath(str(tmp_path)))

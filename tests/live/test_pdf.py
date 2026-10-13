@@ -41,7 +41,7 @@ def test_pdf_read_merge_extract_and_render(tmp_path):
 
     page = macos.pdf.render(document, 1, size=2048)
     assert page.startswith(b"\x89PNG")
-    assert "Page one says hello" in macos.vision.text(page)
+    assert "says hello" in macos.vision.text(page)  # macOS 15's Vision may drop the short "one"
 
 
 def test_pdf_render_is_exact_and_follows_rotation(tmp_path):
@@ -473,3 +473,128 @@ def test_redact_reads_the_whole_annotation_dictionary(tmp_path):
     done = macos.pdf.redact(rich, "Ana Souza", tmp_path / "rich-out.pdf")
     assert done.matches == {"Ana Souza": 1} and done.pages == {}
     assert b"Ask Ana" not in _raw_text(done.path) and b"Souza" not in _raw_text(done.path)
+
+
+def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=None, xmp_more=""):
+    """A one-page PDF, written by hand, with an XMP packet naming its creator and a bookmark leading to a link."""
+    drawing = "BT /F1 18 Tf 72 700 Td ({}) Tj ET".format(page_text)
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R{}{} >>".format(
+            " /Metadata 6 0 R" if xmp_creator or xmp_date or xmp_more else "", " /Outlines 7 0 R" if bookmark_link else ""
+        ),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        "<< /Length {} >>\nstream\n{}\nendstream".format(len(drawing), drawing),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    xmp = (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c015 84.159810, 2016/09/10-02:41:30">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"'
+        ' xmlns:pdfx="http://ns.adobe.com/pdfx/1.3/" xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#">'
+        "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator><xmp:CreateDate>{}</xmp:CreateDate>{}"
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+    ).format(xmp_creator or "", xmp_date or "", xmp_more)
+    objects.append("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{}\nendstream".format(len(xmp), xmp))
+    objects.append("<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>")
+    objects.append("<< /Title (Profile) /Parent 7 0 R /A << /S /URI /URI ({}) >> >>".format(bookmark_link or ""))
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += "{} 0 obj\n{}\nendobj\n".format(number, body).encode("latin-1")
+    table = len(out)
+    out += "xref\n0 {}\n0000000000 65535 f \n".format(len(objects) + 1).encode()
+    out += b"".join("{:010d} 00000 n \n".format(offset).encode() for offset in offsets)
+    out += "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n".format(len(objects) + 1, table).encode()
+    return bytes(out)
+
+
+def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
+    source = tmp_path / "in.pdf"
+    source.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Ana Souza"))
+    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}  # the packet goes, but only the page counts
+    assert b"Souza" not in _raw_text(done.path)
+
+    # Named there alone (as PDF 2.0 would have it), a target is found, and the packet goes.
+    alone = tmp_path / "alone.pdf"
+    alone.write_bytes(_pdf_with_extras("Contract", xmp_creator="Ana Souza"))
+    done = macos.pdf.redact(alone, "Ana Souza", tmp_path / "alone-out.pdf")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {}
+    assert b"Souza" not in _raw_text(done.path)
+
+    # Found only in the packet's dates and identifiers, which macOS writes itself, a target isn't found.
+    import re
+
+    dated = tmp_path / "dated.pdf"
+    dated.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_date="2026-10-13T09:00:00Z"))
+    with pytest.raises(ValueError, match="isn't in the PDF"):
+        macos.pdf.redact(dated, re.compile(r"\d{4}-\d{2}-\d{2}"), tmp_path / "dated-out.pdf")
+    assert not (tmp_path / "dated-out.pdf").exists()
+    # Nor the toolkit's own date, or a step of the history, which tools write there too.
+    for pattern in (r"\d{4}/\d{2}/\d{2}", r"application/\w+"):
+        with pytest.raises(ValueError, match="isn't in the PDF"):
+            history = '<stEvt:parameters>from application/x-indesign to application/pdf</stEvt:parameters>'
+            tooled = tmp_path / "tooled.pdf"
+            tooled.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_more=history))
+            macos.pdf.redact(tooled, re.compile(pattern), tmp_path / "tooled-out.pdf")
+
+    # What the document says is found, whatever its property is named: a custom ID, the creating tool.
+    for said in ('<pdfx:PatientID>Ana Souza</pdfx:PatientID>', '<xmp:CreatorTool>Ana Souza</xmp:CreatorTool>'):
+        custom = tmp_path / "custom.pdf"
+        custom.write_bytes(_pdf_with_extras("Contract", xmp_more=said))
+        done = macos.pdf.redact(custom, "Ana Souza", tmp_path / "custom-out.pdf")
+        assert done.matches == {"Ana Souza": 1} and b"Souza" not in _raw_text(done.path)
+
+    # One that doesn't hold a target stays, as everything else that doesn't.
+    kept = tmp_path / "kept.pdf"
+    kept.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team"))
+    done = macos.pdf.redact(kept, "Ana Souza", tmp_path / "kept-out.pdf")
+    assert done.matches == {"Ana Souza": 1} and b"Legal team" in _raw_text(done.path)
+
+
+def test_redact_drops_a_bookmark_link_that_holds_a_target(tmp_path):
+    source = tmp_path / "in.pdf"
+    source.write_bytes(_pdf_with_extras("Contract of Ana Souza", bookmark_link="https://example.com/?q=Ana Souza"))
+    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    assert done.matches == {"Ana Souza": 2}  # the address, read as PDFKit gives it (Ana%20Souza), counts
+    assert [mark.title for mark in macos.pdf.bookmarks(done.path)] == ["Profile"]  # the bookmark stays, without its link
+    raw = _raw_text(done.path)
+    assert b"Souza" not in raw and b"example.com" not in raw
+
+
+def test_redact_removes_a_target_only_in_the_cropped_away_part(tmp_path):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "cropped.pdf"
+    source.write_bytes(pdf_with_text([("Visible line", 72, 700), ("Ana Souza hidden", 72, 100)], crop=(0, 400, 612, 792)))
+    assert macos.pdf.text(source) == "Visible line"  # the name isn't shown, but it's in the file
+    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert b"Souza" not in _raw_text(done.path)
+
+
+def test_redact_writes_nothing_when_a_target_would_get_through(tmp_path, monkeypatch):
+    from macos import pdf
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "in.pdf"
+    source.write_bytes(pdf_with_text([("Contract of Ana Souza", 72, 700)]))
+    output = tmp_path / "out.pdf"
+    output.write_bytes(b"what was there")
+    monkeypatch.setattr(pdf, "_flatten", lambda document, number, boxes: None)  # a redaction that missed
+    with pytest.raises(macos.MacOSError, match=r"would still hold 'Ana Souza' \(in page 1\), so nothing was written"):
+        macos.pdf.redact(source, "Ana Souza", output)
+    assert output.read_bytes() == b"what was there"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["in.pdf", "out.pdf"]  # nothing left beside it
+
+
+def test_redact_finds_a_name_typed_with_combining_accents(tmp_path):
+    from tests.helpers import pdf_with_text
+
+    blank = tmp_path / "blank.pdf"
+    blank.write_bytes(pdf_with_text([("Contract", 72, 700)]))
+    source = macos.pdf.watermark(blank, "Jos\xe9 Silva", tmp_path / "in.pdf")  # an é of its own
+    done = macos.pdf.redact(source, "José Silva", tmp_path / "out.pdf")  # e and a combining accent
+    assert done.matches == {"José Silva": 1} and done.pages == {1: 1}

@@ -167,7 +167,9 @@ macos.screen.record("part.mov", 5, region=(0, 0, 1280, 800))  # a region
 macos.screen.record("talk.mov", 60, audio=True, clicks=True)  # with the microphone and clicks
 ```
 
-`region` and `display` work as for screenshots. `audio=True` also records the
+The length is rounded to whole seconds, at least one: `screencapture` counts
+no finer, so `2.5` records 2 seconds. `region` and `display` work as for
+screenshots. `audio=True` also records the
 default microphone, and `clicks=True` shows mouse clicks. It needs the Screen
 Recording permission, like screenshots. To make it smaller or an `.mp4`, see
 {func}`macos.video.convert`.

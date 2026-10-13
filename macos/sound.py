@@ -156,7 +156,7 @@ def set_alert_sound(name: Optional[str]) -> None:
 
 def alert_volume() -> float:
     """The volume of alert sounds, from 0.0 to 1.0, as a share of the output volume."""
-    return round(float(defaults.read(defaults.GLOBAL, "com.apple.sound.beep.volume", default=1.0)), 3)
+    return round(defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.sound.beep.volume", default=1.0), 1.0), 3)
 
 
 def set_alert_volume(volume: float) -> None:

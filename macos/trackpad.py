@@ -68,7 +68,8 @@ def set_natural_scrolling(on: bool = True) -> None:
 
 def tracking_speed() -> float:
     """The pointer speed with the trackpad, from 0.0 (slowest) to 1.0 (fastest)."""
-    return round(float(defaults.read(defaults.GLOBAL, "com.apple.trackpad.scaling", default=1.0)) / _SPEED_MAX, 3)
+    scaling = defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.trackpad.scaling", default=1.0), 1.0)
+    return round(scaling / _SPEED_MAX, 3)
 
 
 def set_tracking_speed(speed: float) -> None:
@@ -110,7 +111,7 @@ def secondary_click() -> Optional[str]:
     """
     if defaults.read(_TRACKPADS[0], "TrackpadRightClick", default=True):
         return "two_fingers"
-    corner = int(defaults.read(_TRACKPADS[0], "TrackpadCornerSecondaryClick", default=0))
+    corner = defaults._as_int(defaults.read(_TRACKPADS[0], "TrackpadCornerSecondaryClick", default=0), 0)
     return {1: "bottom_left", 2: "bottom_right"}.get(corner)
 
 
@@ -162,7 +163,7 @@ _PRESSURES = ("light", "medium", "firm")
 
 def click_pressure() -> str:
     """How firmly the trackpad must be pressed to click: ``'light'``, ``'medium'`` or ``'firm'``."""
-    found = int(_read("FirstClickThreshold", 1))  # type: ignore[call-overload]
+    found = defaults._as_int(_read("FirstClickThreshold", 1), 1)
     return _PRESSURES[found] if 0 <= found < len(_PRESSURES) else "medium"
 
 

@@ -56,6 +56,32 @@ def test_text_spans_ignore_case_whatever_the_length():
     assert _spans("anything", "") == []
 
 
+def test_a_word_vision_cant_place_keeps_its_lines_box(monkeypatch):
+    from macos import _objc, vision
+
+    # One line, "pay 42": Vision places "pay", but not "42". The fakes stand in for the observations.
+    line = _objc.CGRect(_objc.CGPoint(0.1, 0.5), _objc.CGSize(0.8, 0.1))
+    box = _objc.CGRect(_objc.CGPoint(0.1, 0.5), _objc.CGSize(0.2, 0.1))
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "topCandidates:":
+            return ["candidate"]
+        if selector == "string":
+            return "pay 42"
+        if selector == "boundingBoxForRange:error:":
+            return "part" if args[0].location == 0 else None
+        if selector == "boundingBox":
+            return box if receiver == "part" else line
+        raise AssertionError(selector)
+
+    monkeypatch.setattr(vision._objc, "send", send)
+    monkeypatch.setattr(vision._objc, "nsarray", lambda value: value)
+    monkeypatch.setattr(vision._objc, "pystring", lambda value: value)
+    words = vision._words_of(["observation"])
+    assert [word for word, _ in words] == ["pay", "42"]  # not dropped: OCR would lose it from the PDF
+    assert [tuple(round(part, 2) for part in place) for _, place in words] == [(0.1, 0.4, 0.2, 0.1), (0.1, 0.4, 0.8, 0.1)]
+
+
 def test_pdfs_are_refused_before_vision_sees_a_blank_image(tmp_path):
     from macos.vision import _refuse_pdf
 

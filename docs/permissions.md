@@ -91,9 +91,14 @@ needs Accessibility. Without them, {func}`~macos.hotkeys.run` and
 {func}`~macos.hotkeys.wait` raise {class}`~macos.PermissionDeniedError`.
 
 ```python
-macos.hotkeys.has_permission()       # check without prompting
-macos.hotkeys.request_permission()   # show the system prompt
+macos.hotkeys.has_permission()       # both granted? (checks without prompting)
+macos.hotkeys.request_permission()   # show the system prompts for both
 ```
+
+{func}`macos.keyboard.watch` and {func}`macos.mouse.watch` only listen, so
+they need Input Monitoring alone: they work even when
+{func}`~macos.hotkeys.has_permission` is false for lack of Accessibility, and
+raise {class}`~macos.PermissionDeniedError` when Input Monitoring is missing.
 
 Restart the app running Python after allowing it.
 

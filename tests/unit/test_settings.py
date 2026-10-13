@@ -842,3 +842,40 @@ def test_control_center_restart_only_overlooks_it_not_running(monkeypatch):
     monkeypatch.setattr(_system, "run", killall(2, "killall: permission denied"))
     with pytest.raises(macos.CommandError, match="permission denied"):
         system._restart_control_center()
+
+
+def test_trackpad_numbers_tolerate_hand_edited_values(prefs):
+    store, _ = prefs
+    domain = trackpad._TRACKPADS[0]
+    store[(G, "com.apple.trackpad.scaling", False)] = "fast"
+    store[(domain, "TrackpadRightClick", False)] = False
+    store[(domain, "TrackpadCornerSecondaryClick", False)] = "corner"
+    store[(domain, "FirstClickThreshold", False)] = None
+    assert macos.trackpad.tracking_speed() == round(1.0 / trackpad._SPEED_MAX, 3)
+    assert macos.trackpad.secondary_click() is None and macos.trackpad.click_pressure() == "medium"
+
+
+def test_mouse_sound_and_fn_key_numbers_tolerate_hand_edited_values(prefs):
+    store, _ = prefs
+    for key in ("com.apple.mouse.scaling", "com.apple.scrollwheel.scaling", "com.apple.mouse.doubleClickThreshold",
+                "com.apple.sound.beep.volume"):  # fmt: skip
+        store[(G, key, False)] = "fast"
+    store[("com.apple.HIToolbox", "AppleFnUsageType", False)] = "emoji"
+    assert macos.mouse.tracking_speed() == round(1.0 / macos.mouse._SPEED_MAX, 3)
+    assert macos.mouse.scroll_speed() == macos.mouse._SCROLL_DEFAULT
+    assert macos.mouse.double_click_speed() == 0.5
+    assert macos.sound.alert_volume() == 1.0
+    assert macos.keyboard.fn_key_action() == "emoji"
+
+
+def test_input_settings_tool_is_given_a_timeout(monkeypatch):
+    calls = []
+
+    def hangs(args, **kwargs):
+        calls.append(kwargs)
+        raise macos.CommandTimeoutError(args, kwargs["timeout"])
+
+    monkeypatch.setattr(_system.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(_system, "run", hangs)
+    _system.apply_input_settings()  # saved anyway: they apply at the next login
+    assert calls and calls[0]["timeout"]

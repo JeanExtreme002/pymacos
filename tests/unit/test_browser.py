@@ -129,9 +129,11 @@ def test_browser_tab_reload_and_go(browsers):
 
     tab.reload()
     assert browsers.args[3:] == ["--", "7", "2"] and "reload tab" in browsers.args[2]
-    tab.go("https://example.com/?q=\"quoted\"")
-    assert browsers.args[3:] == ["--", "7", "2", "https://example.com/?q=\"quoted\""]  # the URL is an argument
-    assert "set URL of tab" in browsers.args[2]
+    tab.go("https://example.com/?q=\"quoted\"&token=s3cret")
+    # The URL comes on stdin, as run_js's script: an argument would show in the process list.
+    assert browsers.args[3:] == ["--", "7", "2"] and "s3cret" not in " ".join(browsers.args)
+    assert browsers.calls[-1]["input"] == "https://example.com/?q=\"quoted\"&token=s3cret"
+    assert "set URL of tab" in browsers.args[2] and "to pymacosScript" in browsers.args[2]
 
 
 def test_browser_run_js_without_the_automation_permission(browsers, monkeypatch):

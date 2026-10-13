@@ -81,6 +81,8 @@ def test_image_argument_checks(tmp_path):
         macos.image.qr_code("x", size=0)
     with pytest.raises(ValueError, match="multiple of 90"):
         macos.image.rotate(__file__, tmp_path / "out.png", 45)
+    with pytest.raises(ValueError, match=r"int multiple of 90, not 90\.0"):  # was a TypeError from deep inside
+        macos.image.rotate(__file__, tmp_path / "out.png", 90.0)
     with pytest.raises(ValueError, match="direction"):
         macos.image.flip(__file__, tmp_path / "out.png", direction="diagonal")
     with pytest.raises(ValueError, match="positive"):

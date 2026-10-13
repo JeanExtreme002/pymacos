@@ -211,3 +211,24 @@ def test_request_permission_needs_the_prompt_option(monkeypatch):
     monkeypatch.setattr(ctypes.c_void_p, "in_dll", lambda library, name: ctypes.c_void_p(None), raising=False)
     with pytest.raises(macos.MacOSError, match="prompt option"):
         windows.request_permission()
+
+
+def test_a_full_screen_change_that_never_happens_is_a_wait_timeout(monkeypatch):
+    import pytest
+
+    class Window(macos.windows.Window):
+        """A window that never changes, however often it's asked."""
+
+        def __init__(self):
+            self._element, self.app, self.pid = 0, "Test", 1
+
+        @property
+        def fullscreen(self):
+            return False
+
+        def _set_flag(self, attribute, on, what):
+            pass
+
+    monkeypatch.setattr(macos.windows, "_FULL_SCREEN_TIMEOUT", 0.05)
+    with pytest.raises(macos.WaitTimeoutError, match="within"):  # a MacOSError and a TimeoutError too
+        Window().set_fullscreen()

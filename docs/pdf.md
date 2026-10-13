@@ -215,7 +215,7 @@ Without `near`, `position` is a corner (`"bottom_right"`, `"bottom_left"`,
 or the `(x, y)` of the image's bottom-left
 corner, in points from the page's bottom-left (72 points make an inch,
 2.54 cm). `width` is in points too. A PNG with a transparent background
-looks best.
+looks best; a photo is turned upright, as its EXIF orientation says.
 
 It's an image, not a cryptographic signature. The pages are redrawn as
 they look, filled-in fields included, so they're no longer editable:
@@ -315,12 +315,32 @@ What else in the file holds a match goes too:
   picture);
 - the title, author, subject, keywords and creator, and bookmark titles, where the
   match becomes `█`. These count in the {class}`~macos.pdf.Redaction` too: a
-  target found only in the title is redacted, not reported missing.
+  target found only in the title is redacted, not reported missing;
+- a bookmark's link (a web address, another file) that holds a match: the
+  bookmark stays, without its link;
+- the XMP metadata packet some apps add beside the title and author: when it
+  holds a match, it's left out of the result. It counts in the
+  {class}`~macos.pdf.Redaction` only for a target found nowhere else (it
+  mostly repeats the title and author), and not by the dates, identifiers
+  and history of saves apps write there in their usual places (`xmp:` dates,
+  `xmpMM:`, the toolkit's name);
+- text a page's crop hides: when it holds a match, the page is redrawn too,
+  and the hidden part goes.
+
+A name typed with a combining accent (an `e` followed by U+0301, as some
+keyboards and macOS file names give it) finds the same name written with an
+accented letter, `é`.
 
 When a target isn't found at all, {func}`~macos.pdf.redact` raises
 {class}`ValueError` and writes nothing: a redaction that missed would look
 like it worked. A match found in the text but that can't be placed on the
 page raises {class}`~macos.MacOSError`, writing nothing too.
+
+Before the result takes the place of `output`, it's read back and searched
+for every target once more: the pages' text (cropped away or not) and
+annotations, the metadata, the bookmarks, and every string of the file's
+objects. One still in it raises {class}`~macos.MacOSError`, saying where it
+was seen, and nothing is written.
 
 ```{warning}
 It finds only what the PDF holds as text. **Look over the result before

@@ -135,7 +135,9 @@ window.set_fullscreen(False)
 
 macOS animates it into a Space of its own; {meth}`~macos.windows.Window.set_fullscreen`
 returns once that's done, after a second or two.
-Windows whose app doesn't allow full screen raise {class}`~macos.MacOSError`.
+Windows whose app doesn't allow full screen raise {class}`~macos.MacOSError`,
+and a change that doesn't happen within a few seconds
+{class}`~macos.WaitTimeoutError` (a `MacOSError` too).
 
 ## Capturing a window
 

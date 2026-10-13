@@ -132,3 +132,28 @@ def test_defaults_restored_snapshots_the_domains_own_values_only(monkeypatch):
         own["size"] = 64
     assert own == {"size": 48}
     assert ("managed", True) not in written  # the profile's value isn't copied into the user's file
+
+
+def test_defaults_restored_puts_back_a_value_that_only_changed_type(monkeypatch):
+    from macos import defaults
+
+    own = {"enabled": True, "sizes": [1.0, 2], "nested": {"on": False}}
+    written = []
+    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: own.get(key, default))
+    monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: sorted(own))
+
+    def write(domain, key, value, **kwargs):
+        written.append(key)
+        own[key] = value
+
+    monkeypatch.setattr(defaults, "write", write)
+    with macos.defaults.restored("com.example.app"):
+        own.update(enabled=1, sizes=[1, 2], nested={"on": 0})  # equal in Python, not to the apps that read them
+    assert own == {"enabled": True, "sizes": [1.0, 2], "nested": {"on": False}}
+    assert type(own["enabled"]) is bool and type(own["sizes"][0]) is float and type(own["nested"]["on"]) is bool
+    assert sorted(written) == ["enabled", "nested", "sizes"]
+    written.clear()
+    with macos.defaults.restored("com.example.app"):
+        pass
+    assert written == []  # nothing changed: nothing written

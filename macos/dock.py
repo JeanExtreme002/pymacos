@@ -26,8 +26,8 @@ from urllib.parse import quote, unquote, urlparse
 
 from . import _objc, apps as _apps, defaults
 from ._objc import BOOL
-from ._system import require_macos, restart_later, run as _run
-from .errors import AppNotFoundError, CommandError, MacOSError
+from ._system import killall, require_macos, restart_later
+from .errors import AppNotFoundError, WaitTimeoutError
 
 __all__ = [
     "DockApp",
@@ -118,7 +118,9 @@ def restart() -> None:
     """
     Restart the Dock, so it reads its settings again (the other functions do it for you).
 
-    Returns once the new Dock has started, so the next change reaches it.
+    Returns once the new Dock has started, so the next change reaches it;
+    raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) when none
+    has within 10 seconds.
     """
     if restart_later("Dock", restart):
         return
@@ -127,18 +129,14 @@ def restart() -> None:
     # Killed, not asked to quit: a quitting Dock saves the settings it had over the change.
     # launchd starts a new one right away. One that isn't running (killed a moment ago, not back
     # yet) is fine: it reads the settings when it starts.
-    try:
-        _run(["killall", "-KILL", "Dock"], timeout=10)  # killall only signals: never long
-    except CommandError as error:
-        if error.returncode != 1 or "No matching processes" not in error.stderr:
-            raise
+    killall("Dock", force=True)
     deadline = time.monotonic() + 10
     while True:
         pid = _pid()
         if pid is not None and pid != old:
             break
         if time.monotonic() > deadline:
-            raise MacOSError("the Dock didn't start again within 10 seconds")
+            raise WaitTimeoutError("the Dock didn't start again within 10 seconds")
         time.sleep(0.1)
     time.sleep(_SETTLE)
 
@@ -156,7 +154,7 @@ def set_autohide(on: bool = True) -> None:
 
 def size() -> int:
     """The size of the Dock's icons, in points (16 to 128)."""
-    return int(round(float(defaults.read(_DOMAIN, "tilesize", default=64))))
+    return int(round(defaults._as_float(defaults.read(_DOMAIN, "tilesize", default=64), 64.0)))
 
 
 def set_size(points: int) -> None:
@@ -252,7 +250,9 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
     # Kept as a tile of another kind (a folder tile at that path, say), on either side of the Dock:
     # those go, so the app isn't there twice. On the left, the app takes the first one's slot.
     strays = [position for position, (tile, where) in enumerate(zip(tiles, paths)) if where == path and not _is_app(tile)]
+    # Both lists lose the strays: they're read side by side below.
     tiles = [tile for position, tile in enumerate(tiles) if position not in strays]
+    paths = [where for position, where in enumerate(paths) if position not in strays]
     others = _others()
     kept_others = [tile for tile in others if _tile_path(tile) != path]
     if len(kept_others) != len(others):
@@ -340,7 +340,7 @@ def hot_corners() -> Dict[str, Optional[str]]:
     """
     names = {number: action for action, number in _ACTIONS.items()}
     return {
-        corner: names.get(int(defaults.read(_DOMAIN, "wvous-{}-corner".format(code), default=1)))
+        corner: names.get(defaults._as_int(defaults.read(_DOMAIN, "wvous-{}-corner".format(code), default=1), 1))
         for corner, code in _CORNERS.items()
     }
 
@@ -349,7 +349,7 @@ def hot_corner_modifiers() -> Dict[str, Optional[str]]:
     """The keys each hot corner waits for, such as ``{"top_left": "cmd", "top_right": None, ...}``."""
     found: Dict[str, Optional[str]] = {}
     for corner, code in _CORNERS.items():
-        flags = int(defaults.read(_DOMAIN, "wvous-{}-modifier".format(code), default=0))
+        flags = defaults._as_int(defaults.read(_DOMAIN, "wvous-{}-modifier".format(code), default=0), 0)
         names = [name for name in ("cmd", "shift", "option", "ctrl") if flags & _CORNER_MODIFIERS[name]]
         found[corner] = "+".join(names) or None
     return found
@@ -395,7 +395,7 @@ def set_hot_corner(corner: str, action: Optional[str], *, modifier: Optional[str
 
 def autohide_delay() -> float:
     """Seconds a hidden Dock waits before showing, when the pointer reaches the edge."""
-    return float(defaults.read(_DOMAIN, "autohide-delay", default=0.5))
+    return defaults._as_float(defaults.read(_DOMAIN, "autohide-delay", default=0.5), 0.5)
 
 
 def set_autohide_delay(seconds: float) -> None:
@@ -410,7 +410,7 @@ def magnification() -> Optional[int]:
     """The size icons grow to under the pointer, in points; ``None`` when they don't."""
     if not defaults.read(_DOMAIN, "magnification", default=False):
         return None
-    return int(round(float(defaults.read(_DOMAIN, "largesize", default=128))))
+    return int(round(defaults._as_float(defaults.read(_DOMAIN, "largesize", default=128), 128.0)))
 
 
 def set_magnification(size: Optional[int]) -> None:
@@ -475,7 +475,7 @@ def set_minimize_to_app(on: bool = True) -> None:
 def autohide_duration() -> Optional[float]:
     """Seconds a hidden Dock takes to slide in and out; ``None`` for macOS's own."""
     found = defaults.read(_DOMAIN, "autohide-time-modifier")
-    return None if found is None else float(found)
+    return None if found is None else defaults._as_float(found, None)  # a hand-edited value: macOS's own
 
 
 def set_autohide_duration(seconds: Optional[float]) -> None:

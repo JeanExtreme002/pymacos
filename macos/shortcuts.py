@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
 from ._system import require_macos, run as _system_run
-from .errors import CommandError, NotSupportedError, ShortcutNotFoundError
+from .errors import CommandError, CommandTimeoutError, NotSupportedError, ShortcutNotFoundError
 
 __all__ = ["list", "run", "ShortcutNotFoundError"]
 
@@ -35,9 +35,13 @@ def _run(args: List[str], timeout: Optional[float] = None) -> str:
         raise NotSupportedError("running shortcuts needs macOS 12 or later (the 'shortcuts' command)") from None
 
 
+_LIST_TIMEOUT = 60.0
+"""Seconds for listing the shortcuts: it answers at once, unless the Shortcuts service is stuck."""
+
+
 def _exists(name: str) -> bool:
     # Each line reads "Name (IDENTIFIER)"; `run` accepts either.
-    for line in _run(["shortcuts", "list", "--show-identifiers"]).splitlines():
+    for line in _run(["shortcuts", "list", "--show-identifiers"], _LIST_TIMEOUT).splitlines():
         title, _, identifier = line.rpartition(" (")
         if name in (line, title, identifier.rstrip(")")):
             return True
@@ -45,12 +49,16 @@ def _exists(name: str) -> bool:
 
 
 def list(*, folder: Optional[str] = None) -> List[str]:
-    """Return the names of the shortcuts in the Shortcuts app, or only those in ``folder``."""
+    """
+    Return the names of the shortcuts in the Shortcuts app, or only those in ``folder``.
+
+    Raises :class:`~macos.errors.CommandTimeoutError` when Shortcuts doesn't answer within a minute.
+    """
     args = ["shortcuts", "list"]
     if folder is not None:
         # Joined with "=", so a folder named "-x" or "--help" is its value, not an option.
         args.append("--folder-name={}".format(folder))
-    return [name for name in _run(args).splitlines() if name]
+    return [name for name in _run(args, _LIST_TIMEOUT).splitlines() if name]
 
 
 def run(
@@ -111,14 +119,15 @@ def run(
             # error is the one to see, not the listing's.
             try:
                 exists = _exists(name)
-            except CommandError:
+            except (CommandError, CommandTimeoutError):
                 exists = True
             if not exists:
                 raise ShortcutNotFoundError(error.cmd, error.returncode, error.stderr) from None
             raise
     finally:
         if text_file is not None:
-            os.unlink(text_file)
+            # A shortcut may have moved or deleted its input itself: that must not hide how the run went.
+            Path(text_file).unlink(missing_ok=True)
 
     if output is not None or not result:
         return None

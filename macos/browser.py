@@ -162,13 +162,6 @@ end run
 """,
 }
 
-_GO = """
-on run argv
-    tell application "{app}" to set URL of tab ((item 2 of argv) as integer) of window id ((item 1 of argv) as integer) ¬
-        to (item 3 of argv)
-end run
-"""
-
 # The JavaScript comes on stdin, not as an argument like the other scripts'
 # values: arguments show in `ps` to the user's other processes for as long as
 # the script runs, and page scripts may carry tokens. Nor is it pasted into
@@ -181,6 +174,15 @@ on run argv
     set pymacosScript to (current application's NSString's alloc()'s initWithData:(stdin's readDataToEndOfFile()) ¬
         encoding:(current application's NSUTF8StringEncoding)) as text
 """
+
+# The URL comes on stdin too, for the same reason: a link may carry a token (a session, a reset link).
+_GO = (
+    _READ_STDIN
+    + """    tell application "{app}" to set URL of tab ((item 2 of argv) as integer) of window id ((item 1 of argv) as integer) ¬
+        to pymacosScript
+end run
+"""
+)
 
 _RUN_JS = {
     _SAFARI: _READ_STDIN
@@ -222,8 +224,13 @@ class Tab:
         _script(self.app, _RELOAD[_kind(self.app)], str(self.window), str(self.index))
 
     def go(self, url: str) -> None:
-        """Load ``url`` in this tab, in place of its page."""
-        _script(self.app, _GO, str(self.window), str(self.index), url)
+        """
+        Load ``url`` in this tab, in place of its page.
+
+        The URL reaches ``osascript`` on its standard input, as :func:`run_js`'s
+        script, so a token in it doesn't show in the process list.
+        """
+        _script(self.app, _GO, str(self.window), str(self.index), input=url)
 
 
 def _kind(app: str) -> str:
@@ -233,11 +240,11 @@ def _kind(app: str) -> str:
     return _KINDS[app]
 
 
-def _script(app: str, source: str, *args: str) -> str:
+def _script(app: str, source: str, *args: str, input: Optional[str] = None) -> str:
     # The app name is pasted into the source, so it must be one of BROWSERS: a Tab can be
     # built by hand (from JSON, say), and its app could otherwise carry AppleScript.
     _kind(app)
-    return applescript(app, source.replace("{app}", app), *args)
+    return applescript(app, source.replace("{app}", app), *args, input=input)
 
 
 def _browser(app: Optional[str]) -> Optional[str]:

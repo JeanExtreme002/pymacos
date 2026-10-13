@@ -24,7 +24,7 @@ import ctypes
 import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Callable, Deque, Dict, List, Optional, Union, cast
 
 from . import _objc
@@ -46,7 +46,11 @@ _Clicked = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_voi
 _lock = threading.Lock()
 _running: List[threading.Event] = []  # the quit flag of each run() in progress: quit() sets them all
 _clicks: Deque[int] = deque()  # tags of the menu items clicked, run by run() after the click
-_calls: Deque[Callable[[], None]] = deque()  # changes made from other threads, done on the main one
+# Changes made from other threads, done on the main one, in order. A setter's newer value replaces
+# the one still waiting (by key): a worker setting a title every second while nothing runs (before
+# run(), after it) keeps one change waiting, not one per second for good.
+_calls: "OrderedDict[object, Callable[[], None]]" = OrderedDict()
+_calls_lock = threading.Lock()
 _actions: Dict[int, "MenuItem"] = {}
 _items: List["Item"] = []
 _timers: List["Timer"] = []
@@ -59,19 +63,24 @@ def _clicked(target: int, _cmd: int, sender: int) -> None:
     _clicks.append(int(_objc.send(sender, "tag", restype=NSInteger)))
 
 
-def _on_main(change: Callable[[], None]) -> None:
+def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
     """
     Do an AppKit change now on the main thread, or queue it for :func:`run` from any other.
 
     Done now, it has a pool of its own: outside :func:`run` nothing else
     drains what it autoreleases (a title's string), which would stay for the
-    rest of the process.
+    rest of the process. Queued, a change with a ``key`` replaces the one with
+    that key still waiting: only for setters, whose last value is all that counts.
     """
     if threading.current_thread() is threading.main_thread():
         with _objc.autorelease_pool():
             change()
     else:
-        _calls.append(change)
+        with _calls_lock:
+            if key is None:
+                key = object()  # its own: never replaced
+            _calls.pop(key, None)  # the newer value goes last, after what was asked before it
+            _calls[key] = change
 
 
 def _require_main_thread(what: str) -> None:
@@ -144,7 +153,7 @@ class MenuItem:
             if self._native is not None:  # checked when applied: a removal may be queued before
                 _objc.send(self._native, selector, value, argtypes=(argtype,), restype=None)
 
-        _on_main(apply)
+        _on_main(apply, (self, selector))
 
     @property
     def title(self) -> str:
@@ -160,7 +169,7 @@ class MenuItem:
             if self._native is not None:
                 _objc.send(self._native, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
 
-        _on_main(apply)
+        _on_main(apply, (self, "setTitle:"))
 
     @property
     def enabled(self) -> bool:
@@ -261,7 +270,7 @@ class Item:
             if not self._removed:
                 _objc.send(self._button, "setTitle:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
 
-        _on_main(apply)
+        _on_main(apply, (self, "setTitle:"))
 
     @property
     def tooltip(self) -> Optional[str]:
@@ -279,7 +288,7 @@ class Item:
             native = _objc.nsstring(text) if text is not None else None
             _objc.send(self._button, "setToolTip:", native, argtypes=(_objc.id,), restype=None)
 
-        _on_main(show)
+        _on_main(show, (self, "setToolTip:"))
 
     def set_icon(self, icon: Optional[Image], *, template: bool = True) -> None:
         """Show ``icon`` (a file path or the bytes of an image), or remove it with ``None``."""
@@ -507,8 +516,12 @@ def _pump(app: int, wait: float) -> None:
     # Their own pool: a timer that updates a title every second would
     # otherwise leave its strings behind for as long as the script runs.
     with _objc.autorelease_pool():
-        while _calls:
-            _calls.popleft()()
+        while True:
+            with _calls_lock:
+                if not _calls:
+                    break
+                _, change = _calls.popitem(last=False)
+            change()
         while _clicks:
             with _lock:
                 entry = _actions.get(_clicks.popleft())

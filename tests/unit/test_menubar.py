@@ -68,3 +68,38 @@ def test_a_quit_while_nothing_runs_does_not_stop_the_next_run(monkeypatch):
     monkeypatch.setattr(menubar, "_pump", quit_from_an_action)
     menubar.run(timeout=5)
     assert len(pumped) == 1 and menubar._running == []
+
+
+def test_changes_queued_off_the_main_thread_keep_only_a_setter_s_last_value(monkeypatch):
+    import threading
+
+    done = []
+    monkeypatch.setattr(menubar, "_calls", menubar.OrderedDict())
+
+    def from_a_worker():
+        owner = object()
+        for second in range(1000):  # a title updated every second while nothing runs
+            menubar._on_main(lambda second=second: done.append(("title", second)), (owner, "setTitle:"))
+        menubar._on_main(lambda: done.append("icon"))  # not a setter's value: never replaced
+        menubar._on_main(lambda: done.append("icon again"))
+
+    worker = threading.Thread(target=from_a_worker)
+    worker.start()
+    worker.join()
+    assert len(menubar._calls) == 3
+
+    monkeypatch.setattr(menubar._objc, "send", lambda *args, **kwargs: None)
+    monkeypatch.setattr(menubar._objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(menubar._objc, "cls", lambda name: 1)  # no AppKit: these tests run on Linux too
+    monkeypatch.setattr(menubar, "_due_timers", lambda now: [])
+
+    class _Pool:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(menubar._objc, "autorelease_pool", _Pool)
+    menubar._pump(1, 0)
+    assert done == [("title", 999), "icon", "icon again"] and not menubar._calls

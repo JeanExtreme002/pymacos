@@ -21,7 +21,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, urlencode
 
-from . import _objc
+from . import _files, _objc
 from ._system import framework, require_macos, run as _run
 from .errors import MacOSError, WaitTimeoutError
 
@@ -132,8 +132,9 @@ def _frameworks() -> None:
 
 
 def _ask(selector: str, argument: int, timeout: float) -> List[Place]:
-    if threading.current_thread() is not threading.main_thread():
-        raise MacOSError("geocoding answers on the main thread: call it from there")
+    # The answers come on the main queue. The process's main thread, as macOS sees it (pthread_main_np),
+    # as camera and the other main-thread APIs check: not Python's idea of it, which can differ.
+    _files.require_main_thread("Geocoding")
     with _lock:
         del _answers[:]
         geocoder = _objc.send(_objc.send(_objc.cls("CLGeocoder"), "alloc"), "init")

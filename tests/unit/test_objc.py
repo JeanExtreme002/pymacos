@@ -60,3 +60,31 @@ def test_one_cicontext_is_made_even_for_first_renders_at_once(monkeypatch):
     for thread in threads:
         thread.join()
     assert made == [1] and got == [1, 1, 1, 1]  # one context, none made only to leak
+
+
+@pytest.mark.parametrize(
+    "machine, restype, stret",
+    [
+        ("x86_64", "CGRect", True),  # 32 bytes: returned through a hidden pointer on Intel
+        ("x86_64", "CGPoint", False),  # 16 bytes: in registers
+        ("x86_64", "c_double", False),
+        ("arm64", "CGRect", False),  # arm64 has no _stret variant
+    ],
+)
+def test_struct_returns_pick_the_stret_trampoline_only_on_intel(monkeypatch, machine, restype, stret):
+    import ctypes
+
+    from macos import _objc
+
+    resolved = getattr(_objc, restype, None) or getattr(ctypes, restype)
+    monkeypatch.setattr(_objc.platform, "machine", lambda: machine)
+    assert _objc._needs_stret(resolved) is stret
+
+    # The prototype is cached by return type: call the function under the cache, with a stand-in runtime.
+    class Runtime:
+        objc_msgSend = ctypes.c_void_p(0x1000)
+        objc_msgSend_stret = ctypes.c_void_p(0x2000)
+
+    monkeypatch.setattr(_objc, "_libobjc", lambda: Runtime)
+    prototype = _objc._prototype.__wrapped__(resolved, ())
+    assert ctypes.cast(prototype, ctypes.c_void_p).value == (0x2000 if stret else 0x1000)

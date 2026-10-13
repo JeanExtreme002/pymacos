@@ -48,18 +48,25 @@ _DENIED = (
 
 
 def has_permission() -> bool:
-    """Whether this process may listen to the keyboard (Input Monitoring), without prompting the user."""
-    return bool(_events.graphics().CGPreflightListenEventAccess())
+    """
+    Whether :func:`run` and :func:`wait` may listen, without prompting the user.
+
+    They need both Input Monitoring, to listen to the keyboard, and
+    Accessibility, to keep the shortcuts from the app in front: ``True`` only
+    when both are granted.
+    """
+    return bool(_events.graphics().CGPreflightListenEventAccess()) and _events.has_permission()
 
 
 def request_permission() -> bool:
     """
-    Ask for the Input Monitoring permission, showing the system prompt; return whether it's granted.
+    Ask for the Input Monitoring and Accessibility permissions, showing the system prompts; return whether both are granted.
 
     After the user allows the app running Python in System Settings ›
-    Privacy & Security › Input Monitoring, that app must be restarted.
+    Privacy & Security › Input Monitoring and › Accessibility, that app must be restarted.
     """
-    return bool(_events.graphics().CGRequestListenEventAccess())
+    listening = bool(_events.graphics().CGRequestListenEventAccess())
+    return _events.request_permission() and listening
 
 
 class Hotkey:
@@ -81,6 +88,10 @@ class Hotkey:
 
 _lock = threading.Lock()
 _registered: Dict[Tuple[int, int], Hotkey] = {}
+# The combinations a wait() in progress listens for without a registered shortcut: how many waits
+# each. Apart from _registered, so a wait() ending neither drops a shortcut register()ed meanwhile
+# nor the combination another wait() for the same keys still listens for.
+_waited: Dict[Tuple[int, int], int] = {}
 
 
 class _Listener(_events.Listener):
@@ -155,11 +166,12 @@ def _match(code: int, flags: int) -> Optional[Tuple[int, int]]:
     """The registered combination a key pressed with ``flags`` makes, if any."""
     flags &= _MODIFIERS
     with _lock:
-        if (code, flags) in _registered:
+        if (code, flags) in _registered or (code, flags) in _waited:
             return (code, flags)
         # macOS adds Fn to these keys by itself: "f5" is meant, unless "fn+f5" was registered.
-        if code in _FN_FLAGGED and flags & _FN and (code, flags & ~_FN) in _registered:
-            return (code, flags & ~_FN)
+        unflagged = (code, flags & ~_FN)
+        if code in _FN_FLAGGED and flags & _FN and (unflagged in _registered or unflagged in _waited):
+            return unflagged
     return None
 
 
@@ -189,6 +201,10 @@ def _handler(listener: _Listener) -> Callable[[int, int], Optional[int]]:
 
     def handle(kind: int, event: int) -> Optional[int]:
         if kind not in (_KEY_DOWN, _KEY_UP):
+            return event
+        if _events.is_ours(event):
+            # Pressed by a hotkey callback: it goes to the app in front as is. Caught, a callback
+            # pressing its own shortcut (to pass it on) would only call itself again, for good.
             return event
         code = int(cg.CGEventGetIntegerValueField(event, _KEY_CODE))
         if kind == _KEY_UP:
@@ -278,7 +294,8 @@ def _call(combination: Tuple[int, int]) -> None:
     with _lock:
         hotkey = _registered.get(combination)
     if hotkey is not None:
-        hotkey.callback()
+        with _events.marked():  # the keys it presses aren't shortcuts to catch: see _handler
+            hotkey.callback()
 
 
 def run(*, timeout: Optional[float] = None) -> None:
@@ -309,9 +326,7 @@ def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
     """
     combination = _combination(keys)
     with _lock:
-        temporary = combination not in _registered
-        if temporary:
-            _registered[combination] = Hotkey(keys, combination[0], combination[1], lambda: None)
+        _waited[combination] = _waited.get(combination, 0) + 1
     pressed: List[bool] = []
 
     def check(hit: Tuple[int, int]) -> bool:
@@ -324,7 +339,8 @@ def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
     try:
         _listen(check, combination, timeout)
     finally:
-        if temporary:
-            with _lock:
-                _registered.pop(combination, None)
+        with _lock:
+            _waited[combination] -= 1
+            if not _waited[combination]:
+                del _waited[combination]
     return bool(pressed)

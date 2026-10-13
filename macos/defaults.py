@@ -22,8 +22,9 @@ most apps only read them when they start, so restart them to see a change.
 
 import ctypes
 import functools
+import math
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, List, Optional, Tuple, TypeVar, Union
 
 from . import _cf
 from .errors import PermissionDeniedError
@@ -35,6 +36,23 @@ GLOBAL = "NSGlobalDomain"
 
 _GLOBAL_NAMES = {GLOBAL, "-g", "-globalDomain", ".GlobalPreferences"}
 _MISSING = object()
+
+_T = TypeVar("_T")
+
+
+def _as_int(value: object, fallback: _T) -> Union[int, _T]:
+    """``value`` as an int, or ``fallback`` when a hand-edited preference holds something else (text, a list...)."""
+    number = _as_float(value, None)
+    return fallback if number is None else int(number)
+
+
+def _as_float(value: object, fallback: _T) -> Union[float, _T]:
+    """``value`` as a finite float, or ``fallback`` when a hand-edited preference holds something else."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    return number if math.isfinite(number) else fallback
 
 
 def _preferences() -> ctypes.CDLL:
@@ -170,6 +188,22 @@ def delete(domain: str, key: str, *, current_host: bool = False) -> bool:
     return existed
 
 
+def _identical(first: Any, second: Any) -> bool:
+    """
+    Whether two preference values are the same, types included.
+
+    ``True == 1`` in Python, but a preference that went from a boolean to a
+    number isn't as it was: apps read the type too.
+    """
+    if type(first) is not type(second):
+        return False
+    if isinstance(first, dict):
+        return first.keys() == second.keys() and all(_identical(first[key], second[key]) for key in first)
+    if isinstance(first, list):
+        return len(first) == len(second) and all(_identical(one, other) for one, other in zip(first, second))
+    return bool(first == second)
+
+
 @contextmanager
 def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> Iterator[None]:
     """
@@ -223,7 +257,7 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
                         attempt(functools.partial(delete, domain, name, current_host=current_host))
                 for name, old in value.items():
                     # The domain's own value: one equal to the global fallback still has to be written back.
-                    if _own(domain, name, missing, current_host) != old:
+                    if not _identical(_own(domain, name, missing, current_host), old):
                         attempt(functools.partial(write, domain, name, old, current_host=current_host))
             elif value is missing:
                 attempt(functools.partial(delete, domain, name_or_all, current_host=current_host))

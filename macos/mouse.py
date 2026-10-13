@@ -148,7 +148,16 @@ def click(x: Optional[float] = None, y: Optional[float] = None, *, button: str =
     else:
         x, y = position()
     for clicks in range(1, count + 1):
-        _events.post(_mouse_event(down, x, y, number, clicks))
+        try:
+            _events.post(_mouse_event(down, x, y, number, clicks))
+        except BaseException:
+            # Interrupted in the pause after the press (Ctrl-C): let go all the same, or the button
+            # stays pressed for the whole system. An extra release, if the press never went out, is harmless.
+            try:
+                _events.post(_mouse_event(up, x, y, number, clicks))
+            except BaseException:
+                pass  # the interruption is what the caller needs to see
+            raise
         _events.post(_mouse_event(up, x, y, number, clicks))
 
 
@@ -201,8 +210,9 @@ def drag(x: float, y: float, *, button: str = "left", duration: float = 0.3) -> 
         raise ValueError("duration must not be negative, not {}".format(duration))
     _events.require_permission()
     start_x, start_y = position()
-    _events.post(_mouse_event(down, start_x, start_y, number, 1))
     try:
+        # Inside the try: a Ctrl-C in the pause right after the press must let go too.
+        _events.post(_mouse_event(down, start_x, start_y, number, 1))
         _glide(dragged, x, y, number, duration)
     finally:
         # Always let go, or the button stays pressed for the whole system.
@@ -285,7 +295,7 @@ def tracking_speed() -> float:
     """The pointer speed with a mouse, from 0.0 (slowest) to 1.0 (fastest). For the trackpad, see :mod:`macos.trackpad`."""
     from . import defaults
 
-    return round(float(defaults.read(defaults.GLOBAL, "com.apple.mouse.scaling", default=1.0)) / _SPEED_MAX, 3)
+    return round(defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.mouse.scaling", default=1.0), 1.0) / _SPEED_MAX, 3)
 
 
 def set_tracking_speed(speed: float) -> None:
@@ -310,7 +320,8 @@ def scroll_speed() -> float:
     """How fast a mouse's wheel scrolls, as macOS keeps it: 0.3125 by default, higher is faster."""
     from . import defaults
 
-    return float(defaults.read(defaults.GLOBAL, "com.apple.scrollwheel.scaling", default=_SCROLL_DEFAULT))
+    stored = defaults.read(defaults.GLOBAL, "com.apple.scrollwheel.scaling", default=_SCROLL_DEFAULT)
+    return defaults._as_float(stored, _SCROLL_DEFAULT)
 
 
 def set_scroll_speed(speed: float) -> None:
@@ -332,7 +343,7 @@ def double_click_speed() -> float:
     """The most seconds between two clicks that still make a double click (0.5 by default)."""
     from . import defaults
 
-    return float(defaults.read(defaults.GLOBAL, "com.apple.mouse.doubleClickThreshold", default=0.5))
+    return defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.mouse.doubleClickThreshold", default=0.5), 0.5)
 
 
 def set_double_click_speed(seconds: float) -> None:
