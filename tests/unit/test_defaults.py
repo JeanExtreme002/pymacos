@@ -114,6 +114,13 @@ def test_defaults_restored_never_hides_the_blocks_own_error(unwritable):
         assert len(raised.value.__notes__) == 2 and "isn't writable" in raised.value.__notes__[0]
 
 
+def test_defaults_restored_dropped_unfinished_still_raises_what_it_couldnt_restore(unwritable):
+    manager = macos.defaults.restored(("com.example.app", "a"))
+    manager.__enter__()
+    with pytest.raises(macos.PermissionDeniedError):
+        manager.gen.close()  # what dropping it does: GeneratorExit, which is no error of the block's
+
+
 def test_defaults_restored_goes_on_after_any_error(monkeypatch):
     from macos import defaults
 

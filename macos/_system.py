@@ -177,9 +177,10 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
         raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
 
 
-# Seconds an ``osascript`` that controls an app may take. An Apple event gives up by itself after two
-# minutes (errAETimeout), so this only stops the waits that never end: an Automation prompt nobody
-# answers, in a session where nobody sees it.
+# Seconds an ``osascript`` that controls an app may take, for the whole script. Each Apple event
+# gives up by itself after two minutes (errAETimeout), so a slow app still gets that error first;
+# what this stops is a wait that never ends, such as an Automation prompt nobody answers, and a
+# script that goes on past one event's timeout (the browser's tabs, read window by window).
 APPLESCRIPT_TIMEOUT = 300.0
 
 

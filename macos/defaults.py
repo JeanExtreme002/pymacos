@@ -245,6 +245,8 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     failed: Optional[BaseException] = None
     try:
         yield
+    except GeneratorExit:
+        raise  # the context manager closed without its block ending (dropped): not an error to keep
     except BaseException as error:
         failed = error
         raise
