@@ -34,3 +34,19 @@ def test_api_page_lists_every_public_name():
         if "macos." + shortcut not in documented:
             missing.append("macos." + shortcut)
     assert not missing, "not in docs/api.md: {}".format(", ".join(missing))
+
+
+PERMISSIONS = API.with_name("permissions.md")
+
+
+@pytest.mark.skipif(not PERMISSIONS.exists(), reason="the docs aren't in this checkout (an installed package)")
+def test_permissions_page_lists_every_module_that_checks_one():
+    """A module with a ``has_permission()`` needs one: the permissions page must say which, and where to allow it."""
+    page = PERMISSIONS.read_text(encoding="utf-8")
+    missing = [
+        name
+        for name in sorted(macos._SUBMODULES)
+        if "has_permission" in importlib.import_module("macos." + name).__all__
+        and not re.search(r"macos\.{}\b".format(name), page)
+    ]
+    assert not missing, "not in docs/permissions.md: {}".format(", ".join(missing))

@@ -239,14 +239,16 @@ def restart_process(name: str) -> None:
     killall(name)
 
 
-def killall(process: str) -> None:
+def killall(process: str, *, force: bool = False) -> None:
     """
     Quit every process named ``process``, for macOS to start it again with the settings just written.
 
-    One that isn't running is fine: it reads them when it starts.
+    One that isn't running is fine: it reads them when it starts. ``force``
+    kills it (SIGKILL) rather than asking it to quit, so it can't save what it
+    had over the change.
     """
     try:
-        run(["killall", process], timeout=10)  # killall only signals: never long
+        run(["killall", *(["-KILL"] if force else []), process], timeout=10)  # killall only signals: never long
     except CommandError as error:
         # 1 also means a process it found couldn't be signalled ("Operation not permitted"): only "no
         # matching processes" (in English: killall isn't localized) is a process that isn't running.
@@ -291,8 +293,8 @@ def apply_input_settings() -> None:
         return
     if os.path.exists(_ACTIVATE_SETTINGS):
         try:
-            run([_ACTIVATE_SETTINGS, "-u"])
-        except CommandError:
+            run([_ACTIVATE_SETTINGS, "-u"], timeout=30)  # it answers at once: one that hangs mustn't hang the script
+        except (CommandError, CommandTimeoutError):
             pass  # the settings are saved anyway; they apply at the next login
 
 

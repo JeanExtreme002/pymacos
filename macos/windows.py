@@ -33,7 +33,7 @@ from typing import Any, Optional, Sequence, Tuple, Union
 from . import _cf, _objc, apps, defaults
 from ._objc import CGPoint, CGSize
 from ._system import framework, restart_process
-from .errors import MacOSError, NotSupportedError, PermissionDeniedError
+from .errors import MacOSError, NotSupportedError, PermissionDeniedError, WaitTimeoutError
 
 __all__ = [
     "Window",
@@ -251,7 +251,9 @@ class Window:
 
         macOS animates the change into a Space of its own; this returns once
         it's done, after a second or two. Windows that can't go full screen
-        raise :class:`~macos.errors.MacOSError`.
+        raise :class:`~macos.errors.MacOSError`, and a change that doesn't
+        happen within a few seconds :class:`~macos.errors.WaitTimeoutError`
+        (a ``MacOSError`` too).
         """
         what = "{} full screen".format("enter" if on else "leave")
 
@@ -269,7 +271,7 @@ class Window:
         while self.fullscreen != bool(on):
             now = time.monotonic()
             if now > deadline:
-                raise MacOSError("could not {} within {} seconds".format(what, _FULL_SCREEN_TIMEOUT))
+                raise WaitTimeoutError("could not {} within {} seconds".format(what, _FULL_SCREEN_TIMEOUT))
             # macOS drops a request made while an earlier animation still runs: ask again.
             if now - asked > _FULL_SCREEN_RETRY:
                 request()

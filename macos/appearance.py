@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from . import _cf, _objc, defaults
 from ._system import applescript, framework
-from .errors import WaitTimeoutError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = [
     "is_dark",
@@ -93,6 +93,8 @@ def accent_color() -> str:
         color = _objc.send(_objc.cls("NSColor"), "controlAccentColor")
         srgb = _objc.send(_objc.cls("NSColorSpace"), "sRGBColorSpace")
         color = _objc.send(color, "colorUsingColorSpace:", srgb, argtypes=(_objc.id,))
+        if not color:  # every component of nil reads 0: black, which no accent color is
+            raise MacOSError("macOS didn't give the accent color in sRGB")
         channels = [
             _objc.send(color, name, restype=ctypes.c_double) for name in ("redComponent", "greenComponent", "blueComponent")
         ]

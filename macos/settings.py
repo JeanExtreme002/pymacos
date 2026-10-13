@@ -484,7 +484,8 @@ def export() -> Dict[str, Dict[str, Any]]:
 
     Settings this Mac doesn't have (a keyboard backlight, Night Shift...) are
     left out, and so is one that couldn't be read (a permission macOS refused,
-    a command that failed), with a :class:`RuntimeWarning` saying which: the
+    a command that failed, a preference edited by hand into something it
+    can't make sense of), with a :class:`RuntimeWarning` saying which: the
     rest is still exported.
     """
     require_macos()
@@ -495,7 +496,7 @@ def export() -> Dict[str, Dict[str, Any]]:
                 found.setdefault(section, {})[name] = setting.read()
             except NotSupportedError:
                 continue  # this Mac lacks it
-            except MacOSError as problem:
+            except (MacOSError, ValueError, TypeError) as problem:  # also a hand-edited preference it can't read
                 warnings.warn(
                     "{}.{} couldn't be read, and was left out: {}".format(section, name, problem), RuntimeWarning, stacklevel=2
                 )
@@ -506,9 +507,42 @@ def _normalized(value: Any) -> Any:
     """Compare values as JSON gives them back: tuples as lists."""
     if isinstance(value, (list, tuple)):
         return [_normalized(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _normalized(item) for key, item in value.items()}
     return value
+
+
+# The settings whose value is a dict of which any part works: the setter changes the entries
+# given, and leaves the others as they are. (Not remappings: those are replaced as a whole.)
+_PARTIAL = {
+    ("keyboard", "system_shortcuts"),
+    ("trackpad", "gestures"),
+    ("dock", "hot_corners"),
+    ("finder", "drives_on_desktop"),
+    ("finder", "desktop_view"),
+    ("system", "clock_format"),
+    ("system", "menu_bar_items"),
+}
+
+
+def _already(section: str, name: str, current: Any, wanted: Any) -> bool:
+    """
+    Whether the setting is as ``wanted`` already, both normalized.
+
+    For a dict of which any part works, only the entries given count: the
+    others aren't changed, so they can't make it differ. An entry that is a
+    dict itself (a hot corner's action and modifier) is compared whole, a
+    part left out meaning ``None``, as its setter takes it.
+    """
+    if (section, name) not in _PARTIAL or not isinstance(current, dict) or not isinstance(wanted, dict):
+        return bool(current == wanted)
+    for key, value in wanted.items():
+        found = current.get(key)
+        if isinstance(value, dict) and isinstance(found, dict):
+            value = {part: value.get(part) for part in set(found) | set(value)}
+        if found != value:
+            return False
+    return True
 
 
 def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
@@ -568,7 +602,7 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
                         current = _normalized(setting.read())
                     except NotSupportedError:
                         continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
-                    if current == _normalized(value):
+                    if _already(section, name, current, _normalized(value)):
                         continue
                     # Noted before the change: one that fails half-way (two preferences, the
                     # second refused) is put back too.

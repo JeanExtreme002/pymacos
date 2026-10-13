@@ -35,7 +35,7 @@ from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
 from ._objc import BOOL, NSInteger, NSUInteger
 from ._system import applescript, framework, require_macos, run as _run
-from .errors import AppNotFoundError, CommandError, MacOSError
+from .errors import AppNotFoundError, CommandError, MacOSError, WaitTimeoutError
 
 __all__ = [
     "App",
@@ -451,7 +451,9 @@ def set_default_for(kind: str, app: str, *, timeout: float = 60.0) -> None:
 
     Since macOS 26, macOS asks the user to confirm the change: this waits up
     to ``timeout`` seconds for the answer, and raises
-    :class:`~macos.errors.MacOSError` if it's declined or doesn't come. The
+    :class:`~macos.errors.MacOSError` if it's declined, or
+    :class:`~macos.errors.WaitTimeoutError` (a ``MacOSError`` and a
+    ``TimeoutError``) if it doesn't come. The
     default browser can't be set this way: macOS asks for that one in System
     Settings.
     """
@@ -521,7 +523,7 @@ def _set_default_with_workspace(workspace: int, path: str, type_name: str, app: 
         raise ValueError("{!r} isn't a kind of file macOS knows".format(kind))
     # One deadline for both waits: for another call's confirmation to end, then for this one's.
     deadline = time.monotonic() + timeout
-    late = MacOSError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
+    late = WaitTimeoutError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
     if not _default_call.acquire(timeout=max(0.0, timeout)):
         raise late
     try:
@@ -889,12 +891,17 @@ _SUFFIXES = (".plist", ".savedState", ".binarycookies")
 
 
 def _owned_by(entry: str, bundle_id: str) -> bool:
-    """Whether a file named ``entry`` belongs to the app ``bundle_id``: its own, or a helper's (``<id>.helper``)."""
+    """
+    Whether a file named ``entry`` belongs to the app ``bundle_id``: its own, or a helper's (``<id>.helper``).
+
+    Helpers only count under an ID of three parts or more: an app calling itself ``com.google``
+    would otherwise claim every Google app's files.
+    """
     for suffix in _SUFFIXES:
         if entry.endswith(suffix):
             entry = entry[: -len(suffix)]
             break
-    return entry == bundle_id or entry.startswith(bundle_id + ".")
+    return entry == bundle_id or (bundle_id.count(".") >= 2 and entry.startswith(bundle_id + "."))
 
 
 def _leftovers(library: Path, bundle_id: Optional[str], names: Sequence[str], others: Sequence[str] = ()) -> List[Path]:
@@ -921,7 +928,8 @@ def _leftovers(library: Path, bundle_id: Optional[str], names: Sequence[str], ot
             ]
         # Group Containers are named after a team or group ("group.<id>", "<team>.<id>").
         groups = entries("Group Containers")
-        found += [library / "Group Containers" / entry for entry in groups if entry.endswith("." + bundle_id)]
+        if bundle_id.count(".") >= 2:  # "<team>.com.google" is shared by a maker's apps, not one app's
+            found += [library / "Group Containers" / entry for entry in groups if entry.endswith("." + bundle_id)]
     for folder in _BY_NAME:
         found += [library / folder / entry for entry in entries(folder) if entry in names]
     return list(dict.fromkeys(path for path in found if path.name))

@@ -49,8 +49,8 @@ macos.bluetooth.disconnect("AirPods")  # still paired
 
 Both wait until the device is connected (or disconnected) and return it, so
 the next line can count on it. The device must be on and in range; after
-`timeout` seconds (10 by default) they raise {class}`~macos.MacOSError`, as
-they do when Bluetooth is off. Pairing a new device
+`timeout` seconds (10 by default) they raise {class}`~macos.WaitTimeoutError`
+(a `TimeoutError`), and {class}`~macos.MacOSError` when Bluetooth is off. Pairing a new device
 isn't possible here; do it once in System Settings › Bluetooth.
 
 ## Power
@@ -61,7 +61,8 @@ macos.bluetooth.set_power(True)
 ```
 
 It waits until Bluetooth is really on or off, and raises
-{class}`~macos.MacOSError` after `timeout` seconds (10 by default). Careful on
+{class}`~macos.WaitTimeoutError` (a `TimeoutError`) after `timeout` seconds
+(10 by default). Careful on
 a desktop Mac: turning it off disconnects a wireless keyboard and mouse. On a
 Mac without Bluetooth, {func}`~macos.bluetooth.power` and
 {func}`~macos.bluetooth.set_power` raise {class}`~macos.NotSupportedError`.

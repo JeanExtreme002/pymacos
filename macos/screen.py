@@ -843,8 +843,9 @@ def record(
     """
     Record the screen for ``seconds`` into a ``.mov`` video, and return its path.
 
-    This returns when the recording ends. ``region`` and ``display`` work as
-    in :func:`macos.screenshot`. ``audio=True`` also records the default
+    This returns when the recording ends. ``seconds`` is rounded to whole
+    seconds, at least one: ``screencapture`` counts no finer. ``region`` and
+    ``display`` work as in :func:`macos.screenshot`. ``audio=True`` also records the default
     microphone (macOS asks for the Microphone permission the first time), and
     ``clicks=True`` shows the mouse clicks. Needs the Screen Recording
     permission, like screenshots::

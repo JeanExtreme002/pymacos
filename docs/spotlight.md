@@ -23,6 +23,11 @@ It returns a list of {class}`pathlib.Path`. Narrow it down with `folder`
 macos.spotlight.search("kind:pdf", folder="~/Documents", limit=10)
 ```
 
+Spotlight answers at once, unless it's stuck or the folder is on a slow
+network volume: `timeout` stops a search still going after that many
+seconds, and raises {class}`~macos.CommandTimeoutError` (a `TimeoutError`).
+By default it waits. {func}`~macos.spotlight.search_name` takes it too.
+
 ## Searching by file name
 
 {func}`~macos.spotlight.search_name` matches the file name, extension included,

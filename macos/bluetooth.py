@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Set, Tuple, Union
 
 from . import _objc
 from ._system import PROFILER_TIMEOUT, framework, run as _run
-from .errors import MacOSError, NotSupportedError
+from .errors import MacOSError, NotSupportedError, WaitTimeoutError
 
 __all__ = ["Device", "power", "set_power", "devices", "connect", "disconnect"]
 
@@ -88,8 +88,8 @@ def set_power(on: bool, *, timeout: float = 10.0) -> None:
     Turn Bluetooth on or off, like the switch in Control Center, and wait until it's done.
 
     Careful on a desktop Mac: turning it off disconnects a wireless keyboard
-    and mouse. Raises :class:`~macos.errors.MacOSError` if the switch hasn't
-    happened within ``timeout`` seconds.
+    and mouse. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
+    the switch hasn't happened within ``timeout`` seconds.
     """
     if timeout <= 0:
         raise ValueError("timeout must be positive, not {}".format(timeout))
@@ -99,7 +99,7 @@ def set_power(on: bool, *, timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while bool(bluetooth.IOBluetoothPreferenceGetControllerPowerState()) != bool(on):
         if time.monotonic() > deadline:
-            raise MacOSError("Bluetooth didn't turn {} within {} seconds".format("on" if on else "off", timeout))
+            raise WaitTimeoutError("Bluetooth didn't turn {} within {} seconds".format("on" if on else "off", timeout))
         time.sleep(0.1)
 
 
@@ -219,7 +219,7 @@ def _connection(target: Union[str, Device], selector: str, verb: str, connected:
         deadline = time.monotonic() + timeout
         while bool(_objc.send(handle, "isConnected", restype=_objc.BOOL)) != connected:
             if time.monotonic() > deadline:
-                raise MacOSError("could not {} {!r} within {} seconds".format(verb, device.name, timeout))
+                raise WaitTimeoutError("could not {} {!r} within {} seconds".format(verb, device.name, timeout))
             time.sleep(0.1)
     return replace(device, connected=connected)
 
@@ -231,8 +231,9 @@ def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     ``device`` is a :class:`Device`, its address, its full name or part of
     its name when that matches only one device (``"AirPods"``). The device
     must be on and in range. This returns once the device is connected, or
-    raises :class:`~macos.errors.MacOSError` after ``timeout`` seconds, or
-    right away when Bluetooth is off.
+    raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) after
+    ``timeout`` seconds, or :class:`~macos.errors.MacOSError` right away when
+    Bluetooth is off.
     """
     return _connection(device, "openConnection", "connect to", True, timeout)
 
@@ -242,7 +243,7 @@ def disconnect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     Disconnect a paired device (it stays paired) and return it.
 
     ``device`` works as in :func:`connect`. This returns once the device is
-    disconnected, or raises :class:`~macos.errors.MacOSError` after
-    ``timeout`` seconds.
+    disconnected, or raises :class:`~macos.WaitTimeoutError` (a
+    ``TimeoutError``) after ``timeout`` seconds.
     """
     return _connection(device, "closeConnection", "disconnect", False, timeout)

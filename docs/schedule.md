@@ -44,6 +44,11 @@ Adding a name again replaces that job. If launchd refuses the new one, `add`
 deletes its plist, puts the old job back (still paused if it was) and raises
 the error.
 
+The job runs whatever is at the script's path (and `python=`'s) at each run,
+as you. When other users could change it there (a folder shared with them,
+or a file they may write), `add` warns with a `RuntimeWarning`: keep the
+script in a folder only you can write to.
+
 macOS announces the new job with a *Background Items Added* notification,
 and lists it in System Settings › General › Login Items & Extensions. The
 script runs outside your terminal, so it doesn't get the terminal's

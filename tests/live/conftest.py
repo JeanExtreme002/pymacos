@@ -1,5 +1,7 @@
-"""Fixtures shared by the live tests."""
+"""Fixtures shared by the live tests, and the switch that makes a missing permission fail them."""
 
+import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -7,6 +9,29 @@ from pathlib import Path
 import pytest
 
 import macos
+
+# The reasons the live tests give when this Mac lacks a privacy permission ("no Accessibility
+# permission", "needs the Input Monitoring and Accessibility permissions"). The opt-in switches'
+# reasons ("...: set PYMACOS_BROWSER_TESTS=1 to run") don't match.
+_PERMISSION_SKIP = re.compile(r"\b(?:no|needs the) [\w ]*permissions?\b")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """
+    With ``PYMACOS_REQUIRE_PERMISSIONS=1``, a test skipped for a missing permission fails instead.
+
+    For CI, whose runners have the permissions granted: a runner image that loses them would
+    otherwise turn a fifth of the live suite into skips, and the run would stay green.
+    """
+    outcome = yield
+    report = outcome.get_result()
+    if not (report.skipped and os.environ.get("PYMACOS_REQUIRE_PERMISSIONS")) or hasattr(report, "wasxfail"):
+        return
+    reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else str(report.longrepr)
+    if _PERMISSION_SKIP.search(reason):
+        report.outcome = "failed"
+        report.longrepr = "PYMACOS_REQUIRE_PERMISSIONS is set, and this Mac lacks a permission: {}".format(reason)
 
 
 @pytest.fixture

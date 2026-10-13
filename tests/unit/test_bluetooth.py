@@ -140,7 +140,7 @@ def test_bluetooth_connection_failures(fake_bluetooth, monkeypatch):
     fake_bluetooth.status, fake_bluetooth.delay = 0, 10**9  # the link never changes
     clock = iter(range(0, 100, 5))
     monkeypatch.setattr(macos.bluetooth.time, "monotonic", lambda: next(clock))
-    with pytest.raises(macos.MacOSError, match="within 10.0 seconds"):
+    with pytest.raises(macos.WaitTimeoutError, match="within 10.0 seconds"):
         macos.bluetooth.disconnect("JBL")
 
     with pytest.raises(ValueError, match="timeout"):
@@ -183,3 +183,23 @@ def test_bluetooth_refuses_an_empty_name(commands, name):
     with pytest.raises(ValueError, match="name a Bluetooth device"):
         macos.bluetooth.connect(name)
     assert commands.calls == []  # refused before listing anything
+
+
+def test_bluetooth_set_power_times_out_with_a_timeout_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from macos import bluetooth
+
+    switched = []
+    fake = SimpleNamespace(
+        IOBluetoothPreferenceSetControllerPowerState=switched.append,
+        IOBluetoothPreferenceGetControllerPowerState=lambda: 1,  # never goes off
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(bluetooth, "_bluetooth", lambda: fake)
+    monkeypatch.setattr(bluetooth, "_require_controller", lambda: None)
+    monkeypatch.setattr(bluetooth.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bluetooth.time, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
+    with pytest.raises(macos.WaitTimeoutError, match="didn't turn off within 1.0 seconds"):
+        macos.bluetooth.set_power(False, timeout=1.0)
+    assert switched == [0]

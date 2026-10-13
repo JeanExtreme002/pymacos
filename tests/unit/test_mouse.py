@@ -67,3 +67,25 @@ def test_click_text_clicks_the_middle_of_the_first_match(monkeypatch):
     with pytest.raises(macos.MacOSError, match="'Send' isn't on the screen"):
         macos.mouse.click_text("Send", timeout=5)
     assert waited == [5]
+
+
+def test_ctrl_c_after_the_button_goes_down_lets_it_up(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+
+    def post(event):
+        posted.append(fake_events.events[event]["kind"])
+        if posted[-1] == 1 and posted.count(1) == 1:
+            raise KeyboardInterrupt  # in the pause after the press
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(KeyboardInterrupt):
+        macos.mouse.click(5, 5)
+    assert posted == [5, 1, 2]  # moved, pressed, and let go all the same
+
+    posted.clear()
+    with pytest.raises(KeyboardInterrupt):
+        post.__dict__.clear()
+        macos.mouse.drag(9, 9, duration=0)
+    assert posted[0] == 1 and posted[-1] == 2

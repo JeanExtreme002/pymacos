@@ -1,7 +1,7 @@
 """Fixtures shared by the unit tests: fake system commands and events."""
 
 import subprocess
-from typing import List
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -10,17 +10,37 @@ from macos import _system, notifications
 
 
 class FakeRun:
-    """Records the commands passed to ``subprocess.run`` instead of running them."""
+    """
+    Records the commands passed to ``subprocess.run`` instead of running them.
 
-    def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = "") -> None:
+    Every command gets ``stdout``, ``returncode`` and ``stderr``, unless :meth:`respond`
+    gave its own answer to the commands starting with some arguments. With ``binary``,
+    a command run without ``text=True`` gets bytes, as from ``subprocess.run``.
+    """
+
+    def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = "", *, binary: bool = False) -> None:
         self.calls: List[dict] = []
         self.stdout = stdout
         self.returncode = returncode
         self.stderr = stderr
+        self.binary = binary
+        self.responses: Dict[Tuple[str, ...], Tuple[int, str, str]] = {}
+
+    def respond(self, *prefix: str, stdout: str = "", returncode: int = 0, stderr: str = "") -> None:
+        """Answer the commands whose arguments start with ``prefix`` this way: the longest matching prefix wins."""
+        self.responses[prefix] = (returncode, stdout, stderr)
 
     def __call__(self, args, **kwargs):
         self.calls.append({"args": list(args), **kwargs})
-        return subprocess.CompletedProcess(args, self.returncode, self.stdout, self.stderr)
+        returncode, stdout, stderr = self.returncode, self.stdout, self.stderr
+        for prefix in sorted(self.responses, key=len, reverse=True):
+            if list(args[: len(prefix)]) == list(prefix):
+                returncode, stdout, stderr = self.responses[prefix]
+                break
+        if self.binary and not kwargs.get("text"):
+            stdout = stdout.encode("utf-8") if isinstance(stdout, str) else stdout
+            stderr = stderr.encode("utf-8") if isinstance(stderr, str) else stderr
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
 
     @property
     def args(self) -> List[str]:
@@ -39,7 +59,13 @@ def fake_run(monkeypatch):
 
 
 class _Commands:
-    """A fake ``subprocess.run`` that answers each command from a table."""
+    """
+    A fake ``subprocess.run`` that answers each command from a table.
+
+    A key is the command's second argument (``"-e"`` for every ``osascript -e``), or for
+    ``shortcuts list`` its first three. A tuple key is a prefix of the whole command
+    instead, and tells apart commands that share their second argument: the longest wins.
+    """
 
     def __init__(self, answers):
         self.answers = answers
@@ -52,7 +78,10 @@ class _Commands:
             for flag, path in zip(args, args[1:]):
                 if flag == "--input-path" and path.endswith(".txt"):
                     self.text_input = open(path, encoding="utf-8").read()
-        key = " ".join(args[:3]) if args[:2] == ["shortcuts", "list"] else args[1]
+        prefixes = sorted((key for key in self.answers if isinstance(key, tuple)), key=len, reverse=True)
+        key = next((prefix for prefix in prefixes if tuple(args[: len(prefix)]) == prefix), None)
+        if key is None:
+            key = " ".join(args[:3]) if args[:2] == ["shortcuts", "list"] else args[1]
         returncode, stdout, stderr = self.answers.get(key, (0, "", ""))
         return subprocess.CompletedProcess(args, returncode, stdout, stderr)
 

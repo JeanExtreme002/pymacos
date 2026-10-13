@@ -39,7 +39,9 @@ docs.reload()
 docs.go("https://macos.readthedocs.io/en/latest/browser.html")
 ```
 
-A tab is read once: after tabs close or move, read them again.
+A tab is read once: after tabs close or move, read them again. The URL given
+to `go` reaches `osascript` on its standard input, so a token in a link doesn't
+show in the process list (`ps`).
 
 ## Which browser
 

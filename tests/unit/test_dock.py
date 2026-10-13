@@ -134,7 +134,7 @@ def test_dock_restart_fails_when_no_dock_comes_back(monkeypatch, fake_run):
     monkeypatch.setattr(dock.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(dock.time, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
 
-    with pytest.raises(macos.MacOSError, match="didn't start again"):
+    with pytest.raises(macos.WaitTimeoutError, match="didn't start again"):
         dock.restart()
 
 
@@ -189,6 +189,19 @@ def test_dock_add_app_replaces_a_tile_of_another_kind_at_that_path(dock_settings
     assert macos.dock.add_app("Code").path == app and len(restarts) == before + 1  # nothing to change: no restart
 
 
+def test_dock_add_app_with_a_stray_right_before_another_app(dock_settings):
+    store, _, app = dock_settings
+    # The folder tile goes, and the app after it (Safari) isn't taken for the one asked for.
+    store["persistent-apps"].insert(
+        0,
+        {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(app), "_CFURLStringType": 15}},
+         "tile-type": "directory-tile"},
+    )  # fmt: skip
+    added = macos.dock.add_app("Code")
+    assert added.path == app and added.bundle_id == "com.example.code"
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == ["Code", "Safari"]
+
+
 def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings):
     store, restarts, _ = dock_settings
     spacer = {"tile-data": {}, "tile-type": "spacer-tile"}
@@ -200,3 +213,14 @@ def test_dock_remove_app_leaves_spacers_and_refuses_an_empty_name(dock_settings)
             macos.dock.remove_app(blank)
     assert macos.dock.remove_app("Safari") is True
     assert store["persistent-apps"] == [spacer, unlabelled] and len(restarts) == 1
+
+
+def test_dock_numbers_tolerate_hand_edited_values(dock_settings):
+    store, _, _ = dock_settings
+    store.update({"tilesize": "big", "autohide-delay": "soon", "magnification": True, "largesize": float("nan"),
+                  "autohide-time-modifier": ["x"], "wvous-tl-corner": "x", "wvous-tl-modifier": {}})  # fmt: skip
+    assert macos.dock.size() == 64 and macos.dock.autohide_delay() == 0.5 and macos.dock.magnification() == 128
+    assert macos.dock.autohide_duration() is None
+    assert macos.dock.hot_corners()["top_left"] is None and macos.dock.hot_corner_modifiers()["top_left"] is None
+    store.update({"tilesize": "48", "autohide-delay": 0})  # a number written as text still reads
+    assert macos.dock.size() == 48 and macos.dock.autohide_delay() == 0.0

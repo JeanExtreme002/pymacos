@@ -454,3 +454,69 @@ def test_a_worker_refuses_a_layout_read_for_another_kind_of_keyboard(monkeypatch
     kind[0] = 40  # an ANSI keyboard now: some keys sit elsewhere
     error = _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a"))
     assert isinstance(error, macos.MacOSError) and "layout() from the main thread again" in str(error)
+
+
+def _interrupted_after(fake_events, monkeypatch, wanted):
+    """A post() that sends the event, then gets Ctrl-C in its pause, once, after the first event ``wanted`` accepts."""
+    from macos import _events
+
+    posted = []
+
+    def post(event):
+        fields = fake_events.events[event]
+        posted.append(fields)
+        if wanted(fields) and not getattr(post, "done", False):
+            post.done = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(_events, "post", post)
+    return posted
+
+
+def test_ctrl_c_while_hold_lets_a_key_up_still_lets_the_others_up(fake_events, monkeypatch):
+    posted = _interrupted_after(fake_events, monkeypatch, lambda fields: fields["code"] == 58 and not fields["down"])
+    with pytest.raises(KeyboardInterrupt):
+        with macos.keyboard.hold("cmd+shift+option"):
+            pass
+
+    assert [event["code"] for event in posted if not event["down"]] == [58, 56, 55]  # Option, then Shift and Cmd
+    assert macos._events.held() == []
+
+
+def test_the_error_of_the_block_wins_over_a_failed_release(fake_events, monkeypatch):
+    from macos import _events
+
+    def post(event):
+        if not fake_events.events[event]["down"]:
+            raise macos.MacOSError("stuck")
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(RuntimeError, match="boom"):  # what the caller's block raised, not the release's error
+        with macos.keyboard.hold("shift"):
+            raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("text, code", [("x", 0), ("\n", 36)])
+def test_ctrl_c_after_a_typed_key_goes_down_lets_it_up(fake_events, monkeypatch, text, code):
+    posted = _interrupted_after(fake_events, monkeypatch, lambda fields: fields["down"])
+    with pytest.raises(KeyboardInterrupt):
+        macos.keyboard.type(text)
+
+    assert [(event["code"], event["down"]) for event in posted] == [(code, True), (code, False)]
+
+
+@pytest.mark.parametrize("keys", ["cmd+shift+", "cmd+", "+cmd+"])
+def test_app_shortcuts_refuse_a_shortcut_press_refuses(keys, fake_events):
+    with pytest.raises(ValueError):
+        macos.keyboard.press(keys)
+    with pytest.raises(ValueError):
+        macos.keyboard._encode_shortcut(keys)
+
+
+def test_app_shortcuts_read_the_plus_key_as_press_does():
+    encode = macos.keyboard._encode_shortcut
+    assert encode("+") == "+"
+    assert encode("cmd++") == "@+"
+    assert encode("cmd+shift++") == "@$+"
+    assert encode("cmd+plus") == "@+"
+    assert encode("cmd+shift+e") == "@$e"

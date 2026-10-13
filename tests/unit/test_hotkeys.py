@@ -77,9 +77,9 @@ class _FakeGraphics:
         self.callback = None
         self.enabled = []
 
-    def key(self, code, flags, repeat=False):
+    def key(self, code, flags, repeat=False, ours=False):
         number = len(self.events) + 1
-        self.events[number] = (code, flags, repeat)
+        self.events[number] = (code, flags, repeat, ours)
         return number
 
     def CGEventTapCreate(self, tap, place, options, mask, callback, info):
@@ -90,8 +90,8 @@ class _FakeGraphics:
         self.enabled.append(on)
 
     def CGEventGetIntegerValueField(self, event, field):
-        code, _, repeat = self.events[event]
-        return {9: code, 8: int(repeat)}[field]
+        code, _, repeat, ours = self.events[event]
+        return {9: code, 8: int(repeat), 42: _events._FROM_CALLBACK if ours else 0}[field]
 
     def CGEventGetFlags(self, event):
         return self.events[event][1]
@@ -324,3 +324,116 @@ def test_ctrl_c_while_the_tap_starts_stops_the_tap_too(monkeypatch):
         hotkeys.run(timeout=1)
     assert closed == [True]  # no tap left behind, swallowing the shortcuts
     assert hotkeys._listeners.active() == []
+
+
+def test_keys_a_callback_presses_go_through_to_the_app(fake_tap, registered):
+    # A callback pressing its own shortcut (to pass it on) must not be caught, and call itself, again.
+    registered("f5")
+    listener = hotkeys._Listener(None)
+    with hotkeys._listeners.listening(listener):
+        _tap(listener)
+        mine = fake_tap.key(96, FN, ours=True)
+        assert fake_tap.callback(0, KEY_DOWN, mine, 0) == mine
+        assert fake_tap.callback(0, KEY_UP, fake_tap.key(96, FN, ours=True), 0) is not None
+        users = fake_tap.key(96, FN)  # pressed by someone else, another thread included: still caught
+        assert fake_tap.callback(0, KEY_DOWN, users, 0) is None
+    assert len(listener.pending) == 1
+
+
+def test_only_what_a_callback_posts_is_marked(monkeypatch):
+    marks = []
+
+    class Graphics:
+        def CGEventSetIntegerValueField(self, event, field, value):
+            marks.append((event, field, value))
+
+        def CGEventPost(self, tap, event):
+            pass
+
+    monkeypatch.setattr(_events, "graphics", lambda: Graphics())
+    monkeypatch.setattr(_events._cf, "release", lambda ref: None)
+    monkeypatch.setattr(_events.time, "sleep", lambda seconds: None)
+    _events.post(1)
+    with _events.marked():
+        _events.post(2)
+        other = threading.Thread(target=_events.post, args=(3,))  # another thread meanwhile: not marked
+        other.start()
+        other.join()
+    _events.post(4)
+    assert marks == [(2, 42, _events._FROM_CALLBACK)]
+
+    calls = []
+    hotkeys.register("f19", lambda: calls.append(_events._marking.on))
+    try:
+        hotkeys._call(hotkeys._combination("f19"))
+    finally:
+        hotkeys.unregister("f19")
+    assert calls == [True] and not _events._marking.on
+
+
+def test_a_wait_ending_leaves_other_waits_and_registrations_alone(registered, monkeypatch):
+    # wait()s for the same keys at once, and a register() during one: each ending drops only its own.
+    k = hotkeys._combination("cmd+k")
+    gates = {"first": threading.Event(), "second": threading.Event()}
+    listening = []
+
+    def listen(on_press, wanted, timeout):
+        name = "first" if not listening else "second"
+        listening.append(name)
+        gates[name].wait(5)
+
+    monkeypatch.setattr(hotkeys, "_listen", listen)
+    first = threading.Thread(target=hotkeys.wait, args=("cmd+k",))
+    first.start()
+    while not listening:
+        pass
+    second = threading.Thread(target=hotkeys.wait, args=("cmd+k",))
+    second.start()
+    while len(listening) < 2:
+        pass
+    assert hotkeys._match(40, CMD) == k
+    gates["first"].set()
+    first.join()
+    assert hotkeys._match(40, CMD) == k  # the second wait still listens for it
+    mine = hotkeys.register("cmd+k", lambda: None)
+    gates["second"].set()
+    second.join()
+    try:
+        assert hotkeys._registered[k] is mine  # registered meanwhile: still there
+        assert k not in hotkeys._waited
+    finally:
+        mine.unregister()
+    assert hotkeys._match(40, CMD) is None
+
+
+def test_has_permission_needs_accessibility_too(monkeypatch):
+    class Graphics:
+        listen = True
+
+        def CGPreflightListenEventAccess(self):
+            return self.listen
+
+    graphics = Graphics()
+    monkeypatch.setattr(_events, "graphics", lambda: graphics)
+    monkeypatch.setattr(_events, "has_permission", lambda: False)
+    assert hotkeys.has_permission() is False  # run() would raise: the tap that keeps the keys needs it
+    monkeypatch.setattr(_events, "has_permission", lambda: True)
+    assert hotkeys.has_permission() is True
+    graphics.listen = False
+    assert hotkeys.has_permission() is False
+
+
+def test_a_tap_closed_from_another_thread_keeps_its_callback(fake_tap, monkeypatch):
+    # Its owner's run loop may be entering the callback right then: freeing it would pull the code from under it.
+    monkeypatch.setattr(_events, "_RETIRED", [])
+    here = _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no")
+    here.close()
+    assert _events._RETIRED == []  # closed on its own thread: nothing kept
+
+    watching = _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no")
+    tap = watching._tap
+    worker = threading.Thread(target=watching.close)
+    worker.start()
+    worker.join()
+    assert fake_tap.closed[-2:] == [True, "port"]  # closed all the same
+    assert _events._RETIRED == [tap] and tap.callback is not None

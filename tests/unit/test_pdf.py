@@ -85,6 +85,18 @@ def test_sign(tmp_path):
     )
     assert _color_at(rotated, tmp_path, (50, 40, 60, 20)) == "signature"      # upright, top left as it's seen
     assert _color_at(rotated, tmp_path, (560, 450, 60, 60)) == "page"
+    # The same signature photographed sideways: stored 100 x 300, with EXIF orientation 6, as phones do.
+    from macos import _cf
+
+    tall = tmp_path / "tall.png"
+    tall.write_bytes(rgb_png(100, 300, lambda x, y: (20, 40, 160)))
+    sideways = tmp_path / "sideways.jpg"
+    io = macos.image._io()
+    with _cf.owned(macos.image._source(tall)) as source, _cf.owned(_cf.from_python({"Orientation": 6})) as options:
+        macos.image._write(sideways, "public.jpeg", lambda d: io.CGImageDestinationAddImageFromSource(d, source, 0, options))
+    upright = macos.pdf.sign(form, sideways, tmp_path / "upright.pdf", width=150)
+    assert _color_at(upright, tmp_path, (400, 632, 70, 28)) == "signature"  # where the upright one goes
+    assert _color_at(upright, tmp_path, (400, 540, 70, 28)) == "page"  # not three times taller, on its side
     with pytest.raises(ValueError, match="out of range"):
         macos.pdf.sign(form, signature, tmp_path / "never.pdf", page=2)
     with pytest.raises(ValueError, match="position must be one of"):
@@ -339,6 +351,41 @@ def test_redact_targets():
     for bad, message in [([], "at least one"), (["  "], "takes texts"), ([3], "takes texts"), ([re.compile("x*")], "empty text")]:
         with pytest.raises(ValueError, match=message):
             _patterns(bad)
+
+
+def test_redact_reads_a_files_strings_as_written():
+    import zlib
+
+    from macos.pdf import _occurrences, _patterns, _strings, _variants
+
+    # Escapes, nested parentheses, octal codes, a line continued, UTF-16 and hex strings.
+    source = rb"(Ana \(Souza\)) (a (nested) one) (Jos\351) (split \
+line) <FEFF0041006E0061> <416E61>"
+    assert list(_strings(source)) == ["Ana (Souza)", "a (nested) one", "Jos\xe9", "split line", "Ana", "Ana"]
+    # A TJ array's pieces are read joined, only, in a page's drawing: "DO" alone isn't the word "do".
+    drawing = b"[(A) 10 (ND ) -5 (DO) (ES)] TJ (Ana Souza) Tj"
+    assert list(_strings(drawing, drawing=True)) == ["AND DOES", "Ana Souza"]
+    assert list(_strings(b"/Opt [(Free) (Pro)]")) == ["Free", "Pro", "FreePro"]  # in an object: each, and joined
+    # What PDFKit writes itself as it saves is no part of the document.
+    assert list(_strings(b"/Producer (macOS Quartz PDFContext) /ModDate (D:20261013) /Title (Plan)")) == ["Plan"]
+
+    from macos.pdf import _file_strings
+
+    content = zlib.compress(b"BT (Ana Souza) Tj ET")
+    picture = b"(Ana Souza)"  # bytes of a picture that happen to read as a string: never read
+    data = (
+        b"1 0 obj\n<< /Title (Report) >>\nendobj\n"
+        b"2 0 obj\n<< /Filter /FlateDecode /Length " + str(len(content)).encode() + b" >>\n"
+        b"stream\n" + content + b"\nendstream\nendobj\n"
+        b"3 0 obj\n<< /Subtype /Image /Length 11 >>\nstream\n" + picture + b"\nendstream\nendobj\n"
+    )
+    assert sorted(_file_strings(data)) == ["Ana Souza", "Report"]
+
+    # A link's address is read with its escapes decoded, and ligatures spelled out; each text counts once.
+    assert "https://x.com/?q=Ana Souza" in _variants("https://x.com/?q=Ana%20Souza")
+    assert "office" in _variants("oﬃce")
+    name = _patterns("Ana Souza")[0][1]
+    assert _occurrences(["https://x.com/?q=Ana%20Souza", "Ana Souza and Ana Souza"], name) == 3
 
 
 def _is_encrypted(path):

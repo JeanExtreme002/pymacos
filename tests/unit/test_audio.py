@@ -147,6 +147,20 @@ def fake_pcm(monkeypatch):
     return written
 
 
+def test_read_wav_refuses_a_cut_short_or_foreign_format():
+    import struct
+
+    def wav(fmt):
+        body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", 2) + b"\x01\x00"
+        return b"RIFF" + struct.pack("<I", len(body)) + body
+
+    with pytest.raises(macos.MacOSError, match="cut short"):  # not struct.error
+        macos.audio._read_wav(wav(struct.pack("<HH", 1, 2)))
+    with pytest.raises(macos.MacOSError, match="16-bit PCM"):  # 32-bit float samples
+        macos.audio._read_wav(wav(struct.pack("<HHIIHH", 3, 1, 8000, 32000, 4, 32)))
+    assert macos.audio._read_wav(wav(struct.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)))[:2] == (1, 8000)
+
+
 def test_audio_sample_editing(fake_pcm):
     macos.audio.reverse("in.wav", "out.wav")
     assert fake_pcm["samples"] == [500, -500, 400, -400, 300, -300, 200, -200, 100, -100]  # channels stay in order
@@ -183,6 +197,18 @@ def test_trim_and_gain_go_a_piece_at_a_time(fake_pcm, monkeypatch):
     assert fake_pcm["pieces"] == [[10, -10, 20, -20], [30, -30, 40, -40], [50, -50]]
     with pytest.raises(ValueError, match="past the end"):
         macos.audio.trim("in.wav", "out.wav", 0.5)
+
+
+def test_reverse_and_concat_go_a_piece_at_a_time(fake_pcm, monkeypatch):
+    monkeypatch.setattr(macos.audio, "_CHUNK_FRAMES", 2)
+    macos.audio.reverse("in.wav", "out.wav")
+    # From the end, two frames at a time, each frame's channels kept in order: the same as reversed whole.
+    assert fake_pcm["pieces"] == [[500, -500, 400, -400], [300, -300, 200, -200], [100, -100]]
+    macos.audio.concat(["a.wav", "b.wav"], "out.wav")
+    assert all(len(piece) <= 4 for piece in fake_pcm["pieces"])  # never a whole file at once
+    assert fake_pcm["samples"] == [100, -100, 200, -200, 300, -300, 400, -400, 500, -500] * 2
+    with pytest.raises(ValueError, match="can't write"):
+        macos.audio.concat(["a.wav"], "out.mp3")  # the output checked before any decoding
 
 
 def test_gain_table_matches_multiplying_each_sample():

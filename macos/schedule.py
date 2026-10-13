@@ -28,7 +28,9 @@ import math
 import os
 import plistlib
 import re
+import stat
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
@@ -197,6 +199,9 @@ def add(
     arguments; its output goes to :attr:`Job.log`. ``args`` are written to the
     job's file and show in the process list at every run, so keep secrets out
     of them: the script can read them from :mod:`macos.keychain` instead.
+    The job runs whatever is at the script's path then: a :class:`RuntimeWarning`
+    says so when other users could change it (a shared folder, a file
+    others may write), as they could then run their code as you.
     Adding a name again replaces that job; if launchd refuses the new one,
     the old one is put back and the error raised. macOS shows a "Background Items Added" notification
     the first time, and lists the job in System Settings › General › Login
@@ -237,6 +242,14 @@ def add(
         if not chosen.is_file():
             raise FileNotFoundError(str(chosen))
         interpreter = str(chosen)
+    for what, checked in (("script", source), ("Python", Path(interpreter) if python is not None else None)):
+        risk = _swappable(checked) if checked is not None else None
+        if risk:
+            warnings.warn(
+                "the job runs this {} as you, on every run: {}, so they could make it run their code".format(what, risk),
+                RuntimeWarning,
+                stacklevel=2,
+            )
     log = _log(name)
     log.parent.mkdir(parents=True, exist_ok=True)
     job = {
@@ -283,6 +296,31 @@ def add(
     if found is None:
         raise MacOSError("the job {!r} was added, but its file {} can't be read back".format(name, path))
     return found
+
+
+def _swappable(path: Path) -> Optional[str]:
+    """
+    How another user could change what ``path`` runs, or ``None``: it, or a folder above it, isn't only yours.
+
+    The file itself writable by others, or a folder they may write in without the sticky bit (which
+    keeps them from renaming what isn't theirs, as in /tmp), or anything along the way owned by
+    another user who isn't root. Followed through symbolic links: what launchd will run.
+    """
+    me = os.geteuid()
+    real = Path(os.path.realpath(str(path)))
+    for current in (real, *real.parents):
+        try:
+            status = os.stat(str(current))
+        except OSError:
+            return None  # can't tell: no warning made up
+        if status.st_uid not in (me, 0):
+            return "{} belongs to another user".format(current)
+        if status.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            if current == real:
+                return "other users may change {}".format(current)
+            if not status.st_mode & stat.S_ISVTX:
+                return "other users may replace what's in {}".format(current)
+    return None
 
 
 def remove(name: str) -> bool:

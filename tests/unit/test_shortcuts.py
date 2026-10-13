@@ -113,3 +113,14 @@ def test_shortcut_timeout(fake_run, monkeypatch):
     monkeypatch.setattr(_system.subprocess, "run", slow)
     with pytest.raises(macos.errors.CommandTimeoutError):
         macos.shortcuts.run("Slow", timeout=0.1)
+
+
+def test_shortcut_that_deletes_its_text_input_still_returns_its_output(commands, monkeypatch):
+    from macos import _system
+
+    def run(args, **kwargs):
+        os.remove(args[args.index("--input-path") + 1])  # a shortcut that cleans up its input itself
+        return subprocess.CompletedProcess(args, 0, "Done\n", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", run)
+    assert macos.shortcuts.run("Tidy", input="text") == "Done"  # not FileNotFoundError from the clean-up

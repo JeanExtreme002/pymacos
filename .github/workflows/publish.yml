@@ -8,11 +8,11 @@ permissions:
   contents: read
 
 jobs:
-  # Run the whole suite, live tests included, on the commit being released:
-  # nothing reaches PyPI from a commit whose tests fail.
-  test:
-    runs-on: macos-latest
-    timeout-minutes: 20
+  # The distributions are built once, here, and what reaches PyPI is exactly
+  # what was checked and tested: never a second build of the same commit.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
     - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
@@ -28,20 +28,73 @@ jobs:
           echo "::error::Release tag $GITHUB_REF_NAME does not match __version__ $version"
           exit 1
         fi
-
-    - name: Install dependencies
+    - name: Install build tools
+      run: python -m pip install --upgrade pip build twine
+    - name: Build the sdist, and the wheel from it
+      run: python -m build
+    - name: Check the metadata PyPI reads
+      run: twine check --strict dist/*
+    - name: Check what the wheel holds
+      # The same check as build.yml: every module, py.typed, the right version, nothing else.
       run: |
-        python -m pip install --upgrade pip
-        pip install -e ".[dev]"
+        python - <<'EOF'
+        import glob, pathlib, re, zipfile
+
+        wheel = glob.glob("dist/*.whl")
+        assert len(wheel) == 1, wheel
+        names = set(zipfile.ZipFile(wheel[0]).namelist())
+        version = re.search(r'__version__ = "(.+?)"', pathlib.Path("macos/__init__.py").read_text()).group(1)
+        assert wheel[0].endswith("pymacos-{}-py3-none-any.whl".format(version)), wheel[0]
+        modules = {str(path) for path in pathlib.Path("macos").rglob("*.py")}
+        assert modules <= names, "left out of the wheel: {}".format(sorted(modules - names))
+        assert "macos/py.typed" in names, "py.typed is missing"
+        extra = sorted(name for name in names if not name.startswith(("macos/", "pymacos-")))
+        assert not extra, "unexpected files in the wheel: {}".format(extra)
+        print("{}: {} files, {} modules".format(wheel[0], len(names), len(modules)))
+        EOF
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+      with:
+        name: dist
+        path: dist/
+
+  # The whole suite, live tests included, against the wheel just built,
+  # installed with the source folder gone: nothing reaches PyPI from a build
+  # whose tests fail.
+  test:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      with:
+        python-version: '3.12'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+      with:
+        name: dist
+        path: dist/
+    - name: Install the wheel in a clean environment
+      run: |
+        python -m venv /tmp/env
+        /tmp/env/bin/python -m pip install --upgrade pip pytest pytest-rerunfailures hypothesis
+        /tmp/env/bin/python -m pip install dist/*.whl
+        rm -rf macos
+    - name: Check it's the installed package that's imported
+      run: |
+        /tmp/env/bin/python -c "import macos, sys; print(macos.__version__, macos.__file__); sys.exit('site-packages' not in macos.__file__)"
     - name: Unit tests
-      run: pytest tests/unit -v
+      run: /tmp/env/bin/python -m pytest tests/unit -v
     - name: Live tests
       # Retried once, as on pull requests: the runner is shared. The unit tests never are.
-      run: pytest tests/live -v -rs --reruns 1 --reruns-delay 5
+      # A test skipped for a missing permission fails, as in test.yml.
+      env:
+        PYMACOS_REQUIRE_PERMISSIONS: "1"
+      run: /tmp/env/bin/python -m pytest tests/live -v -rs --reruns 1 --reruns-delay 5
 
-  # The publish action only runs on Linux, hence a separate job.
+  # The publish action only runs on Linux, hence a separate job. It uploads the
+  # artifact the jobs above checked and tested, untouched.
   publish:
-    needs: test
+    needs: [build, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: pypi
@@ -49,18 +102,9 @@ jobs:
       contents: read
       id-token: write  # Required for trusted publishing (OIDC)
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-
-    - name: Set up Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
       with:
-        python-version: '3.12'
-
-    - name: Install build tools
-      run: python -m pip install --upgrade pip build
-
-    - name: Build package
-      run: python -m build
-
+        name: dist
+        path: dist/
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1

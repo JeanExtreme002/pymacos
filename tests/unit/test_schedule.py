@@ -444,3 +444,26 @@ def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     listings = [call["args"] for call in fake_run.calls if call["args"][:2] == ["launchctl", "print-disabled"]]
     assert len(listings) == 1
+
+
+def test_schedule_warns_when_other_users_could_change_the_script(fake_run, home):
+    import warnings
+
+    shared = home / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # writable by anyone, no sticky bit: the script could be swapped
+    script = shared / "job.py"
+    script.write_text("print('hi')")
+    with pytest.warns(RuntimeWarning, match="other users may replace what's in"):
+        macos.schedule.add("swapped", script, every=60)
+
+    shared.chmod(0o1777)  # the sticky bit, as on /tmp: only its owner may rename it
+    script.chmod(0o666)
+    with pytest.warns(RuntimeWarning, match="other users may change"):
+        macos.schedule.add("swapped", script, every=60)
+
+    script.chmod(0o644)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.schedule.add("swapped", script, every=60)  # only its owner may change it: no warning
+        macos.schedule.add("backup", home / "backup.py", every=60)

@@ -17,12 +17,13 @@ import os
 import plistlib
 import subprocess
 import tempfile
+import threading
 from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 from ._system import require_macos, run_bytes
-from .errors import CommandError, MacOSError, NotSupportedError
+from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
 __all__ = ["search", "search_name", "metadata"]
 
@@ -46,10 +47,12 @@ def _invalid(query: str) -> ValueError:
     return ValueError("not a valid Spotlight query: {!r}".format(query))
 
 
-def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
+def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = None) -> List[Path]:
     query = args[-1]
     if limit is not None and limit < 0:
         raise ValueError("limit must be zero or more, not {}".format(limit))
+    if timeout is not None and timeout <= 0:
+        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     if query.startswith("-"):
         # mdfind has no "--": a query such as "-onlyin" or "-s name" would be
         # taken as its option. A leading space keeps it the query, and the
@@ -76,7 +79,20 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
         errors.close()
         raise
     assert process.stdout is not None
+    expired = threading.Event()
 
+    def expire() -> None:
+        # Stopped from here, as it may never write again: the read below then ends.
+        expired.set()
+        try:
+            process.kill()
+        except OSError:
+            pass  # it ended meanwhile
+
+    timer = threading.Timer(timeout, expire) if timeout is not None else None
+    if timer is not None:
+        timer.daemon = True
+        timer.start()
     try:
         # Read lazily: with a limit, stop (and stop mdfind) once there are
         # enough results, instead of collecting every match of a broad query.
@@ -84,15 +100,21 @@ def _mdfind(args: List[str], limit: Optional[int]) -> List[Path]:
         # query's diagnostic shows up.
         wanted = None if limit is None else max(limit, 1)
         records = list(islice((record for record in _records(process.stdout) if record.strip()), wanted))
+        if expired.is_set():
+            raise CommandTimeoutError(command, timeout or 0)
         if records and records[0].startswith(_INVALID):
             raise _invalid(query)
         if wanted is None or len(records) < wanted:
             # mdfind ran to the end, so its exit status is meaningful.
             if process.wait() != 0:
+                if expired.is_set():  # stopped while it was finishing
+                    raise CommandTimeoutError(command, timeout or 0)
                 errors.seek(0)
                 raise CommandError(command, process.returncode, errors.read())
         return [Path(record) for record in records[:limit]]
     finally:
+        if timer is not None:
+            timer.cancel()
         if process.poll() is None:
             process.kill()
         process.wait()
@@ -118,7 +140,9 @@ def _records(stream: Any) -> Iterator[str]:
         yield os.fsdecode(pending.rstrip(b"\n"))
 
 
-def search(query: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None) -> List[Path]:
+def search(
+    query: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None, timeout: Optional[float] = None
+) -> List[Path]:
     """
     Return the files matching a Spotlight query.
 
@@ -126,22 +150,27 @@ def search(query: str, *, folder: Optional[PathLike] = None, limit: Optional[int
     names and contents), filters such as ``kind:pdf`` or ``date:today``, and
     raw metadata queries like ``kMDItemPixelHeight > 1000``. ``folder`` limits
     the search to one folder (recursively), and ``limit`` to that many results.
+    With ``timeout``, a search still going after that many seconds (Spotlight
+    stuck, a slow network volume) is stopped, and
+    :class:`~macos.CommandTimeoutError` raised; by default it waits.
     """
-    return _mdfind([*_folder(folder), query], limit)
+    return _mdfind([*_folder(folder), query], limit, timeout)
 
 
-def search_name(name: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None) -> List[Path]:
+def search_name(
+    name: str, *, folder: Optional[PathLike] = None, limit: Optional[int] = None, timeout: Optional[float] = None
+) -> List[Path]:
     """
     Return the files whose name contains ``name``, ignoring case and accents.
 
     Matches the full file name, extension included (``"report.pdf"``,
     ``"Calculator.app"``), unlike ``mdfind -name``, which matches the
-    displayed name.
+    displayed name. ``timeout`` works as in :func:`search`.
     """
     # Escape the characters that are special inside a quoted query value, so
     # the name is always matched literally.
     literal = name.replace("\\", "\\\\").replace('"', '\\"').replace("*", "\\*")
-    return _mdfind([*_folder(folder), 'kMDItemFSName == "*{}*"cd'.format(literal)], limit)
+    return _mdfind([*_folder(folder), 'kMDItemFSName == "*{}*"cd'.format(literal)], limit, timeout)
 
 
 def metadata(path: PathLike) -> Dict[str, Any]:

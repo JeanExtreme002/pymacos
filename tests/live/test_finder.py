@@ -122,6 +122,17 @@ def test_watch_reports_changes_as_they_happen(tmp_path):
     assert macos.finder.wait_for_change(folder, timeout=0.3) is None
 
 
+def test_watch_a_folder_named_in_another_case(tmp_path):
+    import threading
+
+    folder = tmp_path / "CaseDir"
+    folder.mkdir()
+    threading.Timer(0.5, lambda: (folder / "new.txt").write_text("x")).start()
+    # The disk ignores case; FSEvents names what changed as the disk spells it.
+    event = macos.finder.wait_for_change(tmp_path / "casedir", recursive=False, timeout=5)
+    assert event is not None and event.path.name == "new.txt" and event.path.parent.name == "CaseDir"
+
+
 def test_watch_pattern(tmp_path):
     import threading
     import time

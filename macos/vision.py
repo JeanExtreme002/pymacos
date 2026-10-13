@@ -301,8 +301,9 @@ def _words_of(observations: List[int]) -> List[Tuple[str, Tuple[float, float, fl
                     ctypes.byref(error),
                     argtypes=(_files.NSRange, ctypes.c_void_p),
                 )
-                if part:
-                    found.append((match.group(0), _box(part)))
+                # A word Vision can't place on its own still goes, with its line's box: as text in the
+                # wrong place, searchable, rather than not at all.
+                found.append((match.group(0), _box(part) if part else _box(observation)))
     return found
 
 

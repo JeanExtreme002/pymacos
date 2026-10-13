@@ -18,6 +18,7 @@ library to install.
 
 import ctypes
 import math
+import operator
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -655,6 +656,10 @@ def rotate(source: PathLike, output: PathLike, degrees: int, *, quality: Optiona
 
     The metadata is kept and ``output``'s extension sets the format.
     """
+    try:
+        degrees = operator.index(degrees)  # an int, or an integer of numpy's: a float would fail later, unclearly
+    except TypeError:
+        raise ValueError("degrees must be an int multiple of 90, not {!r}".format(degrees)) from None
     if degrees % 90:
         raise ValueError("degrees must be a multiple of 90, not {}".format(degrees))
     turns = (degrees // 90) % 4

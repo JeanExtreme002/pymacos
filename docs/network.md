@@ -147,7 +147,8 @@ macos.network.disconnect_vpn("Office")
 with their `status`: `'connected'`, `'connecting'`, `'disconnecting'` or
 `'disconnected'`. {func}`~macos.network.connect_vpn` connects one, by name or
 `id`, and waits until it's connected, up to `timeout` seconds (30 by
-default), raising {class}`~macos.MacOSError` if it fails; `wait=False`
+default), raising {class}`~macos.MacOSError` if it fails
+({class}`~macos.WaitTimeoutError`, a `TimeoutError`, when time runs out); `wait=False`
 returns at once. It uses the password saved with the VPN: one that asks each
 time may show its prompt. {func}`~macos.network.disconnect_vpn` disconnects it,
 waiting the same way. A `scutil` that doesn't answer within 30 seconds raises

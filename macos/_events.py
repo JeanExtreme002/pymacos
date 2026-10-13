@@ -117,9 +117,39 @@ def require_permission() -> None:
         )
 
 
+_USER_DATA = 42  # kCGEventSourceUserData: a field of the event's own, free for the poster to set
+_FROM_CALLBACK = 0x70796D61636F73  # "pymacos": set on what a hotkey callback posts
+# Whether this thread is running a hotkey callback (see marked()). Per thread: keys another thread
+# presses meanwhile are a user's, which a shortcut should catch.
+_marking = threading.local()
+
+
+@contextmanager
+def marked() -> Iterator[None]:
+    """
+    Mark the events this thread posts inside the block, for the hotkeys' tap to let through (see :func:`is_ours`).
+
+    Around a hotkey callback: one that presses its own shortcut (to send it on to the app in
+    front) would otherwise be caught by the tap again, and call itself for good.
+    """
+    previous = getattr(_marking, "on", False)
+    _marking.on = True
+    try:
+        yield
+    finally:
+        _marking.on = previous
+
+
+def is_ours(event: int) -> bool:
+    """Whether ``event`` was posted inside :func:`marked`: by a hotkey callback."""
+    return bool(graphics().CGEventGetIntegerValueField(event, _USER_DATA) == _FROM_CALLBACK)
+
+
 def post(event: int) -> None:
     """Post an owned event, then release it."""
     try:
+        if getattr(_marking, "on", False):
+            graphics().CGEventSetIntegerValueField(event, _USER_DATA, _FROM_CALLBACK)
         graphics().CGEventPost(HID_TAP, event)
     finally:
         _cf.release(event)
@@ -298,6 +328,11 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
     return _Listening(tap, listener.drain(timeout))
 
 
+# Taps closed from a thread other than the one whose run loop they were on: kept for good, see
+# _Listening.close. Rare (a watch() closed or dropped on another thread), and small.
+_RETIRED: List[Tap] = []
+
+
 class _Listening:
     """
     What :func:`listen` returns: the items a listener gathers, with the tap closed once they end.
@@ -330,6 +365,11 @@ class _Listening:
             # The tap first: it's what intercepts the keys. Closing the generator can fail when it's
             # running on another thread ("generator already executing"); then it ends on its own.
             tap.close()
+            if threading.get_ident() != self._thread:
+                # Closed from another thread (or dropped there): the owner's run loop may be entering
+                # the tap's callback right now, waiting for the GIL this thread holds. Freed, that
+                # callback's code would go from under it: keep it, as the blocks are kept.
+                _RETIRED.append(tap)
             try:
                 self._items.close()  # type: ignore[attr-defined]  # a generator: its finally runs now
             except ValueError:

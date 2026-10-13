@@ -174,9 +174,12 @@ def keep_awake(*, display: bool = False, reason: str = "pymacos keep_awake") -> 
         io.IOPMAssertionRelease(assertion.value)
 
 
+_PMSET_TIMEOUT = 30.0  # seconds: pmset only asks for the sleep, and answers at once
+
+
 def sleep() -> None:
     """Put the Mac to sleep right away, like  › Sleep."""
-    _run(["pmset", "sleepnow"])
+    _run(["pmset", "sleepnow"], timeout=_PMSET_TIMEOUT)
 
 
 def sleep_display() -> None:
@@ -186,7 +189,7 @@ def sleep_display() -> None:
     With *Require password after screen saver begins or display is turned off*
     set to *Immediately* (the default), this also locks the screen.
     """
-    _run(["pmset", "displaysleepnow"])
+    _run(["pmset", "displaysleepnow"], timeout=_PMSET_TIMEOUT)
 
 
 @dataclass(frozen=True)

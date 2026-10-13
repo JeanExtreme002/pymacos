@@ -118,7 +118,8 @@ def run(
             raise
     finally:
         if text_file is not None:
-            os.unlink(text_file)
+            # A shortcut may have moved or deleted its input itself: that must not hide how the run went.
+            Path(text_file).unlink(missing_ok=True)
 
     if output is not None or not result:
         return None

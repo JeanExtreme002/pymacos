@@ -248,6 +248,25 @@ def test_uninstall_finds_the_leftovers_by_bundle_id_and_name(tmp_path):
     assert _leftovers(library, None, ["Nothing"]) == []
 
 
+def test_uninstall_claims_no_other_app_files_by_a_short_bundle_id(tmp_path):
+    from macos.apps import _leftovers, _owned_by
+
+    # An app calling itself "com.google" would otherwise take every Google app's files with it.
+    library = tmp_path / "Library"
+    for entry in (
+        "Preferences/com.google.plist",
+        "Preferences/com.google.Chrome.plist",
+        "Caches/com.google.Keystone",
+        "Group Containers/EQHXZ8M8AV.com.google",
+    ):
+        (library / entry).mkdir(parents=True)
+
+    assert _leftovers(library, "com.google", []) == [library / "Preferences/com.google.plist"]  # its own only
+    assert _owned_by("com.apple.dt.Xcode.plist", "com.apple.dt.Xcode")  # a full ID: its own and its helpers'
+    assert _owned_by("com.apple.dt.Xcode.helper", "com.apple.dt.Xcode")
+    assert not _owned_by("com.google.Chrome", "com.google")
+
+
 def test_uninstall_leaves_the_names_and_ids_of_other_apps_alone():
     from macos.apps import InstalledApp, _claims
 
@@ -406,7 +425,7 @@ def test_setting_a_default_app_reuses_one_completion_block(monkeypatch):
     assert len(made) == 1 and sent == [1, 1, 1]  # no block per call
 
     answer["now"] = False
-    with pytest.raises(macos.MacOSError, match="wasn't confirmed"):
+    with pytest.raises(macos.WaitTimeoutError, match="wasn't confirmed"):
         apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 5)
     made[0](None)  # the given-up call's late answer: retired, it answers nothing
     assert apps._default_answers == []
@@ -429,7 +448,7 @@ def test_waiting_for_another_default_app_change_counts_against_the_timeout(monke
 
     apps._default_call.acquire()  # another call, waiting for the user to confirm its change
     try:
-        with pytest.raises(macos.MacOSError, match="within 0.2 seconds"):
+        with pytest.raises(macos.WaitTimeoutError, match="within 0.2 seconds"):
             apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", 0.2)
     finally:
         apps._default_call.release()

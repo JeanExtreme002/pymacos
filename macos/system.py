@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 
 from . import _cf, _iokit, _libc, _objc, defaults
 from ._libc import pids as _pids
@@ -139,6 +139,9 @@ def _sysctl(name: str) -> bytes:
     return buffer.raw[: size.value]
 
 
+_QUICK = 30.0  # seconds for sw_vers and scutil, which answer at once unless wedged
+
+
 def _sysctl_str(name: str) -> str:
     return _sysctl(name).rstrip(b"\0").decode("utf-8", "replace")
 
@@ -151,7 +154,7 @@ def version() -> str:
 
 def build() -> str:
     """The macOS build number, e.g. ``'24G90'``."""
-    return _run(["sw_vers", "-buildVersion"]).strip()
+    return _run(["sw_vers", "-buildVersion"], timeout=_QUICK).strip()
 
 
 @lru_cache(maxsize=None)
@@ -190,7 +193,7 @@ def memory() -> int:
 
 def computer_name() -> str:
     """The name shown in System Settings › General › About (and on the network)."""
-    return _run(["scutil", "--get", "ComputerName"]).strip()
+    return _run(["scutil", "--get", "ComputerName"], timeout=_QUICK).strip()
 
 
 def uptime() -> timedelta:
@@ -610,7 +613,8 @@ def unmount_image(mount_point: Union[str, "os.PathLike[str]"], *, force: bool = 
     doesn't answer for a minute raises :class:`~macos.errors.CommandTimeoutError`. ``force=True``
     unmounts it even while a program has files open on it.
     """
-    _release(["hdiutil", "detach", str(Path(mount_point).expanduser()), *(["-force"] if force else [])])
+    # Absolute, so a mount point named like an option ("-force") is taken as the path it is.
+    _release(["hdiutil", "detach", str(Path(mount_point).expanduser().absolute()), *(["-force"] if force else [])])
 
 
 @dataclass(frozen=True)
@@ -897,17 +901,7 @@ _CLOCK_OPTIONS = {
 _CLOCK_DATES = ("auto", "always", "never")  # ShowDate's 0, 1 and 2
 
 
-_T = TypeVar("_T")
-
-
-def _as_int(value: object, fallback: _T) -> Union[int, _T]:
-    """``value`` as an int, or ``fallback`` when a hand-edited preference holds something else (text, a list...)."""
-    if isinstance(value, bool):
-        return int(value)
-    try:
-        return int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return fallback
+_as_int = defaults._as_int  # a hand-edited preference may hold anything
 
 
 def clock_format() -> Dict[str, object]:

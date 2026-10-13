@@ -28,7 +28,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from . import _cf, _events, _objc
 from ._system import framework, private_framework
@@ -446,22 +446,28 @@ def hold(*keys: str) -> Iterator[None]:
     _events.require_permission()
     held = _events.held()
     pressed: List[Tuple[int, int]] = []
+    failed = False
     try:
         for flag, code in presses:
             held.append(flag)
             pressed.append((flag, code))
             _events.post(_key_event(code, True, 0))
         yield
+    except BaseException:
+        failed = True
+        raise
     finally:
-        # Each key on its own: one that fails to come up must not leave the others down.
+        # Each key on its own: one that fails to come up must not leave the others down, nor
+        # a Ctrl-C in the pause after one release (as in press()). What went wrong in the block
+        # is what the caller sees; a failed release only when the block itself went well.
         failure: Optional[BaseException] = None
         for flag, code in reversed(pressed):
             held.remove(flag)
             try:
                 _events.post(_key_event(code, False, 0))
-            except Exception as error:
+            except BaseException as error:
                 failure = failure or error
-        if failure is not None:
+        if failure is not None and not failed:
             raise failure
 
 
@@ -517,18 +523,38 @@ def type(text: str, *, interval: float = 0.0) -> None:
     for piece in pieces:
         if piece in ("\n", "\t"):
             code = _KEYS["enter" if piece == "\n" else "tab"]
-            _events.post(_key_event(code, True, 0, held=False))
-            _events.post(_key_event(code, False, 0, held=False))
+            _tap_key(lambda down: _key_event(code, down, 0, held=False))
         else:
             encoded = piece.encode("utf-16-le")
             units = (ctypes.c_uint16 * (len(encoded) // 2)).from_buffer_copy(encoded)
-            # The text rides on the "a" key: with a held Cmd, it would be Cmd+A.
-            for down in (True, False):
+
+            def text_event(down: bool) -> int:
+                # The text rides on the "a" key: with a held Cmd, it would be Cmd+A.
                 event = _key_event(0, down, 0, held=False)
                 cg.CGEventKeyboardSetUnicodeString(event, len(units), units)
-                _events.post(event)
+                return event
+
+            _tap_key(text_event)
         if interval:
             time.sleep(interval)
+
+
+def _tap_key(event: Callable[[bool], int]) -> None:
+    """
+    Post ``event(True)`` then ``event(False)``: the key goes down, then up, even when interrupted between the two.
+
+    A Ctrl-C in the pause after the press would otherwise leave the key down for the app in
+    front. When the release fails too, the interruption is what's raised.
+    """
+    try:
+        _events.post(event(True))
+    except BaseException:
+        try:
+            _events.post(event(False))  # an extra release, if the press never went out, is harmless
+        except BaseException:
+            pass  # the interruption (or the press's failure) is what the caller needs to see
+        raise
+    _events.post(event(False))
 
 
 # Keyboard layouts (input sources), through Text Input Sources.
@@ -1074,7 +1100,7 @@ def fn_key_action() -> Optional[str]:
     """
     from . import defaults
 
-    code = int(defaults.read("com.apple.HIToolbox", "AppleFnUsageType", default=2))
+    code = defaults._as_int(defaults.read("com.apple.HIToolbox", "AppleFnUsageType", default=2), 2)
     return {value: name for name, value in _FN_ACTIONS.items()}.get(code, "emoji")
 
 
@@ -1143,8 +1169,11 @@ _MENU_SEPARATOR = " > "
 def _encode_shortcut(keys: str) -> str:
     """``"cmd+shift+e"`` as NSUserKeyEquivalents writes it: ``"@$e"``."""
     text = keys.strip().lower()
-    if text.endswith("+"):  # the "+" key itself: "cmd++"
-        key, rest = "+", text[:-1].rstrip("+")
+    # The "+" key itself is "+" or a last "++" ("cmd++"), as press() reads it: "cmd+shift+" has no key.
+    if text == "+":
+        key, rest = "+", ""
+    elif text.endswith("++"):
+        key, rest = "+", text[:-2]
     else:
         rest, _, key = text.rpartition("+")
     names = [part.strip() for part in rest.split("+") if part.strip()]

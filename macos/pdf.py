@@ -18,17 +18,21 @@ Preview.
 """
 
 import ctypes
+import html
 import math
 import operator
 import os
 import re
 import shutil
+import unicodedata
+import zlib
 from contextlib import contextmanager
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from urllib.parse import unquote
 
 from . import _cf, _files, _objc
 from ._objc import BOOL, NSUInteger
@@ -232,12 +236,22 @@ def _decrypted(document: int) -> int:
 
     PDFKit writes an unlocked document with the encryption it was opened
     with: the result of rotating or redacting an encrypted PDF would still
-    ask for its password. So its pages (annotations and form fields come
-    with them), its metadata and its bookmarks go into a new document, the
-    one every function here saves, the same way for all of them.
+    ask for its password. So it's rebuilt (see :func:`_rebuilt`), and the
+    new document is the one every function here saves, the same way for all
+    of them.
     """
     if not _objc.send(document, "isEncrypted", restype=BOOL):
         return document
+    return _rebuilt(document)
+
+
+def _rebuilt(document: int) -> int:
+    """
+    A new document (autoreleased) with ``document``'s pages (annotations and form fields come with
+    them), its metadata and its bookmarks: nothing else of the file it was read from.
+
+    Not its encryption, nor its XMP metadata packet, which PDFKit writes back unchanged otherwise.
+    """
     plain = _new_document()
     for number in range(1, _count(document) + 1):
         _append(plain, _page(document, number))
@@ -964,30 +978,34 @@ def form_fields(path: PathLike, *, password: Optional[str] = None) -> List[FormF
 
     Fill them with :func:`fill_form`.
     """
-    fields: Dict[str, FormField] = {}
     with _open(path, password) as document:
-        for number, widget in _widgets(document):
-            name = _objc.pystring(_objc.send(widget, "fieldName")) or ""
-            kind = _kind(widget)
-            if kind == "radio":
-                # The buttons of a group share its name: the field's value is the one chosen.
-                known = fields.get(name)
-                group = (known.options if known else ()) + (_on_value(widget),)
-                chosen = _on_value(widget) if _state(widget) else (known.value if known else None)
-                fields[name] = FormField(name, kind, chosen, group, known.page if known else number)
-                continue
-            if name in fields:
-                continue  # the same field shown again, on another page
-            if kind == "checkbox":
-                value: Union[str, bool, None] = _state(widget)
-            elif kind in ("button", "signature"):
-                value = None
-            else:
-                value = _objc.pystring(_objc.send(widget, "widgetStringValue")) or None
-            options: Tuple[str, ...] = ()
-            if kind == "choice":
-                options = tuple(_objc.pystring(item) or "" for item in _objc.nsarray(_objc.send(widget, "choices")))
-            fields[name] = FormField(name, kind, value, options, number)
+        return _fields(document)
+
+
+def _fields(document: int) -> List[FormField]:
+    fields: Dict[str, FormField] = {}
+    for number, widget in _widgets(document):
+        name = _objc.pystring(_objc.send(widget, "fieldName")) or ""
+        kind = _kind(widget)
+        if kind == "radio":
+            # The buttons of a group share its name: the field's value is the one chosen.
+            known = fields.get(name)
+            group = (known.options if known else ()) + (_on_value(widget),)
+            chosen = _on_value(widget) if _state(widget) else (known.value if known else None)
+            fields[name] = FormField(name, kind, chosen, group, known.page if known else number)
+            continue
+        if name in fields:
+            continue  # the same field shown again, on another page
+        if kind == "checkbox":
+            value: Union[str, bool, None] = _state(widget)
+        elif kind in ("button", "signature"):
+            value = None
+        else:
+            value = _objc.pystring(_objc.send(widget, "widgetStringValue")) or None
+        options: Tuple[str, ...] = ()
+        if kind == "choice":
+            options = tuple(_objc.pystring(item) or "" for item in _objc.nsarray(_objc.send(widget, "choices")))
+        fields[name] = FormField(name, kind, value, options, number)
     return list(fields.values())
 
 
@@ -1010,20 +1028,20 @@ def fill_form(
     :func:`form_fields` gives; an unknown one, or an option a field doesn't
     offer, raises :class:`ValueError` before anything is written.
     """
-    known = {field.name: field for field in form_fields(path, password=password)}
-    for name, value in values.items():
-        field = known.get(name)
-        if field is None:
-            raise ValueError("the form has no field named {!r}; see macos.pdf.form_fields()".format(name))
-        if field.kind == "checkbox" and not isinstance(value, bool):
-            raise ValueError("{!r} is a checkbox: pass True or False, not {!r}".format(name, value))
-        if field.kind in ("text", "choice", "radio") and not isinstance(value, str):
-            raise ValueError("{!r} takes text, not {!r}".format(name, value))
-        if field.kind in ("radio", "choice") and field.options and value not in field.options:
-            raise ValueError("{!r} offers {}, not {!r}".format(name, ", ".join(field.options), value))
-        if field.kind in ("button", "signature"):
-            raise ValueError("{!r} is a {} field: it can't be filled in".format(name, field.kind))
     with _open(path, password) as document:
+        known = {field.name: field for field in _fields(document)}  # the same document: read once
+        for name, value in values.items():
+            field = known.get(name)
+            if field is None:
+                raise ValueError("the form has no field named {!r}; see macos.pdf.form_fields()".format(name))
+            if field.kind == "checkbox" and not isinstance(value, bool):
+                raise ValueError("{!r} is a checkbox: pass True or False, not {!r}".format(name, value))
+            if field.kind in ("text", "choice", "radio") and not isinstance(value, str):
+                raise ValueError("{!r} takes text, not {!r}".format(name, value))
+            if field.kind in ("radio", "choice") and field.options and value not in field.options:
+                raise ValueError("{!r} offers {}, not {!r}".format(name, ", ".join(field.options), value))
+            if field.kind in ("button", "signature"):
+                raise ValueError("{!r} is a {} field: it can't be filled in".format(name, field.kind))
         for _, widget in _widgets(document):
             name = _objc.pystring(_objc.send(widget, "fieldName")) or ""
             if name not in values:
@@ -1174,7 +1192,8 @@ def sign(
     ``margin`` points from the edges) or the ``(x, y)`` of the image's
     bottom-left corner, in points from the page's bottom-left. ``width`` is
     in points (72 per inch); the height keeps the image's proportions. A PNG
-    with a transparent background looks best.
+    with a transparent background looks best; a photo is turned upright,
+    as its EXIF orientation says.
 
     It's an image, not a cryptographic signature. The pages are redrawn
     as they look, filled-in form fields included, so they're no longer
@@ -1189,6 +1208,8 @@ def sign(
     _check_position(corner)
     source, _ = _image_source(image)
     with _cf.owned(source):
+        # Turned upright, as from_images() does: a phone's photo of a signature is stored sideways.
+        orientation = images._describe(source).orientation
         picture = images._io().CGImageSourceCreateImageAtIndex(source, 0, None)
     if not picture:
         raise ValueError("{} is not an image macOS can read".format(image))
@@ -1202,7 +1223,9 @@ def sign(
             else:
                 target = count if page is None else page
                 _page(document, target)  # checks the number
-            aspect = graphics.CGImageGetHeight(picture) / max(graphics.CGImageGetWidth(picture), 1)
+            stored = float(graphics.CGImageGetWidth(picture)), float(graphics.CGImageGetHeight(picture))
+            upright = stored[::-1] if orientation in (5, 6, 7, 8) else stored
+            aspect = upright[1] / max(upright[0], 1)
 
             def draw(context: int, index: int, page_width: float, page_height: float) -> None:
                 _draw_page(graphics, context, _page(document, index + 1))
@@ -1212,7 +1235,12 @@ def sign(
                         x, y = _next_to(anchor, size.width, size.height, side, gap)
                     else:
                         x, y = _origin(corner, size.width, size.height, page_width, page_height, margin)
-                    graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(x, y), size), picture)
+                    graphics.CGContextSaveGState(context)
+                    graphics.CGContextTranslateCTM(context, x, y)
+                    graphics.CGContextScaleCTM(context, size.width / max(upright[0], 1), size.height / max(upright[1], 1))
+                    graphics.CGContextConcatCTM(context, _objc.CGAffineTransform(*_upright_transform(orientation, *stored)))
+                    graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(*stored)), picture)
+                    graphics.CGContextRestoreGState(context)
 
             return _write_pages(output, [_shown_size(_page(document, number)) for number in range(1, count + 1)], draw)
     finally:
@@ -1475,6 +1503,8 @@ def _pdf_objects() -> ctypes.CDLL:
     pointer = ctypes.c_void_p
     signatures = {
         "CGPDFPageGetDictionary": ((pointer,), pointer),
+        "CGPDFDocumentGetCatalog": ((pointer,), pointer),
+        "CGPDFDictionaryGetStream": ((pointer, ctypes.c_char_p, ctypes.POINTER(pointer)), ctypes.c_bool),
         "CGPDFDictionaryGetDictionary": ((pointer, ctypes.c_char_p, ctypes.POINTER(pointer)), ctypes.c_bool),
         "CGPDFDictionaryGetName": ((pointer, ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)), ctypes.c_bool),
         "CGPDFDictionaryGetInteger": ((pointer, ctypes.c_char_p, ctypes.POINTER(ctypes.c_long)), ctypes.c_bool),
@@ -1720,7 +1750,7 @@ def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.P
                 raise ValueError("the pattern {!r} matches an empty text".format(item.pattern))
             found.append((item.pattern, item))
         elif isinstance(item, str) and item.strip():
-            words = r"\s+".join(re.escape(word) for word in item.split())
+            words = r"\s+".join(_spellings(word) for word in item.split())
             # Whole words: no letter or digit right before or after, where the text itself starts or ends with one.
             before = r"(?<!\w)" if re.match(r"\w", item.strip()) else ""
             after = r"(?!\w)" if re.search(r"\w$", item.strip()) else ""
@@ -1733,6 +1763,40 @@ def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.P
         # Redaction.matches counts by target: the same one twice would count each match twice.
         raise ValueError("each target once: {} is given more than once".format(", ".join(map(repr, repeated))))
     return found
+
+
+def _spellings(word: str) -> str:
+    """
+    A pattern for ``word`` as given, and as its accents may be written otherwise: "é" as one letter,
+    or as "e" and a combining accent. PDFKit gives a page's text composed; what was typed, a title,
+    a file name, may not be.
+    """
+    forms = dict.fromkeys([word, unicodedata.normalize("NFC", word), unicodedata.normalize("NFD", word)])
+    if len(forms) == 1:
+        return re.escape(word)
+    return "(?:{})".format("|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True)))
+
+
+def _variants(text: str) -> List[str]:
+    """
+    ``text`` in the forms a target may hide in: as it is, composed, with ligatures and the like spelled
+    out (``"ﬁ"`` as ``"fi"``), and, for a link, with its percent-escapes decoded (``Ana%20Souza``).
+    Only searched, never written back: the text itself isn't changed.
+    """
+    forms = [text]
+    if "%" in text:
+        forms.append(unquote(text))
+    found = []
+    for form in forms:
+        found += [form, unicodedata.normalize("NFC", form), unicodedata.normalize("NFKC", form)]
+    return list(dict.fromkeys(found))
+
+
+def _occurrences(texts: Iterable[str], pattern: "re.Pattern[str]") -> int:
+    """How many times ``pattern`` is in ``texts``, each text counted in the form where it's found most: never twice."""
+    return sum(
+        max(sum(1 for match in pattern.finditer(form) if match.group()) for form in _variants(text)) for text in texts
+    )
 
 
 def _utf16_offsets(text: str) -> List[int]:
@@ -1807,24 +1871,92 @@ def _annotation_texts(annotation: int) -> List[str]:
     return list(dict.fromkeys(text for text in found if text))
 
 
+_MEDIA_BOX = 0  # kPDFDisplayBoxMediaBox: the whole page, what a crop box hides included
+
+
+def _uncropped_texts(document: int) -> Dict[int, str]:
+    """
+    The whole text of each cropped page, by page number: what's cropped away included.
+
+    PDFKit reads a page's text from its visible part only, whatever its crop box is set to by then:
+    the text cropped away, still in the file, would go unseen. So the cropped pages are copied
+    uncropped, written out in memory and read back.
+    """
+    cropped = []
+    for number in range(1, _count(document) + 1):
+        page = _page(document, number)
+        media, crop = (
+            _objc.send(page, "boundsForBox:", box, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+            for box in (_MEDIA_BOX, _CROP_BOX)
+        )
+        corners = [(box.origin.x, box.origin.y, box.size.width, box.size.height) for box in (media, crop)]
+        if corners[0] != corners[1]:
+            cropped.append((number, media))
+    if not cropped:
+        return {}
+    with _objc.autorelease_pool():
+        uncropped = _new_document()
+        for number, media in cropped:
+            _append(uncropped, _page(document, number))
+            copy = _objc.send(uncropped, "pageAtIndex:", _count(uncropped) - 1, argtypes=(NSUInteger,))
+            _objc.send(copy, "setBounds:forBox:", media, _CROP_BOX, argtypes=(_objc.CGRect, ctypes.c_long), restype=None)
+        data = _objc.send(uncropped, "dataRepresentation")
+        reread = _objc.send(_objc.send(_objc.cls("PDFDocument"), "alloc"), "initWithData:", data, argtypes=(_objc.id,))
+        if not reread:
+            raise MacOSError("could not read the text the PDF's crop boxes hide, so nothing was written")
+        _objc.send(reread, "autorelease")
+        return {
+            number: _objc.pystring(_objc.send(_page(reread, index), "string")) or ""
+            for index, (number, _) in enumerate(cropped, start=1)
+        }
+
+
+def _xmp(document: int) -> Optional[str]:
+    """The text of the document's XMP metadata packet (its XML tags left out), or ``None`` when it has none."""
+    graphics = _pdf_objects()
+    reference = _objc.send(document, "documentRef", restype=ctypes.c_void_p)
+    catalog = graphics.CGPDFDocumentGetCatalog(reference) if reference else None
+    stream = ctypes.c_void_p()
+    if not catalog or not graphics.CGPDFDictionaryGetStream(catalog, b"Metadata", ctypes.byref(stream)):
+        return None
+    with _cf.owned(graphics.CGPDFStreamCopyData(stream, ctypes.byref(ctypes.c_int()))) as data:
+        packet = _cf.to_bytes(data).decode("utf-8", "replace")
+
+    def values(tag: "re.Match[str]") -> str:
+        # Tag and attribute names aren't what the document says ("creator" in <dc:creator>), nor are the
+        # namespaces; the attributes' values are (XMP writes simple properties as pdf:Producer="...").
+        found = re.findall(r"([\w:.-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag.group())
+        return " " + " ".join(double or single for name, double, single in found if not name.startswith("xmlns")) + " "
+
+    return html.unescape(re.sub(r"<[^>]*>", values, packet))
+
+
 def _redactions(
-    page: int, number: int, patterns: Sequence[Tuple[str, "re.Pattern[str]"]], counts: List[int]
+    page: int,
+    number: int,
+    patterns: Sequence[Tuple[str, "re.Pattern[str]"]],
+    counts: List[int],
+    whole: Optional[str] = None,
 ) -> Tuple[int, List[Tuple[float, ...]]]:
     """
     How many matches ``page`` holds, and the boxes to black out, as it's seen: its matching text, and the
     annotations that hold a match.
 
     A match may have no box (text drawn hidden or at zero size): it still counts, so its page is redrawn
-    and the text goes. One whose place PDFKit can't tell raises: it would stay on show.
+    and the text goes. One whose place PDFKit can't tell raises: it would stay on show. ``whole`` is the
+    text of the whole page when it's cropped (see :func:`_uncropped_texts`): a match only in the part
+    cropped away has nothing to black out, but it counts too, so the page is redrawn and that part goes.
     """
     boxes = []
     found = 0
     content = _objc.pystring(_objc.send(page, "string")) or ""
     offsets = _utf16_offsets(content)  # once per page: per match, it would grow with the square of the page
     for index, (label, pattern) in enumerate(patterns):
+        shown = 0
         for match in pattern.finditer(content):
             if not match.group():
                 continue
+            shown += 1
             start, end = offsets[match.start()], offsets[match.end()]
             selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
             if not selection:
@@ -1838,12 +1970,17 @@ def _redactions(
                 box = _objc.send(line, "boundsForPage:", page, argtypes=(_objc.id,), restype=_objc.CGRect)
                 if box.size.width > 0 and box.size.height > 0:
                     boxes.append(_seen_box(page, box))
+        if whole is not None:
+            hidden = sum(1 for match in pattern.finditer(whole) if match.group()) - shown
+            if hidden > 0:
+                counts[index] += hidden
+                found += hidden
     for annotation in _objc.nsarray(_objc.send(page, "annotations")):
         # Each on its own: joined, "Jane" in one and "Doe" in the other would make a match that isn't there.
         held = _annotation_texts(annotation)
         hits = 0
         for index, (_, pattern) in enumerate(patterns):
-            times = sum(1 for text in held for match in pattern.finditer(text) if match.group())
+            times = _occurrences(held, pattern)
             counts[index] += times
             hits += times
         if hits:
@@ -1970,13 +2107,207 @@ def _scrub_metadata(document: int, patterns: Sequence[Tuple[str, "re.Pattern[str
 
 
 def _scrub_outline(outline: int, patterns: Sequence[Tuple[str, "re.Pattern[str]"]], counts: List[int]) -> None:
+    """
+    Block out the matches in the bookmarks' titles, and drop the links (a web address, another file)
+    of those whose link holds one: an address with a target blocked out wouldn't lead anywhere.
+    """
     for index in range(int(_objc.send(outline, "numberOfChildren", restype=NSUInteger))):
         child = _objc.send(outline, "childAtIndex:", index, argtypes=(NSUInteger,))
         label = _objc.pystring(_objc.send(child, "label")) or ""
         scrubbed = _scrub(label, patterns, counts)
         if scrubbed != label:
             _objc.send(child, "setLabel:", _objc.nsstring(scrubbed), argtypes=(_objc.id,), restype=None)
+        held = _texts_of(_objc.send(child, "action"))
+        hits = 0
+        for number, (_, pattern) in enumerate(patterns):
+            times = _occurrences(held, pattern)
+            counts[number] += times
+            hits += times
+        if hits:
+            _objc.send(child, "setAction:", None, argtypes=(_objc.id,), restype=None)
         _scrub_outline(child, patterns, counts)
+
+
+_STREAM_START = re.compile(rb"\bstream\r?\n")
+# Streams with no text to read: pictures, font programs, color profiles (/N, their number of components),
+# the cross-reference table, files attached, and the XMP packet (read on its own, by _xmp).
+_UNREADABLE = re.compile(
+    rb"/Subtype\s*/(?:Image|Type1C|CIDFontType0C|OpenType|XML)\b|/Type\s*/(?:XRef|Metadata|EmbeddedFile)\b"
+    rb"|/Length[123]\b|/N\s+\d"
+)
+_STRING_START = re.compile(rb"<<|>>|[(\[\]<]")
+_WRITTEN_BY_PDFKIT = re.compile(rb"/(?:Producer|CreationDate|ModDate)\s*$")
+_ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}
+
+
+def _literal(data: bytes, start: int) -> Tuple[bytes, int]:
+    """The bytes of the ``( ... )`` string at ``start``, escapes read, and where it ends."""
+    out = bytearray()
+    depth = 0
+    position = start
+    special = re.compile(rb"[()\\]")
+    while True:
+        found = special.search(data, position)
+        if not found:
+            out += data[position:]
+            return bytes(out), len(data)
+        out += data[position:found.start()]
+        character = data[found.start():found.start() + 1]
+        position = found.end()
+        if character == b"\\":
+            following = data[position:position + 1]
+            octal = re.match(rb"[0-7]{1,3}", data[position:position + 3])
+            if octal:
+                out.append(int(octal.group(), 8) & 0xFF)
+                position += len(octal.group())
+            elif following in _ESCAPES:
+                out += _ESCAPES[following]
+                position += 1
+            elif following in (b"\r", b"\n"):  # a line continued
+                position += 2 if data[position:position + 2] == b"\r\n" else 1
+            else:
+                out += following
+                position += 1
+            continue
+        if character == b"(":
+            depth += 1
+            if depth == 1:
+                continue
+        else:
+            depth -= 1
+            if depth == 0:
+                return bytes(out), position
+        out += character
+
+
+def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
+    """
+    The strings in PDF source, each on its own, and those of an array joined. Not those PDFKit writes
+    itself as it saves: the ``/Producer``, and the dates, which aren't text.
+
+    In a page's ``drawing``, an array is a ``TJ``: one line of text cut into pieces to space them,
+    down to single letters ("DO" of "DOES"). Only the line it makes is read there, never its pieces.
+    """
+    groups: List[List[str]] = []
+    position = 0
+    while True:
+        found = _STRING_START.search(data, position)
+        if not found:
+            return
+        token = found.group()
+        position = found.end()
+        if token in (b"<<", b">>"):
+            continue
+        if token == b"[":
+            groups.append([])
+            continue
+        if token == b"]":
+            if groups:
+                parts = groups.pop()
+                if len(parts) > 1:
+                    yield "".join(parts)
+            continue
+        if token == b"(":
+            raw, position = _literal(data, found.start())
+        else:
+            end = data.find(b">", position)
+            digits = re.sub(rb"\s", b"", data[position:end if end >= 0 else len(data)])
+            if end < 0 or not re.fullmatch(rb"[0-9A-Fa-f]*", digits):
+                continue
+            raw, position = bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii")), end + 1
+        if _WRITTEN_BY_PDFKIT.search(data[max(0, found.start() - 32):found.start()]):
+            continue
+        if raw.startswith(b"\xfe\xff"):
+            text = raw[2:].decode("utf-16-be", "replace")
+        elif raw.startswith(b"\xef\xbb\xbf"):
+            text = raw[3:].decode("utf-8", "replace")
+        else:
+            text = raw.decode("latin-1")
+        if groups:
+            groups[-1].append(text)
+            if drawing:
+                continue
+        yield text
+
+
+def _file_strings(data: bytes) -> Iterator[str]:
+    """
+    Every string a PDF file holds, as written: in its objects, and in the streams that can hold text
+    (the pages' drawing, inflated when compressed), not in its pictures or fonts.
+    """
+    outside = []
+    position = 0
+    while True:
+        start = _STREAM_START.search(data, position)
+        if not start:
+            outside.append(data[position:])
+            break
+        header = data.rfind(b" obj", position, start.start())
+        dictionary = data[header if header >= 0 else position:start.start()]
+        outside.append(data[position:start.start()])
+        end = data.find(b"endstream", start.end())
+        body = data[start.end():end if end >= 0 else len(data)]
+        position = len(data) if end < 0 else end + len(b"endstream")
+        if _UNREADABLE.search(dictionary):
+            continue
+        filters = re.findall(rb"/(\w+Decode)\b", dictionary)
+        if filters == [b"FlateDecode"]:
+            try:
+                body = zlib.decompress(body)
+            except zlib.error:
+                continue
+        elif filters:
+            continue  # encoded some other way: nothing that holds text in a PDF PDFKit writes
+        yield from _strings(body, drawing=True)
+    yield from _strings(b"".join(outside))
+
+
+def _leftovers(path: Path, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]) -> Dict[str, str]:
+    """
+    The targets still in the PDF at ``path``, with where one was seen: on a page (in its text, cropped
+    away or not, or an annotation), in the metadata or the bookmarks, or anywhere in the file's source.
+
+    What :func:`redact` checks its output with before it's put in place: a way a target could survive
+    that the redaction itself missed shows up here.
+    """
+    left: Dict[str, str] = {}
+
+    def look(where: str, texts: Sequence[str]) -> None:
+        for label, pattern in patterns:
+            if label not in left and _occurrences(texts, pattern):
+                left[label] = where
+
+    with _open(path) as document:
+        whole = _uncropped_texts(document)
+        for number in range(1, _count(document) + 1):
+            with _objc.autorelease_pool():
+                page = _page(document, number)
+                texts = [_objc.pystring(_objc.send(page, "string")) or ""] + ([whole[number]] if number in whole else [])
+                for annotation in _objc.nsarray(_objc.send(page, "annotations")):
+                    texts += _annotation_texts(annotation)
+                look("page {}".format(number), texts)
+        attributes = _objc.send(document, "documentAttributes")
+        described = []
+        for key in _objc.nsarray(_objc.send(attributes, "allKeys") if attributes else None):
+            if _objc.pystring(key) != "Producer":  # PDFKit's own name, written as the file is saved
+                described += _texts_of(_objc.send(attributes, "objectForKey:", key, argtypes=(_objc.id,)))
+        packet = _xmp(document)
+        look("the metadata", described + ([packet] if packet else []))
+        marks: List[str] = []
+
+        def walk(outline: int) -> None:
+            for index in range(int(_objc.send(outline, "numberOfChildren", restype=NSUInteger))):
+                child = _objc.send(outline, "childAtIndex:", index, argtypes=(NSUInteger,))
+                marks.append(_objc.pystring(_objc.send(child, "label")) or "")
+                marks.extend(_texts_of(_objc.send(child, "action")))
+                walk(child)
+
+        root = _objc.send(document, "outlineRoot")
+        if root:
+            walk(root)
+        look("the bookmarks", marks)
+    look("the file's source", list(_file_strings(path.read_bytes())))
+    return left
 
 
 @dataclass(frozen=True)
@@ -2028,13 +2359,17 @@ def redact(
     link's address): their page is flattened, with a box over them. And
     the matches in the
     title, author, subject, keywords, creator and bookmarks, which become
-    ``█``.
+    ``█``. A bookmark whose link holds a match loses the link; an XMP
+    metadata packet that holds one is left out; text a page's crop hides
+    that holds one gets its page redrawn, without the hidden part.
 
     It returns a :class:`Redaction`: how many times each target was found,
     and on which pages. Raises :class:`ValueError`, writing nothing, when
     a target isn't found at all: a redaction that missed would look like
     it worked; and :class:`~macos.MacOSError`, also writing nothing, for a
-    match PDFKit finds in the text but can't place on the page.
+    match PDFKit finds in the text but can't place on the page, and for a
+    target still found in the result, read back (its source too) before it
+    takes the place of ``output``.
 
     It finds only the text a PDF holds as text, so **look over the result
     before sharing it**: text in pictures (a scan, a screenshot, a logo),
@@ -2050,10 +2385,11 @@ def redact(
         counts = [0] * len(patterns)
         flatten = {}
         per_page = {}
+        whole = _uncropped_texts(document)
         for number in range(1, _count(document) + 1):
             # A pool per page: searching one makes strings and selections, all done with once it's searched.
             with _objc.autorelease_pool():
-                found, boxes = _redactions(_page(document, number), number, patterns, counts)
+                found, boxes = _redactions(_page(document, number), number, patterns, counts, whole.get(number))
             if found:  # even without a box to draw: redrawing the page is what removes the text
                 flatten[number] = boxes
                 per_page[number] = found
@@ -2062,17 +2398,40 @@ def redact(
         root = _objc.send(document, "outlineRoot")
         if root:
             _scrub_outline(root, patterns, counts)
+        packet = _xmp(document)
+        in_packet = [_occurrences([packet], pattern) if packet else 0 for _, pattern in patterns]
+        counts = [count + extra for count, extra in zip(counts, in_packet)]
         missing = [repr(label) for (label, _), count in zip(patterns, counts) if not count]
         if missing:
             raise ValueError(
                 "{} isn't in the PDF, so nothing was written: check the spelling, "
                 "or run macos.pdf.ocr() first on a scan".format(", ".join(missing))
             )
+        if any(in_packet):
+            # PDFKit has no way to change the XMP packet, and writes it back as it was: a new document,
+            # with the same pages, metadata and bookmarks, has none.
+            document = _rebuilt(document)
         for number, boxes in flatten.items():
             # A pool per page: drawing one leaves autoreleased objects behind, which would pile up until the
             # end of a long PDF.
             with _objc.autorelease_pool():
                 _flatten(document, number, boxes)
-        saved = _save(document, output)
+        plain = _decrypted(document)
+
+        def write(name: str) -> bool:
+            if not _write_pdf(plain, name):
+                return False
+            # Checked as written, before it takes the output's place: a target that got through is a
+            # failure, not a result to look over.
+            left = _leftovers(Path(name), patterns)
+            if left:
+                raise MacOSError(
+                    "the redacted PDF would still hold {}, so nothing was written".format(
+                        ", ".join("{!r} (in {})".format(label, where) for label, where in left.items())
+                    )
+                )
+            return True
+
+        saved = _files.write_atomically(output, write)
     matches = {label: count for (label, _), count in zip(patterns, counts)}
     return Redaction(path=saved, matches=matches, pages=per_page)

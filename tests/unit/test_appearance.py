@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.appearance`. They run on any platform."""
 
+import contextlib
+
 import pytest
 
 import macos
@@ -36,3 +38,16 @@ def test_appearance_argument_checks():
         macos.appearance.wait_for_change(interval=0)
     with pytest.raises(ValueError, match="'dark' or 'light'"):
         macos.appearance.set_mode("blue")
+
+
+def test_accent_color_refuses_a_color_macos_did_not_convert(monkeypatch):
+    from macos import appearance
+
+    monkeypatch.setattr(appearance, "framework", lambda name: None)
+    monkeypatch.setattr(appearance._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(appearance._objc, "autorelease_pool", contextlib.nullcontext)
+    # The accent color, then the sRGB space, then nothing: the conversion failed.
+    answers = iter([10, 20, None])
+    monkeypatch.setattr(appearance._objc, "send", lambda *args, **kwargs: next(answers))
+    with pytest.raises(macos.MacOSError, match="accent color"):
+        appearance.accent_color()  # not '#000000'

@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import _cf, _libc, _objc, _sc
 from ._libc import IfAddrs as _IfAddrs
 from ._system import framework, require_macos, run as _run
-from .errors import CommandError, MacOSError, NotSupportedError
+from .errors import CommandError, MacOSError, NotSupportedError, WaitTimeoutError
 
 __all__ = [
     "is_online",
@@ -590,7 +590,7 @@ def _wait_vpn(vpn: VPN, wanted: str, timeout: float) -> None:
         else:
             moved = True
         if time.monotonic() >= deadline:
-            raise MacOSError("the VPN {!r} isn't {} after {} seconds: it's {}".format(vpn.name, wanted, timeout, status))
+            raise WaitTimeoutError("the VPN {!r} isn't {} after {} seconds: it's {}".format(vpn.name, wanted, timeout, status))
         time.sleep(0.25)
 
 
@@ -599,7 +599,8 @@ def connect_vpn(name: str, *, wait: bool = True, timeout: float = 30.0) -> None:
     Connect the VPN ``name``, as set up in System Settings › VPN.
 
     Waits until it's connected (up to ``timeout`` seconds), and raises
-    :class:`~macos.MacOSError` if it fails, unless ``wait=False``. It uses the
+    :class:`~macos.MacOSError` if it fails, unless ``wait=False``: a
+    :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) when time runs out. It uses the
     password saved with it: a VPN that asks each time may show its prompt.
     Nothing to do when it's already connected. A ``scutil`` that doesn't
     answer within 30 seconds raises :class:`~macos.errors.CommandTimeoutError`.
