@@ -22,7 +22,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from ._system import require_macos, run_bytes
+from ._system import executable, require_macos, run_bytes
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
 __all__ = ["search", "search_name", "metadata"]
@@ -71,7 +71,7 @@ def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = No
     command = ["mdfind", "-0", *args]
     errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")  # as run() reads output
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen(command, executable=executable(command[0]), stdout=subprocess.PIPE, stderr=errors)
     except FileNotFoundError:
         errors.close()
         raise NotSupportedError("the 'mdfind' command was not found on this system") from None

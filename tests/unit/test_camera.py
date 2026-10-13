@@ -182,3 +182,15 @@ def test_record_raises_the_ctrl_c_once_the_movie_is_in_place(monkeypatch, tmp_pa
     with pytest.raises(KeyboardInterrupt):
         macos.camera.record(target, 60)
     assert target.read_bytes() == b"movie so far" and [path.name for path in tmp_path.iterdir()] == ["clip.mov"]
+
+
+def test_a_device_that_cant_be_used_says_so_even_without_a_reason(monkeypatch):
+    from macos import _objc
+
+    # deviceInputWithDevice:error: fails without setting the error: the message has no "None" in it.
+    monkeypatch.setattr(_objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_objc, "send", lambda receiver, selector, *args, **kwargs: 0)
+    monkeypatch.setattr(_objc, "pystring", lambda ref: "FaceTime HD Camera")
+
+    with pytest.raises(macos.MacOSError, match=r"^could not use FaceTime HD Camera: unknown error$"):
+        macos.camera._input(7)

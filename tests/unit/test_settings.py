@@ -256,7 +256,8 @@ def test_more_keyboard_settings(prefs):
 def test_remap(monkeypatch):
     state = {"mappings": []}
 
-    def hidutil(args):
+    def hidutil(args, timeout=None):
+        assert timeout  # a wedged HID system doesn't hang the caller
         if args[2] == "--set":
             import json
 
@@ -556,12 +557,12 @@ def test_trackpad_click_pressure_and_gestures(prefs):
 def test_mouse_acceleration(prefs, monkeypatch):
     store, _ = prefs
     commands = []
-    monkeypatch.setattr(_system, "run", lambda args: commands.append(args) or "")
+    monkeypatch.setattr(_system, "run", lambda args, timeout=None: commands.append((args, bool(timeout))) or "")
 
     assert macos.mouse.acceleration()
     macos.mouse.set_acceleration(False)
     assert store[(G, "com.apple.mouse.linear", False)] is True and not macos.mouse.acceleration()
-    assert commands == [["hidutil", "property", "--set", '{"HIDUseLinearScalingMouseAcceleration": 1}']]
+    assert commands == [(["hidutil", "property", "--set", '{"HIDUseLinearScalingMouseAcceleration": 1}'], True)]
 
 
 def test_dock_switches_and_hot_corner_modifiers(prefs):

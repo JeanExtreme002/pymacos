@@ -1030,10 +1030,13 @@ def _hid_code(key: str) -> int:
     return _HID_CODES[name]
 
 
+_HIDUTIL_TIMEOUT = 30.0  # seconds: hidutil answers at once, unless the HID system is wedged
+
+
 def _mappings() -> Dict[int, int]:
     from ._system import run
 
-    output = run(["hidutil", "property", "--get", "UserKeyMapping"])
+    output = run(["hidutil", "property", "--get", "UserKeyMapping"], timeout=_HIDUTIL_TIMEOUT)
     found = {}
     for block in re.findall(r"\{(.*?)\}", output, re.S):
         source = re.search(r"HIDKeyboardModifierMappingSrc\s*=\s*(\d+)", block)
@@ -1049,7 +1052,7 @@ def _set_mappings(mappings: Dict[int, int]) -> None:
     pairs = [
         {"HIDKeyboardModifierMappingSrc": source, "HIDKeyboardModifierMappingDst": target} for source, target in mappings.items()
     ]
-    run(["hidutil", "property", "--set", json.dumps({"UserKeyMapping": pairs})])
+    run(["hidutil", "property", "--set", json.dumps({"UserKeyMapping": pairs})], timeout=_HIDUTIL_TIMEOUT)
 
 
 def remappings() -> Dict[str, str]:

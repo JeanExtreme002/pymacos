@@ -1122,7 +1122,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             argtypes=(_objc.id, ctypes.c_void_p),
         )
         if not request:
-            raise MacOSError("the sound classifier isn't available: {}".format(_objc.error_message(error)))
+            raise MacOSError("the sound classifier isn't available: {}".format(_objc.error_message(error) or "unknown error"))
         _objc.send(request, "autorelease")
         # It listens in 3-second windows, and says nothing about a shorter
         # file: use the file's own length then (it accepts 0.5 to 15 s).
@@ -1136,7 +1136,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             argtypes=(_objc.id, ctypes.c_void_p),
         )
         if not analyzer:
-            raise ValueError("{} has no sound macOS can read: {}".format(source, _objc.error_message(error)))
+            raise ValueError("{} has no sound macOS can read: {}".format(source, _objc.error_message(error) or "unknown format"))
         _objc.send(analyzer, "autorelease")
         observer = _objc.new("PymacosSoundObserver")
         if not _objc.send(
@@ -1148,7 +1148,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             argtypes=(_objc.id, _objc.id, ctypes.c_void_p),
             restype=_objc.BOOL,
         ):
-            raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error)))
+            raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error) or "unknown error"))
         try:
             _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
             heard = _heard.get(observer, {"labels": {}})

@@ -1,5 +1,6 @@
 """Unit tests for the package itself: lazy submodules, the shortcuts, and the deprecation helper."""
 
+import os
 import subprocess
 import sys
 import warnings
@@ -63,6 +64,30 @@ def test_applescript_is_stopped_when_osascript_never_answers(monkeypatch):
         _system.applescript("Finder", 'tell application "Finder" to get selection', timeout=5)
     # Longer than an Apple event's own two minutes: a slow app still gets its own errAETimeout first.
     assert seen == [_system.APPLESCRIPT_TIMEOUT, 5] and _system.APPLESCRIPT_TIMEOUT > 120
+
+
+def _plant(folder, name, marker):
+    """Put a program called ``name`` in ``folder`` that leaves ``marker`` behind when it runs."""
+    program = folder / name
+    program.write_text("#!/bin/sh\ntouch '{}'\n".format(marker))
+    program.chmod(0o755)
+
+
+def test_commands_are_the_systems_own_never_a_namesake_along_path(tmp_path, monkeypatch):
+    marker = tmp_path / "ran"
+    _plant(tmp_path, "true", marker)
+    _plant(tmp_path, "pymacos-no-such-command", marker)
+    monkeypatch.setenv("PATH", "{}:{}".format(tmp_path, os.environ.get("PATH", "")))
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+
+    assert _system.executable("true") in ("/usr/bin/true", "/bin/true")
+    _system.run(["true"])
+    # One the system doesn't have is missing, as it was from PATH, rather than the namesake run.
+    with pytest.raises(macos.NotSupportedError, match="'pymacos-no-such-command' command was not found"):
+        _system.run(["pymacos-no-such-command"])
+    assert not marker.exists()
+    # A path is run as given.
+    assert _system.executable(str(tmp_path / "true")) == str(tmp_path / "true")
 
 
 def test_command_timeout_error_survives_pickling():

@@ -31,6 +31,7 @@ from ._libc import pids as _pids
 from ._system import (
     LAUNCHCTL_TIMEOUT,
     PROFILER_TIMEOUT,
+    executable,
     framework,
     launchd_disabled,
     launchd_user_domain,
@@ -2232,7 +2233,13 @@ def logs(
     with tempfile.TemporaryFile() as errors_file:
         # Bytes that aren't UTF-8 become U+FFFD, as with run(): one odd message mustn't end the read.
         reader = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=errors_file, text=True, encoding="utf-8", errors="replace"
+            args,
+            executable=executable(args[0]),
+            stdout=subprocess.PIPE,
+            stderr=errors_file,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         assert reader.stdout is not None
         stopped = False  # by us, at the limit: not a failure

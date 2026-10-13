@@ -380,4 +380,5 @@ def set_acceleration(on: bool = True) -> None:
 
     defaults.write(defaults.GLOBAL, "com.apple.mouse.linear", not on)
     # The saved setting is read at login: tell the mouse driver now too.
-    _run(["hidutil", "property", "--set", json.dumps({"HIDUseLinearScalingMouseAcceleration": 0 if on else 1})])
+    setting = json.dumps({"HIDUseLinearScalingMouseAcceleration": 0 if on else 1})
+    _run(["hidutil", "property", "--set", setting], timeout=30)  # it answers at once, unless the HID system is wedged

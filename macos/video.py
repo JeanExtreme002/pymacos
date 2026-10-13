@@ -877,7 +877,7 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
                 argtypes=(_objc.id, _objc.id, ctypes.c_void_p),
             )
             if not writer:
-                raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error)))
+                raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error) or "unknown error"))
             number = lambda value: _objc.send(  # noqa: E731
                 _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
             )

@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, framework, require_macos, restart_process, run as _run
+from ._system import applescript, executable, framework, require_macos, restart_process, run as _run
 from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
 
 __all__ = [
@@ -915,6 +915,7 @@ def quick_look(path: PathLike) -> None:
     _previews.append(
         subprocess.Popen(
             ["qlmanage", "-p", str(source)],
+            executable=executable("qlmanage"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # outlives the script, as a preview opened from Finder does

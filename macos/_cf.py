@@ -21,6 +21,11 @@ from .errors import MacOSError
 CFTypeRef = ctypes.c_void_p
 CFIndex = ctypes.c_long
 
+
+class CFRange(ctypes.Structure):
+    _fields_ = [("location", CFIndex), ("length", CFIndex)]
+
+
 kCFStringEncodingUTF8 = 0x08000100
 
 
@@ -41,8 +46,10 @@ def lib() -> ctypes.CDLL:
     cf.CFStringGetLength.restype = CFIndex
     cf.CFStringGetMaximumSizeForEncoding.argtypes = (CFIndex, ctypes.c_uint32)
     cf.CFStringGetMaximumSizeForEncoding.restype = CFIndex
-    cf.CFStringGetCString.argtypes = (CFTypeRef, ctypes.c_char_p, CFIndex, ctypes.c_uint32)
-    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFStringGetBytes.argtypes = (
+        CFTypeRef, CFRange, ctypes.c_uint32, ctypes.c_uint8, ctypes.c_bool, ctypes.c_char_p, CFIndex, ctypes.POINTER(CFIndex)
+    )
+    cf.CFStringGetBytes.restype = CFIndex
 
     cf.CFDataCreate.argtypes = (CFTypeRef, ctypes.c_char_p, CFIndex)
     cf.CFDataCreate.restype = CFTypeRef
@@ -179,15 +186,18 @@ def is_type(ref: Optional[int], type_id: int) -> bool:
 
 
 def to_str(ref: Optional[int]) -> Optional[str]:
-    """Copy a ``CFString`` into a Python string (``None`` for anything else)."""
+    """Copy a ``CFString`` into a Python string (``None`` for anything else), NUL characters included."""
     if not is_type(ref, lib().CFStringGetTypeID()):
         return None
     cf = lib()
-    size = cf.CFStringGetMaximumSizeForEncoding(cf.CFStringGetLength(ref), kCFStringEncodingUTF8) + 1
+    length = cf.CFStringGetLength(ref)
+    size = cf.CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8)
     buffer = ctypes.create_string_buffer(size)
-    if not cf.CFStringGetCString(ref, buffer, size, kCFStringEncodingUTF8):
-        return None
-    return buffer.value.decode("utf-8")
+    used = CFIndex()
+    # The bytes and their count, not a C string: one read up to the first NUL would cut the text there.
+    if cf.CFStringGetBytes(ref, CFRange(0, length), kCFStringEncodingUTF8, 0, False, buffer, size, ctypes.byref(used)) != length:
+        return None  # a character UTF-8 can't hold (a lone surrogate)
+    return buffer.raw[: used.value].decode("utf-8")
 
 
 def data(payload: bytes) -> int:

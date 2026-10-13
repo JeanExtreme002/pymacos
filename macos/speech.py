@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
-from ._system import require_macos, run as _run
+from ._system import executable, require_macos, run as _run
 from .errors import NotSupportedError
 
 __all__ = ["say", "voices", "Voice"]
@@ -81,7 +81,9 @@ def say(
 
     require_macos()
     try:
-        process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            args, executable=executable(args[0]), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
     except FileNotFoundError:
         raise NotSupportedError("the 'say' command was not found on this system") from None
 
@@ -103,7 +105,7 @@ def say(
 def voices() -> List[Voice]:
     """Return the voices installed on this Mac."""
     found = []
-    for line in _run(["say", "-v", "?"]).splitlines():
+    for line in _run(["say", "-v", "?"], timeout=30).splitlines():  # it lists them at once, unless speech is wedged
         # Format: "<name, may contain spaces> <locale>    # <sample sentence>"
         head, _, sample = line.partition("#")
         parts = head.split()
