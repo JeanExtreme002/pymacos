@@ -475,12 +475,12 @@ def test_redact_reads_the_whole_annotation_dictionary(tmp_path):
     assert b"Ask Ana" not in _raw_text(done.path) and b"Souza" not in _raw_text(done.path)
 
 
-def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None):
+def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=None):
     """A one-page PDF, written by hand, with an XMP packet naming its creator and a bookmark leading to a link."""
     drawing = "BT /F1 18 Tf 72 700 Td ({}) Tj ET".format(page_text)
     objects = [
         "<< /Type /Catalog /Pages 2 0 R{}{} >>".format(
-            " /Metadata 6 0 R" if xmp_creator else "", " /Outlines 7 0 R" if bookmark_link else ""
+            " /Metadata 6 0 R" if xmp_creator or xmp_date else "", " /Outlines 7 0 R" if bookmark_link else ""
         ),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
@@ -489,9 +489,10 @@ def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None):
     ]
     xmp = (
         '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
-        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">'
-        "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta>"
-    ).format(xmp_creator or "")
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
+        "<dc:creator><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></dc:creator><xmp:CreateDate>{}</xmp:CreateDate>"
+        "</rdf:Description></rdf:RDF></x:xmpmeta>"
+    ).format(xmp_creator or "", xmp_date or "")
     objects.append("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{}\nendstream".format(len(xmp), xmp))
     objects.append("<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>")
     objects.append("<< /Title (Profile) /Parent 7 0 R /A << /S /URI /URI ({}) >> >>".format(bookmark_link or ""))
@@ -514,11 +515,18 @@ def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
     assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}  # the packet goes, but only the page counts
     assert b"Souza" not in _raw_text(done.path)
 
-    # Found only in the packet (here, as a date macOS could have written there itself), a target isn't found.
+    # Named there alone (as PDF 2.0 would have it), a target is found, and the packet goes.
+    alone = tmp_path / "alone.pdf"
+    alone.write_bytes(_pdf_with_extras("Contract", xmp_creator="Ana Souza"))
+    done = macos.pdf.redact(alone, "Ana Souza", tmp_path / "alone-out.pdf")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {}
+    assert b"Souza" not in _raw_text(done.path)
+
+    # Found only in the packet's dates and identifiers, which macOS writes itself, a target isn't found.
     import re
 
     dated = tmp_path / "dated.pdf"
-    dated.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="2026-10-13"))
+    dated.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_date="2026-10-13T09:00:00Z"))
     with pytest.raises(ValueError, match="isn't in the PDF"):
         macos.pdf.redact(dated, re.compile(r"\d{4}-\d{2}-\d{2}"), tmp_path / "dated-out.pdf")
     assert not (tmp_path / "dated-out.pdf").exists()

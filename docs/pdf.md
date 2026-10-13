@@ -319,9 +319,10 @@ What else in the file holds a match goes too:
 - a bookmark's link (a web address, another file) that holds a match: the
   bookmark stays, without its link;
 - the XMP metadata packet some apps add beside the title and author: when it
-  holds a match, it's left out of the result. It doesn't count in the
-  {class}`~macos.pdf.Redaction`: it mostly repeats the title and author, and
-  holds dates and identifiers macOS wrote itself;
+  holds a match, it's left out of the result. It counts in the
+  {class}`~macos.pdf.Redaction` only for a target found nowhere else (it
+  mostly repeats the title and author), and never by the dates and
+  identifiers apps write there themselves;
 - text a page's crop hides: when it holds a match, the page is redrawn too,
   and the hidden part goes.
 
@@ -334,10 +335,11 @@ When a target isn't found at all, {func}`~macos.pdf.redact` raises
 like it worked. A match found in the text but that can't be placed on the
 page raises {class}`~macos.MacOSError`, writing nothing too.
 
-Before the result takes the place of `output`, it's read back, the file's
-source included, and searched for every target once more: one still in it
-anywhere raises {class}`~macos.MacOSError`, saying where it was seen, and
-nothing is written.
+Before the result takes the place of `output`, it's read back and searched
+for every target once more: the pages' text (cropped away or not) and
+annotations, the metadata, the bookmarks, and every string of the file's
+objects. One still in it raises {class}`~macos.MacOSError`, saying where it
+was seen, and nothing is written.
 
 ```{warning}
 It finds only what the PDF holds as text. **Look over the result before

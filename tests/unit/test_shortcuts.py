@@ -129,3 +129,16 @@ def test_shortcut_that_deletes_its_text_input_still_returns_its_output(commands,
 def test_listing_shortcuts_never_hangs(fake_run):
     macos.shortcuts.list()
     assert fake_run.calls[-1]["timeout"] == macos.shortcuts._LIST_TIMEOUT
+
+
+def test_a_failed_run_keeps_its_error_when_listing_times_out(fake_run, monkeypatch):
+    from macos import shortcuts
+
+    def run(args, timeout=None):
+        if args[:2] == ["shortcuts", "list"]:
+            raise macos.CommandTimeoutError(args, shortcuts._LIST_TIMEOUT)
+        raise macos.CommandError(args, 1, "the shortcut failed")
+
+    monkeypatch.setattr(shortcuts, "_run", run)
+    with pytest.raises(macos.CommandError, match="the shortcut failed"):
+        macos.shortcuts.run("Broken")  # the run's own error, not the listing's timeout

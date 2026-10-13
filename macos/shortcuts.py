@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
 from ._system import require_macos, run as _system_run
-from .errors import CommandError, NotSupportedError, ShortcutNotFoundError
+from .errors import CommandError, CommandTimeoutError, NotSupportedError, ShortcutNotFoundError
 
 __all__ = ["list", "run", "ShortcutNotFoundError"]
 
@@ -119,7 +119,7 @@ def run(
             # error is the one to see, not the listing's.
             try:
                 exists = _exists(name)
-            except CommandError:
+            except (CommandError, CommandTimeoutError):
                 exists = True
             if not exists:
                 raise ShortcutNotFoundError(error.cmd, error.returncode, error.stderr) from None

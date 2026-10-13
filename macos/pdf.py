@@ -1913,8 +1913,18 @@ def _uncropped_texts(document: int) -> Dict[int, str]:
         }
 
 
-def _xmp(document: int) -> Optional[str]:
-    """The text of the document's XMP metadata packet (its XML tags left out), or ``None`` when it has none."""
+# What the apps that write an XMP packet put there themselves, by local name: dates, identifiers, the
+# history of saves, the tool's name. Not something a document says.
+_XMP_BOOKKEEPING = r"(?:\w*Date|\w*ID|when|about|Producer|CreatorTool|softwareAgent|action|changed)"
+
+
+def _xmp(document: int, *, said_only: bool = False) -> Optional[str]:
+    """
+    The text of the document's XMP metadata packet (its XML tags left out), or ``None`` when it has none.
+
+    ``said_only`` leaves out what apps write there themselves: the dates and identifiers of
+    :data:`_XMP_BOOKKEEPING`, whatever a target could match in them.
+    """
     graphics = _pdf_objects()
     reference = _objc.send(document, "documentRef", restype=ctypes.c_void_p)
     catalog = graphics.CGPDFDocumentGetCatalog(reference) if reference else None
@@ -1923,12 +1933,20 @@ def _xmp(document: int) -> Optional[str]:
         return None
     with _cf.owned(graphics.CGPDFStreamCopyData(stream, ctypes.byref(ctypes.c_int()))) as data:
         packet = _cf.to_bytes(data).decode("utf-8", "replace")
+    if said_only:
+        packet = re.sub(r"<\?.*?\?>", " ", packet, flags=re.DOTALL)  # <?xpacket begin="" id="..."?>
+        element = r"<([\w.-]+:{0})\b[^>]*?(?:/>|>.*?</\1\s*>)".format(_XMP_BOOKKEEPING)
+        packet = re.sub(element, " ", packet, flags=re.DOTALL)
 
     def values(tag: "re.Match[str]") -> str:
         # Tag and attribute names aren't what the document says ("creator" in <dc:creator>), nor are the
         # namespaces; the attributes' values are (XMP writes simple properties as pdf:Producer="...").
         found = re.findall(r"([\w:.-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", tag.group())
-        return " " + " ".join(double or single for name, double, single in found if not name.startswith("xmlns")) + " "
+        return " " + " ".join(
+            double or single
+            for name, double, single in found
+            if not name.startswith("xmlns") and not (said_only and re.fullmatch(r"(?:[\w.-]+:)?" + _XMP_BOOKKEEPING, name))
+        ) + " "
 
     return html.unescape(re.sub(r"<[^>]*>", values, packet))
 
@@ -2131,40 +2149,14 @@ def _scrub_outline(outline: int, patterns: Sequence[Tuple[str, "re.Pattern[str]"
 
 
 _STREAM_START = re.compile(rb"\bstream\r?\n")
-# Streams with no text to read: pictures, font programs, color profiles (/N, their number of components),
-# the cross-reference table, files attached, and the XMP packet (read on its own, by _xmp).
-_UNREADABLE = re.compile(
-    rb"/Subtype\s*/(?:Image|Type1C|CIDFontType0C|OpenType|XML)\b|/Type\s*/(?:XRef|Metadata|EmbeddedFile)\b"
-    rb"|/Length[123]\b|/N\s+\d"
-)
+# The one kind of stream whose strings are read: a stream of objects, which holds dictionaries as the file's
+# body does. The others are a page's drawing (its strings are glyph codes, which only read as text in some
+# fonts, and the page's text is read through PDFKit), pictures, fonts, color profiles, the XMP packet...
+_OBJECT_STREAM = re.compile(rb"/Type\s*/ObjStm\b")
 _STRING_START = re.compile(rb"<<|>>|[(\[\]<]")
 _WRITTEN_BY_PDFKIT = re.compile(rb"/(?:Producer|CreationDate|ModDate)\s*$")
 # The file's identifier: two strings of random bytes, new at each save, which may read as digits or letters.
 _FILE_ID = re.compile(rb"/ID\s*\[\s*(?:(?:<[0-9A-Fa-f\s]*>|\([^()]*\))\s*)?$")
-# The operators of a page's drawing that place text: a new text object (which starts at the origin),
-# its matrix set (its last number, the baseline), a move (its second number, down or up), a new line.
-_NUMBER = rb"[-+]?(?:\d+\.?\d*|\.\d+)"
-_PLACING = re.compile(
-    rb"(?<![A-Za-z*])(?:(BT)|((?:" + _NUMBER + rb"\s+){5})(" + _NUMBER + rb")\s+Tm|" + _NUMBER + rb"\s+(" + _NUMBER
-    + rb")\s+T[dD]|(T\*))(?![A-Za-z*])|(['\"])"
-)
-
-
-def _baseline(gap: bytes, baseline: Optional[float]) -> Optional[float]:
-    """Where the text drawn after ``gap`` sits, up the page, from where the text before it sat; ``None``: unknown."""
-    for found in _PLACING.finditer(gap):
-        start, _, matrix, moved, line, quote = found.groups()
-        if start:
-            baseline = 0.0
-        elif matrix is not None:
-            baseline = float(matrix)
-        elif moved is not None:
-            baseline = None if baseline is None else baseline + float(moved)
-        elif line or quote:
-            baseline = None  # moved by the leading, which isn't read here: a line of its own
-    return baseline
-
-
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}
 
 
@@ -2208,50 +2200,28 @@ def _literal(data: bytes, start: int) -> Tuple[bytes, int]:
         out += character
 
 
-def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
+def _strings(data: bytes) -> Iterator[str]:
     """
     The strings in PDF source, each on its own, and those of an array joined. Not those PDFKit writes
     itself as it saves: the ``/Producer``, the dates, which aren't text, and the file's random ``/ID``.
-
-    In a page's ``drawing``, an array is a ``TJ``: one line of text cut into pieces to space them,
-    down to single letters ("DO" of "DOES"). Only the line it makes is read there, never its pieces;
-    and the strings drawn on one line are read together: a word drawn in two fonts is two strings
-    ("Ban", "ana"), each placed on its own as PDFKit writes them, and neither is a word of its own.
     """
-    groups: List[Tuple[int, List[str]]] = []  # the arrays open, with where each starts
-    run: List[str] = []  # in a drawing: the strings on the line so far
-    shown = 0  # in a drawing: where the last of them ends
-    line: Optional[float] = None  # in a drawing: that line's baseline
+    groups: List[List[str]] = []
     position = 0
-
-    def drawn(text: str, start: int, end: int) -> Iterator[str]:
-        nonlocal run, shown, line
-        baseline = _baseline(data[shown:start], line)
-        if run and (baseline is None or line is None or abs(baseline - line) > 0.01):
-            yield "".join(run)
-            run = []
-        run.append(text)
-        shown, line = end, baseline
-
     while True:
         found = _STRING_START.search(data, position)
         if not found:
-            if run:
-                yield "".join(run)
             return
         token = found.group()
         position = found.end()
         if token in (b"<<", b">>"):
             continue
         if token == b"[":
-            groups.append((found.start(), []))
+            groups.append([])
             continue
         if token == b"]":
             if groups:
-                opened, parts = groups.pop()
-                if drawing and not groups:
-                    yield from drawn("".join(parts), opened, position)
-                elif len(parts) > 1:
+                parts = groups.pop()
+                if len(parts) > 1:
                     yield "".join(parts)
             continue
         if token == b"(":
@@ -2272,19 +2242,14 @@ def _strings(data: bytes, *, drawing: bool = False) -> Iterator[str]:
         else:
             text = raw.decode("latin-1")
         if groups:
-            groups[-1][1].append(text)
-            if drawing:
-                continue
-        elif drawing:
-            yield from drawn(text, found.start(), position)
-            continue
+            groups[-1].append(text)
         yield text
 
 
 def _file_strings(data: bytes) -> Iterator[str]:
     """
-    Every string a PDF file holds, as written: in its objects, and in the streams that can hold text
-    (the pages' drawing, inflated when compressed), not in its pictures or fonts.
+    Every string a PDF file's objects hold, as written: in its body, and in its streams of objects
+    (inflated when compressed). Not those of the pages' drawing: their text is read through PDFKit.
     """
     outside = []
     position = 0
@@ -2299,7 +2264,7 @@ def _file_strings(data: bytes) -> Iterator[str]:
         end = data.find(b"endstream", start.end())
         body = data[start.end():end if end >= 0 else len(data)]
         position = len(data) if end < 0 else end + len(b"endstream")
-        if _UNREADABLE.search(dictionary):
+        if not _OBJECT_STREAM.search(dictionary):
             continue
         filters = re.findall(rb"/(\w+Decode)\b", dictionary)
         if filters == [b"FlateDecode"]:
@@ -2308,15 +2273,16 @@ def _file_strings(data: bytes) -> Iterator[str]:
             except zlib.error:
                 continue
         elif filters:
-            continue  # encoded some other way: nothing that holds text in a PDF PDFKit writes
-        yield from _strings(body, drawing=True)
+            continue  # encoded some other way: nothing PDFKit writes
+        yield from _strings(body)
     yield from _strings(b"".join(outside))
 
 
 def _leftovers(path: Path, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]) -> Dict[str, str]:
     """
     The targets still in the PDF at ``path``, with where one was seen: on a page (in its text, cropped
-    away or not, or an annotation), in the metadata or the bookmarks, or anywhere in the file's source.
+    away or not, or an annotation), in the metadata or the bookmarks, or in any string of the file's
+    objects (not the pages' drawing, whose text PDFKit reads above).
 
     What :func:`redact` checks its output with before it's put in place: a way a target could survive
     that the redaction itself missed shows up here.
@@ -2357,7 +2323,7 @@ def _leftovers(path: Path, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]) ->
         if root:
             walk(root)
         look("the bookmarks", marks)
-    look("the file's source", list(_file_strings(path.read_bytes())))
+    look("the file's objects", list(_file_strings(path.read_bytes())))
     return left
 
 
@@ -2370,8 +2336,8 @@ class Redaction:
     matches: Dict[str, int]
     """
     How many times each target was found and blacked out, by the target as given (a pattern by its
-    source): on the pages, in form fields and comments, in the metadata and in the bookmarks. Not in
-    the XMP packet, which is left out when it holds one, but isn't counted.
+    source): on the pages, in form fields and comments, in the metadata and in the bookmarks. The XMP
+    packet, left out when it holds one, counts only for a target found nowhere else.
     """
     pages: Dict[int, int]
     """The pages redrawn, with how many matches each had: check them before sharing the PDF."""
@@ -2420,8 +2386,8 @@ def redact(
     a target isn't found at all: a redaction that missed would look like
     it worked; and :class:`~macos.MacOSError`, also writing nothing, for a
     match PDFKit finds in the text but can't place on the page, and for a
-    target still found in the result, read back (its source too) before it
-    takes the place of ``output``.
+    target still found in the result, read back (its objects' strings too)
+    before it takes the place of ``output``.
 
     It finds only the text a PDF holds as text, so **look over the result
     before sharing it**: text in pictures (a scan, a screenshot, a logo),
@@ -2450,10 +2416,14 @@ def redact(
         root = _objc.send(document, "outlineRoot")
         if root:
             _scrub_outline(root, patterns, counts)
-        # Not counted: the XMP packet mostly repeats the title and author found above, and holds what
-        # macOS wrote itself (dates, identifiers), which must not pass for a target found.
+        # The XMP packet mostly repeats the title and author counted above: it counts only for a target
+        # found nowhere else (a PDF that names its author there alone), and only in what the document
+        # says, not the dates and identifiers apps write there themselves, which a pattern could match.
         packet = _xmp(document)
         in_packet = any(_occurrences([packet], pattern) for _, pattern in patterns) if packet else False
+        said = _xmp(document, said_only=True) if in_packet else None
+        if said:
+            counts = [count or _occurrences([said], pattern) for count, (_, pattern) in zip(counts, patterns)]
         missing = [repr(label) for (label, _), count in zip(patterns, counts) if not count]
         if missing:
             raise ValueError(

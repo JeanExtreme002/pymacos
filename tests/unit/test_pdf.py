@@ -364,32 +364,27 @@ def test_redact_reads_a_files_strings_as_written():
     source = rb"(Ana \(Souza\)) (a (nested) one) (Jos\351) (split \
 line) <FEFF0041006E0061> <416E61>"
     assert list(_strings(source)) == ["Ana (Souza)", "a (nested) one", "Jos\xe9", "split line", "Ana", "Ana"]
-    # A TJ array's pieces are read joined, only, in a page's drawing: "DO" alone isn't the word "do".
-    drawing = b"[(A) 10 (ND ) -5 (DO) (ES)] TJ (Ana Souza) Tj"
-    assert list(_strings(drawing, drawing=True)) == ["AND DOES", "Ana Souza"]
     assert list(_strings(b"/Opt [(Free) (Pro)]")) == ["Free", "Pro", "FreePro"]  # in an object: each, and joined
     # What PDFKit writes itself as it saves is no part of the document.
     assert list(_strings(b"/Producer (macOS Quartz PDFContext) /ModDate (D:20261013) /Title (Plan)")) == ["Plan"]
     # Nor the file's identifier, random bytes new at each save that may read as digits.
     assert list(_strings(b"/ID [<3636A0FF> <36360000>] /Size 9 /Title (Plan)")) == ["Plan"]
     assert list(_strings(b"/ID [(66) (66)] /Title (Plan)")) == ["Plan"]
-    # A word drawn in two pieces on one line, each placed on its own as PDFKit writes them, is one word;
-    # what's drawn on another line, or moved to by the leading, isn't part of it.
-    pieces = (
-        b"BT 18 0 0 18 72 700 Tm /TT1 1 Tf (Ban) Tj ET BT 18 0 0 18 104 700 Tm /TT2 1 Tf (ana) Tj ET "
-        b"BT 18 0 0 18 72 680 Tm (Ana) Tj ET BT /F1 18 Tf 72 650 Td (x) Tj 0 0 Td [(y) (y)] TJ 0 -20 Td (z) Tj T* (w) Tj ET"
-    )
-    assert list(_strings(pieces, drawing=True)) == ["Banana", "Ana", "xyy", "z", "w"]
 
     from macos.pdf import _file_strings
 
-    content = zlib.compress(b"BT (Ana Souza) Tj ET")
+    # A page's drawing isn't read: its strings are glyph codes ("4627" may be Cyrillic, "Ban" and "ana" one
+    # word in two fonts), and the page's text is read through PDFKit. A stream of objects is.
+    drawing = zlib.compress(b"BT 18 0 0 18 72 700 Tm (Ban) Tj ET BT 18 0 0 18 104 700 Tm (ana) Tj ET BT (#\\)0$4627) Tj ET")
+    objects = zlib.compress(b"4 0 << /Type /Annot /Contents (Ana Souza) >>")
     picture = b"(Ana Souza)"  # bytes of a picture that happen to read as a string: never read
     data = (
         b"1 0 obj\n<< /Title (Report) >>\nendobj\n"
-        b"2 0 obj\n<< /Filter /FlateDecode /Length " + str(len(content)).encode() + b" >>\n"
-        b"stream\n" + content + b"\nendstream\nendobj\n"
+        b"2 0 obj\n<< /Filter /FlateDecode /Length " + str(len(drawing)).encode() + b" >>\n"
+        b"stream\n" + drawing + b"\nendstream\nendobj\n"
         b"3 0 obj\n<< /Subtype /Image /Length 11 >>\nstream\n" + picture + b"\nendstream\nendobj\n"
+        b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length " + str(len(objects)).encode() + b" >>\n"
+        b"stream\n" + objects + b"\nendstream\nendobj\n"
     )
     assert sorted(_file_strings(data)) == ["Ana Souza", "Report"]
 
