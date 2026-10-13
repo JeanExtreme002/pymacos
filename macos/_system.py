@@ -177,7 +177,15 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
         raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
 
 
-def applescript(app: str, script: str, *args: str, input: Optional[str] = None) -> str:
+# Seconds an ``osascript`` that controls an app may take. An Apple event gives up by itself after two
+# minutes (errAETimeout), so this only stops the waits that never end: an Automation prompt nobody
+# answers, in a session where nobody sees it.
+APPLESCRIPT_TIMEOUT = 300.0
+
+
+def applescript(
+    app: str, script: str, *args: str, input: Optional[str] = None, timeout: Optional[float] = APPLESCRIPT_TIMEOUT
+) -> str:
     """
     Run an AppleScript that controls ``app``, and return its output.
 
@@ -185,10 +193,11 @@ def applescript(app: str, script: str, *args: str, input: Optional[str] = None) 
     pasted into the source, even when they start with ``-``. ``input`` goes
     to its standard input instead, for text that shouldn't show in the
     process list. A missing Automation permission raises
-    :class:`PermissionDeniedError`, saying where to allow it.
+    :class:`PermissionDeniedError`, saying where to allow it. Still running
+    after ``timeout`` seconds, it is stopped and :class:`CommandTimeoutError` raised.
     """
     try:
-        return run(["osascript", "-e", script, *(["--", *args] if args else [])], input=input)
+        return run(["osascript", "-e", script, *(["--", *args] if args else [])], input=input, timeout=timeout)
     except CommandError as error:
         raise osascript_error(error, app) from None
 

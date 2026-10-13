@@ -48,6 +48,23 @@ def test_timeouts_raise_command_timeout_error(monkeypatch):
     assert caught.value.cmd == ["sleep", "5"] and caught.value.timeout == 2
 
 
+def test_applescript_is_stopped_when_osascript_never_answers(monkeypatch):
+    seen = []
+
+    def stuck(args, **kwargs):  # an Automation prompt nobody answers
+        seen.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    monkeypatch.setattr(_system.subprocess, "run", stuck)
+    with pytest.raises(macos.CommandTimeoutError, match="'osascript' didn't finish within 300 seconds"):
+        _system.applescript("Finder", 'tell application "Finder" to get selection')
+    with pytest.raises(macos.CommandTimeoutError, match="within 5 seconds"):
+        _system.applescript("Finder", 'tell application "Finder" to get selection', timeout=5)
+    # Longer than an Apple event's own two minutes: a slow app still gets its own errAETimeout first.
+    assert seen == [_system.APPLESCRIPT_TIMEOUT, 5] and _system.APPLESCRIPT_TIMEOUT > 120
+
+
 def test_command_timeout_error_survives_pickling():
     import pickle
 

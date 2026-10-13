@@ -24,9 +24,10 @@ import ctypes
 import functools
 import math
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
 
 from . import _cf
+from ._system import add_note
 from .errors import PermissionDeniedError
 
 __all__ = ["read", "write", "delete", "keys", "restored", "GLOBAL"]
@@ -221,6 +222,11 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     macOS goes back to its own default. It restores the preferences only:
     restart the Dock, Finder or app that read the changed ones, as the
     ``set_*`` functions do.
+
+    A key that can't be written back doesn't keep the others from being
+    restored: the first error is raised once they all were tried. When the
+    block itself fails, its error is the one raised, with the restore's
+    failures noted on it (as a warning before Python 3.11).
     """
     missing = object()
     saved: List[Tuple[str, Optional[str], Any]] = []  # (domain, key or None for all, value)
@@ -236,32 +242,48 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
             domain, key = item
             _check(domain)
             saved.append((domain, key, _own(domain, key, missing, current_host)))
+    failed: Optional[BaseException] = None
     try:
         yield
+    except BaseException as error:
+        failed = error
+        raise
     finally:
         # One key that can't be written back mustn't keep the others from
         # being restored, in its domain or another: each change is tried on
-        # its own, and the first failure raised once they all were.
-        failure: List[PermissionDeniedError] = []
+        # its own, and the first failure raised once they all were. It never
+        # hides the error of the block itself, which stays the one raised.
+        failures: List[Exception] = []
 
         def attempt(change: Callable[[], object]) -> None:
             try:
                 change()
-            except PermissionDeniedError as error:
-                failure.append(error)
+            except Exception as error:
+                failures.append(error)
+
+        def delete_added(domain: str, value: Dict[str, Any]) -> None:
+            for name in keys(domain, current_host=current_host):
+                if name not in value:
+                    attempt(functools.partial(delete, domain, name, current_host=current_host))
+
+        def restore_key(domain: str, name: str, old: Any) -> None:
+            # The domain's own value: one equal to the global fallback still has to be written back.
+            if not _identical(_own(domain, name, missing, current_host), old):
+                write(domain, name, old, current_host=current_host)
 
         for domain, name_or_all, value in saved:
             if name_or_all is None:
-                for name in keys(domain, current_host=current_host):
-                    if name not in value:
-                        attempt(functools.partial(delete, domain, name, current_host=current_host))
+                attempt(functools.partial(delete_added, domain, value))
                 for name, old in value.items():
-                    # The domain's own value: one equal to the global fallback still has to be written back.
-                    if not _identical(_own(domain, name, missing, current_host), old):
-                        attempt(functools.partial(write, domain, name, old, current_host=current_host))
+                    attempt(functools.partial(restore_key, domain, name, old))
             elif value is missing:
                 attempt(functools.partial(delete, domain, name_or_all, current_host=current_host))
             else:
                 attempt(functools.partial(write, domain, name_or_all, value, current_host=current_host))
-        if failure:
-            raise failure[0]
+        if failures:
+            first = failed if failed is not None else failures[0]
+            for problem in failures:
+                if problem is not first:
+                    add_note(first, "restoring a preference failed too: {}".format(problem))
+            if failed is None:
+                raise first

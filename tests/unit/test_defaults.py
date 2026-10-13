@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.defaults`. They run on any platform."""
 
+import sys
+
 import pytest
 
 import macos
@@ -100,6 +102,38 @@ def test_defaults_restored_restores_every_key_of_a_whole_domain_before_raising(m
             pass
 
     assert tried == ["a", "b", "c"]  # each delete tried, though the first failed
+
+
+def test_defaults_restored_never_hides_the_blocks_own_error(unwritable):
+    with pytest.raises(ZeroDivisionError) as raised:
+        with macos.defaults.restored(("com.example.app", "a"), ("com.example.app", "b")):
+            1 / 0
+
+    assert unwritable.set == [("app", None), ("app", None)]  # both still tried
+    if sys.version_info >= (3, 11):
+        assert len(raised.value.__notes__) == 2 and "isn't writable" in raised.value.__notes__[0]
+
+
+def test_defaults_restored_goes_on_after_any_error(monkeypatch):
+    from macos import defaults
+
+    tried = []
+
+    def broken(domain, name, *args, **kwargs):
+        tried.append(name)
+        raise ValueError("can't hold it")
+
+    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: {"a": 1, "b": 2}[key])
+    monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: ["a", "b"])
+    monkeypatch.setattr(defaults, "write", broken)
+
+    with pytest.raises(ValueError, match="can't hold it"):
+        with macos.defaults.restored(("com.example.app", "a"), "com.example.other"):
+            monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: 0)  # all changed
+            monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: 1 / 0)  # can't list the domain
+
+    assert tried == ["a", "a", "b"]  # the key, then each of the domain's, though listing it failed
 
 
 def test_appearance_setters_pass_the_error_on(unwritable):

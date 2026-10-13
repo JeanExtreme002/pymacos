@@ -2150,7 +2150,7 @@ def _log_entry(line: str) -> Optional[LogEntry]:
     date = None
     try:
         date = datetime.strptime(event.get("timestamp", ""), "%Y-%m-%d %H:%M:%S.%f%z")
-    except ValueError:
+    except (TypeError, ValueError):  # a timestamp missing, null or in another shape: the entry without its date
         pass
     pid = event.get("processID")
     return LogEntry(
@@ -2230,9 +2230,13 @@ def logs(
     # Its errors go to a file, not a second pipe: a pipe only read once the output ends would fill up
     # (64 KB) on a chatty failure, and log show would wait on it forever while we wait on the output.
     with tempfile.TemporaryFile() as errors_file:
-        reader = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors_file, text=True, encoding="utf-8")
+        # Bytes that aren't UTF-8 become U+FFFD, as with run(): one odd message mustn't end the read.
+        reader = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=errors_file, text=True, encoding="utf-8", errors="replace"
+        )
         assert reader.stdout is not None
         stopped = False  # by us, at the limit: not a failure
+        read_all = False  # its output ended, so it's ending by itself: nothing to kill
         expired = threading.Event()
 
         def expire() -> None:
@@ -2251,10 +2255,14 @@ def logs(
                     if limit is not None and len(entries) >= limit:
                         stopped = True
                         break
+            read_all = not stopped
         finally:
             if timer is not None:
                 timer.cancel()
-            if stopped or expired.is_set():
+            # Killed unless it ended by itself: stopped at the limit, out of time, or left by an error
+            # (Ctrl-C from elsewhere than the terminal, which only reaches Python): waiting would mean
+            # waiting for it to read days of the log, with the timeout gone.
+            if not read_all:
                 reader.kill()
             reader.wait()
             reader.stdout.close()

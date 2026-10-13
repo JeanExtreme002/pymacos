@@ -228,6 +228,44 @@ def test_logs_stop_a_log_show_that_takes_too_long(monkeypatch):
         system.logs(timeout=0)
 
 
+def test_logs_stop_log_show_when_reading_it_fails(monkeypatch):
+    import subprocess
+
+    class Reading:
+        """A log show with days still to read, left by an interrupt that only reached Python."""
+
+        def __init__(self, args, **kwargs):
+            assert kwargs["errors"] == "replace"  # a message that isn't UTF-8 mustn't end the read
+            self.killed, self.returncode = False, None
+
+        @property
+        def stdout(self):
+            return self
+
+        def __iter__(self):
+            raise KeyboardInterrupt
+
+        def close(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            assert self.killed, "waited for a log show nobody stopped"
+            self.returncode = -9
+
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(subprocess, "Popen", Reading)
+    with pytest.raises(KeyboardInterrupt):
+        system.logs(last="1d", limit=None)
+
+
+def test_log_entries_with_an_odd_timestamp_keep_the_rest():
+    entry = system._log_entry(json.dumps({"eventType": "logEvent", "timestamp": None, "eventMessage": "hi"}))
+    assert (entry.date, entry.message) == (None, "hi")
+
+
 def test_logs_asks_for_info_and_debug_messages(monkeypatch):
     import io
     import subprocess
