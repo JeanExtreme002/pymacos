@@ -83,7 +83,9 @@ functions do.
 
 Name `(domain, key)` pairs, or a whole domain such as `"com.apple.dock"`.
 If a key can't be written back, the others are still restored, then the
-first {class}`~macos.errors.PermissionDeniedError` is raised.
+first error (usually {class}`~macos.errors.PermissionDeniedError`) is raised.
+When the block itself fails, its own error is the one raised, and what
+couldn't be restored is noted on it.
 
 ## Reference
 

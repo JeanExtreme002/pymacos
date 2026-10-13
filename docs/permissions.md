@@ -111,7 +111,9 @@ appearance, {func}`macos.apps.login_items` asks it for the login items,
 asks the browser for its tabs, so the first time macOS asks whether the app
 running Python may control them. If that's denied, it raises
 {class}`~macos.PermissionDeniedError`; allow it again in System Settings ›
-Privacy & Security › Automation.
+Privacy & Security › Automation. If the prompt is left unanswered for five
+minutes, the call is stopped and raises {class}`~macos.CommandTimeoutError`:
+run it again and answer it.
 
 ## Notifications
 
