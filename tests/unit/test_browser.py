@@ -117,6 +117,15 @@ def test_browser_open(browsers, monkeypatch):
     assert browsers.args == ["open", "-a", "/Applications/Safari.app", "https://example.com"]
 
 
+def test_browser_open_without_a_default_browser(browsers, monkeypatch):
+    # A plain `open url` would hand it to whatever handles its scheme: a file:// URL to a .command would run.
+    monkeypatch.setattr(apps, "running", lambda **kwargs: [])
+    monkeypatch.setattr(apps, "default_browser", lambda: None)
+    with pytest.raises(macos.AppNotFoundError, match="no default web browser") as raised:
+        macos.browser.open("file:///tmp/evil.command?token=s3cret")
+    assert browsers.calls == [] and "s3cret" not in str(raised.value)
+
+
 def test_browser_argument_checks(browsers):
     with pytest.raises(macos.NotSupportedError, match="Firefox can't be scripted"):
         macos.browser.tabs("Firefox")

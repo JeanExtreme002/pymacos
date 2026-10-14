@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 from . import apps
 from ._system import applescript, run as _run
-from .errors import CommandError, MacOSError, NotSupportedError, PermissionDeniedError
+from .errors import AppNotFoundError, CommandError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = ["Tab", "BROWSERS", "current_tab", "tabs", "open", "run_js"]
 
@@ -305,7 +305,8 @@ def open(url: str, app: Optional[str] = None) -> None:
     Open ``url`` in a new tab and bring the browser to the front.
 
     ``app`` works as in :func:`tabs`; with no browser running, it opens
-    the default browser. To open a URL in whatever handles it, see :func:`macos.open`.
+    the default browser, and raises :class:`~macos.errors.AppNotFoundError`
+    when macOS has none. To open a URL in whatever handles it, see :func:`macos.open`.
     A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option.
     """
     if url.startswith("-"):
@@ -314,7 +315,12 @@ def open(url: str, app: Optional[str] = None) -> None:
     browser = _browser(app)
     if browser is None:
         default = apps.default_browser()
-        _run(["open", url] if default is None else ["open", "-a", default, url])
+        if default is None:
+            # Not a plain `open url`: that hands the URL to whatever handles its scheme, so a
+            # file:// URL to a .command or an app would run it, and this opens web pages only.
+            # The URL stays out of the message: a link may carry a token, and errors end up in logs.
+            raise AppNotFoundError("macOS has no default web browser to open the URL in")
+        _run(["open", "-a", default, url])
         return
     _run(["open", "-a", browser, url])
 

@@ -344,8 +344,8 @@ def rotate(
     """
     Turn pages clockwise by ``degrees`` (90, 180 or 270; negative turns counter-clockwise) and save to ``output``.
 
-    Every page turns, or only ``pages`` (numbered from 1). Handy for scans
-    that came out sideways::
+    Every page turns, or only ``pages`` (numbered from 1), each once even when
+    listed twice. Handy for scans that came out sideways::
 
         macos.pdf.rotate("scan.pdf", 90, "scan.pdf", pages=[2])
     """
@@ -359,8 +359,9 @@ def rotate(
         raise ValueError("degrees must be an int multiple of 90, not {!r}".format(degrees))
     with _open(path, password) as document:
         numbers = list(pages) if pages is not None else list(range(1, _count(document) + 1))
-        for number in numbers:
-            page = _page(document, number)
+        # Checks every number before turning any; a page listed twice turns once, not 90 + 90 = 180.
+        chosen = {number: _page(document, number) for number in numbers}
+        for page in chosen.values():
             current = _objc.send(page, "rotation", restype=ctypes.c_long)
             _objc.send(page, "setRotation:", (current + degrees) % 360, argtypes=(ctypes.c_long,), restype=None)
         return _save(document, output)

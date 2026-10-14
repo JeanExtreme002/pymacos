@@ -56,8 +56,9 @@ macos.browser.open("https://example.com", app="Safari")
 ```
 
 {func}`~macos.browser.open` opens the URL in a new tab, in the default browser
-when none is running. A URL starting with `-` raises `ValueError`: the `open`
-command would take it as one of its options.
+when none is running (with no default browser set, it raises
+{class}`~macos.AppNotFoundError`). A URL starting with `-` raises `ValueError`:
+the `open` command would take it as one of its options.
 
 ## Running JavaScript
 

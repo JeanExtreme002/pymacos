@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 import macos
-from macos import _system
+from macos import _system, music
 
 
 class _FakePlayers:
@@ -46,7 +46,9 @@ def players(monkeypatch):
     monkeypatch.setattr(_system.sys, "platform", "darwin")
     monkeypatch.setattr(_system.subprocess, "run", fake)
     monkeypatch.setattr(
-        apps, "running", lambda: [apps.App(name, None, 100 + index, None) for index, name in enumerate(fake.running)]
+        apps,
+        "running",
+        lambda: [apps.App(name, music._BUNDLE_IDS.get(name), 100 + index, None) for index, name in enumerate(fake.running)],
     )
     return fake
 
@@ -59,6 +61,21 @@ def test_now_playing_prefers_the_player_that_plays(players):
     assert macos.music.now_playing(app="Music") == macos.music.Track(
         "Imagine", "John Lennon", "Imagine", 183.5, 12.25, False, "Music"
     )
+
+
+def test_players_are_found_by_bundle_identifier_in_any_language(players, monkeypatch):
+    from macos import apps
+
+    # A German Mac names Music "Musik": the name can't tell the player apart, its identifier can.
+    monkeypatch.setattr(apps, "running", lambda: [apps.App("Musik", "com.apple.Music", 100, None)])
+    track = macos.music.now_playing()
+
+    assert track is not None and track.app == "Music" and track.title == "Imagine"
+    macos.music.pause()
+    assert players.commands == [("Music", "pause")]
+
+    monkeypatch.setattr(apps, "running", lambda: [apps.App("Music", "com.example.not-music", 100, None)])
+    assert macos.music.now_playing() is None
 
 
 def test_now_playing_never_opens_a_player(players):
@@ -80,7 +97,7 @@ def test_player_commands_go_to_the_right_app(players):
 def test_music_without_the_automation_permission(fake_run, monkeypatch):
     from macos import apps
 
-    monkeypatch.setattr(apps, "running", lambda: [apps.App("Music", None, 1, None)])
+    monkeypatch.setattr(apps, "running", lambda: [apps.App("Music", "com.apple.Music", 1, None)])
     fake_run.returncode = 1
     fake_run.stderr = "Not authorized to send Apple events to Music. (-1743)"
 
