@@ -116,7 +116,7 @@ Across the whole package:
 
 - No dependencies: no PyObjC, nothing to compile.
 - Plain, typed functions that return Python objects.
-- Any text is safe: nothing is pasted into shell or AppleScript source.
+- Any text is safe: your text is never pasted into shell or AppleScript source.
 - Clear errors when macOS is missing a permission, instead of silent failures.
 
 See [Why pymacos?](https://macos.readthedocs.io/en/latest/why.html) for a longer comparison.

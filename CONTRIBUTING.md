@@ -104,3 +104,21 @@ never breaks code that works with the previous one.
   then, keep the old behaviour where you can and warn (`DeprecationWarning`)
   that it will change, saying what to do instead.
 - A release's notes list every such change, under *Changed*.
+
+## Releases
+
+The release notes on [GitHub Releases](https://github.com/JeanExtreme002/pymacos/releases)
+are the changelog: there's no `CHANGELOG.md` to keep in step with them.
+
+1. Merge the changes the release ships.
+2. Open a pull request titled `chore: bump version to X.Y.Z` that only
+   changes `__version__` in `macos/__init__.py`, following the rules above
+   (a patch for fixes, a minor release for anything new), and merge it.
+3. On GitHub, create a release whose tag is `vX.Y.Z`, made from `main`. The
+   notes open with `pip install --upgrade pymacos` and a sentence on what the
+   release is, then list the changes under *New*, *Changed* (worth a look if
+   you rely on them) and *Fixed*, and end with a link to the docs.
+
+Publishing the release starts the `Publish to PyPI` workflow: it refuses a
+tag that doesn't match `__version__`, builds the package once, runs the whole
+suite (live tests included) against that build, and only then uploads it.
