@@ -31,7 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Tuple, Union
 
-from . import _cf, _libc, _objc, defaults, spotlight
+from . import _cf, _cg, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
 from ._system import applescript, framework, require_macos, restart_process, run as _run
 from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
@@ -212,33 +212,9 @@ _MAX_THUMBNAIL = 4096
 
 @lru_cache(maxsize=None)
 def _graphics() -> ctypes.CDLL:
-    cg = framework("CoreGraphics")
-    cg.CGImageGetWidth.argtypes = (ctypes.c_void_p,)
-    cg.CGImageGetWidth.restype = ctypes.c_size_t
-    cg.CGImageGetHeight.argtypes = (ctypes.c_void_p,)
-    cg.CGImageGetHeight.restype = ctypes.c_size_t
-    cg.CGColorSpaceCreateDeviceRGB.argtypes = ()
-    cg.CGColorSpaceCreateDeviceRGB.restype = ctypes.c_void_p
-    cg.CGColorSpaceRelease.argtypes = (ctypes.c_void_p,)
-    cg.CGColorSpaceRelease.restype = None
-    cg.CGBitmapContextCreate.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    )
-    cg.CGBitmapContextCreate.restype = ctypes.c_void_p
+    cg = _cg.lib()  # the functions other modules call too; this one's own below
     cg.CGContextSetInterpolationQuality.argtypes = (ctypes.c_void_p, ctypes.c_int32)
     cg.CGContextSetInterpolationQuality.restype = None
-    cg.CGContextDrawImage.argtypes = (ctypes.c_void_p, _objc.CGRect, ctypes.c_void_p)
-    cg.CGContextDrawImage.restype = None
-    cg.CGBitmapContextCreateImage.argtypes = (ctypes.c_void_p,)
-    cg.CGBitmapContextCreateImage.restype = ctypes.c_void_p
-    cg.CGContextRelease.argtypes = (ctypes.c_void_p,)
-    cg.CGContextRelease.restype = None
     return cg
 
 

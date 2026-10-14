@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import unquote
 
-from . import _cf, _files, _objc
+from . import _cf, _cg, _files, _objc
 from ._objc import BOOL, NSUInteger
 from ._system import framework
 from .errors import MacOSError, NotSupportedError, PermissionDeniedError
@@ -789,7 +789,7 @@ def render(path: PathLike, page: int = 1, *, size: int = 1024, password: Optiona
 
 @lru_cache(maxsize=None)
 def _graphics() -> ctypes.CDLL:
-    graphics = framework("CoreGraphics")
+    graphics = _cg.lib()  # the functions other modules call too; this one's own below
     pointer = ctypes.c_void_p
     rect = ctypes.POINTER(_objc.CGRect)
     signatures = {
@@ -797,13 +797,9 @@ def _graphics() -> ctypes.CDLL:
         "CGContextBeginPage": ((pointer, rect), None),
         "CGContextEndPage": ((pointer,), None),
         "CGPDFContextClose": ((pointer,), None),
-        "CGContextRelease": ((pointer,), None),
         "CGContextSaveGState": ((pointer,), None),
         "CGContextRestoreGState": ((pointer,), None),
         "CGContextConcatCTM": ((pointer, _objc.CGAffineTransform), None),
-        "CGContextDrawImage": ((pointer, _objc.CGRect, pointer), None),
-        "CGImageGetWidth": ((pointer,), ctypes.c_size_t),
-        "CGImageGetHeight": ((pointer,), ctypes.c_size_t),
         "CGPDFDocumentCreateWithURL": ((pointer,), pointer),
         "CGPDFDocumentIsEncrypted": ((pointer,), ctypes.c_bool),
         "CGPDFDocumentIsUnlocked": ((pointer,), ctypes.c_bool),
@@ -811,21 +807,12 @@ def _graphics() -> ctypes.CDLL:
         "CGPDFDocumentGetNumberOfPages": ((pointer,), ctypes.c_size_t),
         "CGPDFDocumentGetPage": ((pointer, ctypes.c_size_t), pointer),
         "CGPDFDocumentRelease": ((pointer,), None),
-        "CGContextSetRGBFillColor": ((pointer, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double), None),
         "CGContextTranslateCTM": ((pointer, ctypes.c_double, ctypes.c_double), None),
         "CGContextRotateCTM": ((pointer, ctypes.c_double), None),
         "CGContextSetTextPosition": ((pointer, ctypes.c_double, ctypes.c_double), None),
         "CGContextSetTextDrawingMode": ((pointer, ctypes.c_int32), None),
         "CGContextScaleCTM": ((pointer, ctypes.c_double, ctypes.c_double), None),
-        "CGContextFillRect": ((pointer, _objc.CGRect), None),
         "CGContextClipToRect": ((pointer, _objc.CGRect), None),
-        "CGColorSpaceCreateDeviceRGB": ((), pointer),
-        "CGColorSpaceRelease": ((pointer,), None),
-        "CGBitmapContextCreate": (
-            (pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32),
-            pointer,
-        ),
-        "CGBitmapContextCreateImage": ((pointer,), pointer),
         "CGImageRelease": ((pointer,), None),
     }
     for name, (argtypes, restype) in signatures.items():

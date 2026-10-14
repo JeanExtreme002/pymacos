@@ -390,16 +390,7 @@ def _recorder(target: Path, channels: int, metering: bool = False) -> int:
     """An autoreleased, prepared ``AVAudioRecorder`` writing to ``target``. Call inside an autorelease pool."""
     framework("AVFoundation")
     settings = dict(_RECORD_FORMATS[target.suffix.lower()], AVSampleRateKey=44100, AVNumberOfChannelsKey=channels)
-    number = lambda value: _objc.send(  # noqa: E731
-        _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
-    )
-    dictionary = _objc.send(
-        _objc.cls("NSDictionary"),
-        "dictionaryWithObjects:forKeys:",
-        _objc.nsarray_of([number(value) for value in settings.values()]),
-        _objc.nsarray_of([_objc.nsstring(key) for key in settings]),
-        argtypes=(_objc.id, _objc.id),
-    )
+    dictionary = _objc.nsdictionary_of({key: _objc.nsnumber(value) for key, value in settings.items()})
     error = ctypes.c_void_p()
     recorder = _objc.send(
         _objc.send(_objc.cls("AVAudioRecorder"), "alloc"),
@@ -1008,16 +999,7 @@ def _read_samples(
         "AVLinearPCMIsNonInterleaved": 0,
         "AVLinearPCMIsBigEndianKey": 1 if sys.byteorder == "big" else 0,  # this Mac's own order, as write() takes
     }
-    number = lambda value: _objc.send(  # noqa: E731
-        _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
-    )
-    dictionary = _objc.send(
-        _objc.cls("NSDictionary"),
-        "dictionaryWithObjects:forKeys:",
-        _objc.nsarray_of([number(value) for value in settings.values()]),
-        _objc.nsarray_of([_objc.nsstring(key) for key in settings]),
-        argtypes=(_objc.id, _objc.id),
-    )
+    dictionary = _objc.nsdictionary_of({key: _objc.nsnumber(value) for key, value in settings.items()})
     output = _objc.send(
         _objc.cls("AVAssetReaderAudioMixOutput"),
         "assetReaderAudioMixOutputWithAudioTracks:audioSettings:",

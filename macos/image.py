@@ -734,10 +734,6 @@ def _filter(name: str, image: int, **values: Any) -> int:
     return result
 
 
-def _number_object(value: float) -> int:
-    return _objc.send(_objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,))
-
-
 def blur_faces(source: PathLike, output: PathLike, *, quality: Optional[float] = None) -> Path:
     """
     Save a copy of a photo with every face pixelated, and return ``output``.
@@ -773,7 +769,7 @@ def blur_faces(source: PathLike, output: PathLike, *, quality: Optional[float] =
                 face.origin.y + face.size.height / 2,
                 argtypes=(ctypes.c_double, ctypes.c_double),
             )
-            blocks = _filter("CIPixellate", picture, inputScale=_number_object(block), inputCenter=center)
+            blocks = _filter("CIPixellate", picture, inputScale=_objc.nsnumber(block), inputCenter=center)
             blocks = _objc.send(blocks, "imageByCroppingToRect:", face, argtypes=(_objc.CGRect,))
             result = _objc.send(blocks, "imageByCompositingOverImage:", result, argtypes=(_objc.id,))
         return _objc.send(result, "imageByCroppingToRect:", extent, argtypes=(_objc.CGRect,))
@@ -987,7 +983,7 @@ def blur_background(
         radius = max(extent.size.width, extent.size.height) / 80 * strength
         # Clamped first, so the edges blur without fading to transparent.
         clamped = _objc.send(picture, "imageByClampingToExtent")
-        blurred = _filter("CIGaussianBlur", clamped, inputRadius=_number_object(radius))
+        blurred = _filter("CIGaussianBlur", clamped, inputRadius=_objc.nsnumber(radius))
         blurred = _objc.send(blurred, "imageByCroppingToRect:", extent, argtypes=(_objc.CGRect,))
         return _behind_people(picture, blurred)
 
@@ -1080,13 +1076,7 @@ def watermark(
             opacity,
             argtypes=(ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double),
         )
-        attributes = _objc.send(
-            _objc.cls("NSDictionary"),
-            "dictionaryWithObjects:forKeys:",
-            _objc.nsarray_of([font, paint]),
-            _objc.nsarray_of([_objc.nsstring("NSFont"), _objc.nsstring("NSColor")]),
-            argtypes=(_objc.id, _objc.id),
-        )
+        attributes = _objc.nsdictionary_of({"NSFont": font, "NSColor": paint})
         styled = _objc.send(
             _objc.send(_objc.cls("NSAttributedString"), "alloc"),
             "initWithString:attributes:",

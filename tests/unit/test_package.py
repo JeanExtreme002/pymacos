@@ -113,3 +113,19 @@ def test_the_api_reference_lists_every_public_name():
             if "macos.{}.{}".format(module_name, name) not in documented:
                 missing.append("macos.{}.{}".format(module_name, name))
     assert not missing, "add these to docs/api.md: {}".format(missing)
+
+
+def test_each_core_graphics_function_is_declared_in_one_module():
+    import collections
+    import pathlib
+    import re
+
+    # Core Graphics is one handle shared by every module: two declarations of a function would
+    # each set its argtypes, and the module loaded last would decide them for all. _cg has those
+    # more than one module calls.
+    declared = collections.defaultdict(set)
+    for path in pathlib.Path(macos.__file__).parent.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for name in re.findall(r'"(CG\w+)":\s*\(', source) + re.findall(r"\.(CG\w+)\.(?:argtypes|restype)\s*=", source):
+            declared[name].add(path.name)
+    assert {name: sorted(modules) for name, modules in declared.items() if len(modules) > 1} == {}

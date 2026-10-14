@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from . import _cf
 from ._system import framework, require_macos
@@ -185,6 +185,22 @@ def nsarray_of(objects: Sequence[int]) -> int:
     """Create an autoreleased ``NSArray`` holding ``objects``."""
     items = (ctypes.c_void_p * len(objects))(*objects)
     return send(cls("NSArray"), "arrayWithObjects:count:", items, len(objects), argtypes=(ctypes.c_void_p, NSUInteger))
+
+
+def nsnumber(value: float) -> int:
+    """Create an autoreleased ``NSNumber`` holding ``value``, as a double: what every numeric setting takes."""
+    return send(cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,))
+
+
+def nsdictionary_of(items: Dict[str, int]) -> int:
+    """Create an autoreleased ``NSDictionary`` of ``items``: string keys, Objective-C objects as values."""
+    return send(
+        cls("NSDictionary"),
+        "dictionaryWithObjects:forKeys:",
+        nsarray_of(list(items.values())),
+        nsarray_of([nsstring(key) for key in items]),
+        argtypes=(id, id),
+    )
 
 
 def file_url(path: "os.PathLike[str] | str") -> int:

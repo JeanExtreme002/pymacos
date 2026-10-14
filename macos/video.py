@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Sequence, Tuple, Union
 
-from . import _cf, _files, _media, _objc
+from . import _cf, _cg, _files, _media, _objc
 from ._system import framework, run as _run
 from .errors import MacOSError
 
@@ -141,19 +141,8 @@ def _core_video() -> ctypes.CDLL:
 
 @lru_cache(maxsize=None)
 def _graphics() -> ctypes.CDLL:
-    graphics = framework("CoreGraphics")
-    pointer = ctypes.c_void_p
+    graphics = _cg.lib()  # the functions other modules call too; this one's own below
     signatures = {
-        "CGBitmapContextCreate": (
-            (pointer, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, pointer, ctypes.c_uint32),
-            pointer,
-        ),
-        "CGContextSetRGBFillColor": ((pointer, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double), None),
-        "CGContextFillRect": ((pointer, _objc.CGRect), None),
-        "CGContextDrawImage": ((pointer, _objc.CGRect, pointer), None),
-        "CGContextRelease": ((pointer,), None),
-        "CGImageGetWidth": ((pointer,), ctypes.c_size_t),
-        "CGImageGetHeight": ((pointer,), ctypes.c_size_t),
         "CGAffineTransformConcat": ((_objc.CGAffineTransform, _objc.CGAffineTransform), _objc.CGAffineTransform),
     }
     for name, (argtypes, restype) in signatures.items():
@@ -878,15 +867,12 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
             )
             if not writer:
                 raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error)))
-            number = lambda value: _objc.send(  # noqa: E731
-                _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
-            )
-            settings = _objc.send(
-                _objc.cls("NSDictionary"),
-                "dictionaryWithObjects:forKeys:",
-                _objc.nsarray_of([_objc.nsstring("avc1"), number(width), number(height)]),
-                _objc.nsarray_of([_objc.nsstring(key) for key in ("AVVideoCodecKey", "AVVideoWidthKey", "AVVideoHeightKey")]),
-                argtypes=(_objc.id, _objc.id),
+            settings = _objc.nsdictionary_of(
+                {
+                    "AVVideoCodecKey": _objc.nsstring("avc1"),
+                    "AVVideoWidthKey": _objc.nsnumber(width),
+                    "AVVideoHeightKey": _objc.nsnumber(height),
+                }
             )
             writer_input = _objc.send(
                 _objc.cls("AVAssetWriterInput"),
