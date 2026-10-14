@@ -9,12 +9,19 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, with nothing pushed: the package leans on macOS internals (private
+  # frameworks, preference keys, kernel structures), and GitHub moves its images
+  # to new macOS and Xcode releases. A failure here is macOS that changed under
+  # main, found before a user does.
+  schedule:
+    - cron: '17 6 * * 1'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The event too: the weekly run on main and a push to main don't cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
