@@ -318,7 +318,8 @@ def open(url: str, app: Optional[str] = None) -> None:
         if default is None:
             # Not a plain `open url`: that hands the URL to whatever handles its scheme, so a
             # file:// URL to a .command or an app would run it, and this opens web pages only.
-            raise AppNotFoundError("macOS has no default web browser to open {!r} in".format(url))
+            # The URL stays out of the message: a link may carry a token, and errors end up in logs.
+            raise AppNotFoundError("macOS has no default web browser to open the URL in")
         _run(["open", "-a", default, url])
         return
     _run(["open", "-a", browser, url])
