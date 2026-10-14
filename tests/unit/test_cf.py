@@ -80,3 +80,16 @@ def test_spin_pauses_when_the_run_loop_has_nothing_to_wait_for(fake_cf, monkeypa
 def test_strings_come_back_whole_nul_characters_inside_included(text, expected):
     with _cf.owned(_cf.string(text)) as ref:
         assert _cf.to_str(ref) == expected  # the NULs at the end are a driver's padding
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="looks up the real runtime and libraries")
+def test_a_class_or_constant_this_macos_lacks_is_not_supported_and_still_a_lookup_error():
+    from macos import _objc
+
+    with pytest.raises(macos.NotSupportedError, match="'PymacosNoSuchClass' is not loaded") as missing:
+        _objc.cls("PymacosNoSuchClass")
+    assert isinstance(missing.value, LookupError)  # what the callers that turn it into their own message catch
+    with pytest.raises(macos.NotSupportedError, match="kPymacosNoSuchKey isn't in this version of macOS") as missing:
+        _cf.constant(_cf.lib(), "kPymacosNoSuchKey")
+    assert isinstance(missing.value, LookupError)
+    assert _cf.constant(_cf.lib(), "kCFBooleanTrue")  # one that's there still reads

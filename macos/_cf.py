@@ -18,7 +18,7 @@ import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ._system import framework
-from .errors import MacOSError
+from .errors import MacOSError, NotSupportedError
 
 CFTypeRef = ctypes.c_void_p
 CFIndex = ctypes.c_long
@@ -150,11 +150,21 @@ def lib() -> ctypes.CDLL:
     return cf
 
 
+class Unavailable(NotSupportedError, LookupError):
+    """
+    A class or constant this macOS doesn't have (an older one, mostly): a :class:`NotSupportedError`,
+    so ``except MacOSError`` catches it, and a :class:`LookupError`, as these lookups raised before.
+    """
+
+
 def constant(library: ctypes.CDLL, name: str) -> int:
     """Read a global ``CFTypeRef`` constant (e.g. ``kSecClass``) from a library."""
-    value = CFTypeRef.in_dll(library, name).value
+    try:
+        value = CFTypeRef.in_dll(library, name).value
+    except ValueError:  # the symbol isn't there
+        raise Unavailable("{} isn't in this version of macOS".format(name)) from None
     if value is None:
-        raise LookupError("{} is NULL".format(name))
+        raise Unavailable("{} is NULL".format(name))
     return value
 
 

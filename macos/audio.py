@@ -1080,7 +1080,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
     music and instruments, dogs, birds, cars, sirens, applause, rain... It
     listens to the whole file, a few seconds at a time, and averages what it
     hears; sounds shorter than half a second are too short to tell. Runs
-    offline and needs no permission::
+    offline, needs no permission, and needs macOS 12 or later::
 
         if dict(macos.audio.classify("clip.m4a")).get("dog_bark", 0) > 0.5:
             print("a dog!")
@@ -1090,7 +1090,10 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
     if limit < 1:
         raise ValueError("limit must be at least 1, not {}".format(limit))
     source = _existing(path)
-    framework("SoundAnalysis")
+    try:
+        identifier = ctypes.c_void_p.in_dll(framework("SoundAnalysis"), "SNClassifierIdentifierVersion1").value
+    except ValueError:  # the symbol isn't there
+        raise NotSupportedError("classify() needs macOS 12 or later") from None
     _objc.define_class(
         "PymacosSoundObserver",
         {
@@ -1102,7 +1105,6 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
     )
     with _objc.autorelease_pool():
         error = ctypes.c_void_p()
-        identifier = ctypes.c_void_p.in_dll(framework("SoundAnalysis"), "SNClassifierIdentifierVersion1").value
         request = _objc.send(
             _objc.send(_objc.cls("SNClassifySoundRequest"), "alloc"),
             "initWithClassifierIdentifier:error:",

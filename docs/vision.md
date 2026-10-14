@@ -150,7 +150,8 @@ macos.vision.text(scan)   # OCR reads a scan better than the photo
 ```
 
 Vision finds the page's four corners and corrects the perspective, so only the
-page is left. It returns `None` when the photo doesn't show a document. To put
+page is left. It returns `None` when the photo doesn't show a document, and
+needs macOS 12 or later. To put
 several scans in one PDF, see {func}`macos.pdf.from_images`.
 
 ## Smart cropping

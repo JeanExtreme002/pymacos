@@ -496,7 +496,7 @@ def scan_document(image: Image) -> Optional[bytes]:
 
     Finds the document's edges, crops the rest of the photo away and corrects
     the perspective, like the scanner in Notes. Returns ``None`` when no
-    document is found::
+    document is found. Needs macOS 12 or later::
 
         scan = macos.vision.scan_document("receipt_photo.jpg")
         macos.vision.text(scan)                          # read it
@@ -504,6 +504,10 @@ def scan_document(image: Image) -> Optional[bytes]:
     """
     _refuse_pdf(image)
     _load()
+    try:
+        _objc.cls("VNDetectDocumentSegmentationRequest")
+    except LookupError:
+        raise NotSupportedError("scan_document() needs macOS 12 or later") from None
     with _objc.autorelease_pool():
         picture = _objc.ciimage(image)
         extent = _objc.send(picture, "extent", restype=_objc.CGRect)
