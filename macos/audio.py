@@ -410,7 +410,7 @@ def _recorder(target: Path, channels: int, metering: bool = False) -> int:
         argtypes=(_objc.id, _objc.id, ctypes.c_void_p),
     )
     if not recorder:
-        raise MacOSError("could not record to {}: {}".format(target, _objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not record to {}: {}".format(target, _objc.error_message(error)))
     _objc.send(recorder, "autorelease")
     _objc.send(recorder, "setMeteringEnabled:", metering, argtypes=(_objc.BOOL,), restype=None)
     if not _objc.send(recorder, "prepareToRecord", restype=_objc.BOOL):
@@ -997,7 +997,7 @@ def _read_samples(
         argtypes=(_objc.id, ctypes.c_void_p),
     )
     if not reader:
-        raise MacOSError("could not read the sound: {}".format(_objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not read the sound: {}".format(_objc.error_message(error)))
     _objc.send(reader, "autorelease")
     settings = {
         "AVFormatIDKey": _code("lpcm"),
@@ -1136,7 +1136,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             argtypes=(_objc.id, ctypes.c_void_p),
         )
         if not analyzer:
-            raise ValueError("{} has no sound macOS can read: {}".format(source, _objc.error_message(error)))
+            raise ValueError("{} has no sound macOS can read: {}".format(source, _objc.error_message(error, "unknown format")))
         _objc.send(analyzer, "autorelease")
         observer = _objc.new("PymacosSoundObserver")
         if not _objc.send(

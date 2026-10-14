@@ -17,10 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
-from ._system import require_macos, run as _run
-from .errors import NotSupportedError
+from ._system import popen, run as _run
 
 __all__ = ["say", "voices", "Voice"]
+
+_VOICES_TIMEOUT = 30.0  # seconds for ``say -v ?``: it lists the voices at once, unless speech is wedged
 
 
 @dataclass(frozen=True)
@@ -79,11 +80,7 @@ def say(
         _run(args, input=text)
         return target
 
-    require_macos()
-    try:
-        process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        raise NotSupportedError("the 'say' command was not found on this system") from None
+    process = popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Write the text before returning, not from a background thread: if the
     # script ends right after this call, a thread could be killed before the
@@ -103,7 +100,7 @@ def say(
 def voices() -> List[Voice]:
     """Return the voices installed on this Mac."""
     found = []
-    for line in _run(["say", "-v", "?"]).splitlines():
+    for line in _run(["say", "-v", "?"], timeout=_VOICES_TIMEOUT).splitlines():
         # Format: "<name, may contain spaces> <locale>    # <sample sentence>"
         head, _, sample = line.partition("#")
         parts = head.split()

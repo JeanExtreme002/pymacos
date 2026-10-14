@@ -22,8 +22,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from ._system import require_macos, run_bytes
-from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
+from ._system import popen, run_bytes
+from .errors import CommandError, CommandTimeoutError, MacOSError
 
 __all__ = ["search", "search_name", "metadata"]
 
@@ -59,7 +59,6 @@ def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = No
         # query parser ignores it (same results either way).
         args = [*args[:-1], " " + query]
 
-    require_macos()
     # No `-interpret`: without it, mdfind already understands Spotlight-bar
     # syntax (plain words, kind:, date:), and with it raw `kMDItem...` queries
     # are taken as text and return wrong results. `-0` ends each path with a
@@ -71,11 +70,8 @@ def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = No
     command = ["mdfind", "-0", *args]
     errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")  # as run() reads output
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
-    except FileNotFoundError:
-        errors.close()
-        raise NotSupportedError("the 'mdfind' command was not found on this system") from None
-    except BaseException:
+        process = popen(command, stdout=subprocess.PIPE, stderr=errors)
+    except BaseException:  # a missing mdfind (NotSupportedError) too
         errors.close()
         raise
     assert process.stdout is not None

@@ -107,6 +107,8 @@ Funding = "https://github.com/sponsors/JeanExtreme002"
 [tool.mypy]
 ignore_missing_imports = true
 warn_unused_ignores = true
+# The bodies of functions without annotations are checked too (nested helpers, callbacks).
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 # -rs: the live tests that need a permission or a device this machine lacks skip

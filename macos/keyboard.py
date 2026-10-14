@@ -1031,9 +1031,9 @@ def _hid_code(key: str) -> int:
 
 
 def _mappings() -> Dict[int, int]:
-    from ._system import run
+    from ._system import HIDUTIL_TIMEOUT, run
 
-    output = run(["hidutil", "property", "--get", "UserKeyMapping"])
+    output = run(["hidutil", "property", "--get", "UserKeyMapping"], timeout=HIDUTIL_TIMEOUT)
     found = {}
     for block in re.findall(r"\{(.*?)\}", output, re.S):
         source = re.search(r"HIDKeyboardModifierMappingSrc\s*=\s*(\d+)", block)
@@ -1044,12 +1044,12 @@ def _mappings() -> Dict[int, int]:
 
 
 def _set_mappings(mappings: Dict[int, int]) -> None:
-    from ._system import run
+    from ._system import HIDUTIL_TIMEOUT, run
 
     pairs = [
         {"HIDKeyboardModifierMappingSrc": source, "HIDKeyboardModifierMappingDst": target} for source, target in mappings.items()
     ]
-    run(["hidutil", "property", "--set", json.dumps({"UserKeyMapping": pairs})])
+    run(["hidutil", "property", "--set", json.dumps({"UserKeyMapping": pairs})], timeout=HIDUTIL_TIMEOUT)
 
 
 def remappings() -> Dict[str, str]:
