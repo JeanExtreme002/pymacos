@@ -208,7 +208,7 @@ def _confidence(observation: int) -> float:
 
 
 def _error(error: ctypes.c_void_p, fallback: str, prefix: str = "") -> MacOSError:
-    message = _objc.error_message(error)
+    message = _objc.error_message(error, None)
     return MacOSError(prefix + message if message else fallback)
 
 

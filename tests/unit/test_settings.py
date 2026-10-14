@@ -565,6 +565,17 @@ def test_mouse_acceleration(prefs, monkeypatch):
     assert commands == [(["hidutil", "property", "--set", '{"HIDUseLinearScalingMouseAcceleration": 1}'], True)]
 
 
+def test_mouse_acceleration_is_saved_when_the_mouse_driver_doesnt_answer(prefs, monkeypatch):
+    store, _ = prefs
+
+    def wedged(args, timeout=None):
+        raise macos.CommandTimeoutError(args, timeout)
+
+    monkeypatch.setattr(_system, "run", wedged)
+    macos.mouse.set_acceleration(False)  # applies at the next login, as apply_input_settings() leaves it
+    assert store[(G, "com.apple.mouse.linear", False)] is True
+
+
 def test_dock_switches_and_hot_corner_modifiers(prefs):
     store, done = prefs
     D = "com.apple.dock"

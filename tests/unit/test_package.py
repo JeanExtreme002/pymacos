@@ -85,6 +85,9 @@ def test_commands_are_the_systems_own_never_a_namesake_along_path(tmp_path, monk
     # One the system doesn't have is missing, as it was from PATH, rather than the namesake run.
     with pytest.raises(macos.NotSupportedError, match="'pymacos-no-such-command' command was not found"):
         _system.run(["pymacos-no-such-command"])
+    with pytest.raises(macos.NotSupportedError, match="'pymacos-no-such-command' command was not found"):
+        _system.popen(["pymacos-no-such-command"])  # what quick_look, logs, say and mdfind start with
+    _system.popen(["true"]).wait()
     assert not marker.exists()
     # A path is run as given.
     assert _system.executable(str(tmp_path / "true")) == str(tmp_path / "true")

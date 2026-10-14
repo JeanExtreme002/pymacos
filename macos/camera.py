@@ -128,7 +128,7 @@ def _input(device: int) -> int:
     )
     if not source:
         name = _objc.pystring(_objc.send(device, "localizedName"))
-        raise MacOSError("could not use {}: {}".format(name, _objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not use {}: {}".format(name, _objc.error_message(error)))
     return source
 
 

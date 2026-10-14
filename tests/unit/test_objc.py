@@ -88,3 +88,14 @@ def test_struct_returns_pick_the_stret_trampoline_only_on_intel(monkeypatch, mac
     monkeypatch.setattr(_objc, "_libobjc", lambda: Runtime)
     prototype = _objc._prototype.__wrapped__(resolved, ())
     assert ctypes.cast(prototype, ctypes.c_void_p).value == (0x2000 if stret else 0x1000)
+
+
+def test_an_error_macos_gave_no_reason_for_still_reads_as_a_message():
+    import ctypes
+
+    from macos import _objc
+
+    nothing = ctypes.c_void_p()  # the NSError out-parameter, left unset
+    assert _objc.error_message(nothing) == "unknown error"
+    assert _objc.error_message(nothing, "no image") == "no image"
+    assert _objc.error_message(nothing, None) is None

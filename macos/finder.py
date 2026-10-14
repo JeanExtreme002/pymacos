@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 
 from . import _cf, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, executable, framework, require_macos, restart_process, run as _run
+from ._system import applescript, framework, popen, require_macos, restart_process, run as _run
 from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
 
 __all__ = [
@@ -105,7 +105,7 @@ def _existing(path: PathLike) -> Path:
 
 
 def _raise(error: ctypes.c_void_p, what: str) -> None:
-    raise MacOSError("{}: {}".format(what, _objc.error_message(error) or "unknown error"))
+    raise MacOSError("{}: {}".format(what, _objc.error_message(error)))
 
 
 @lru_cache(maxsize=None)
@@ -386,7 +386,7 @@ def resolve_alias(path: PathLike) -> Path:
             if not target:
                 raise FileNotFoundError(
                     "the original of the alias {} was not found: {}".format(
-                        current, _objc.error_message(error) or "it may have been deleted"
+                        current, _objc.error_message(error, "it may have been deleted")
                     )
                 )
         current = Path(target)
@@ -913,9 +913,8 @@ def quick_look(path: PathLike) -> None:
     # ends; the ones still open are kept, so Python doesn't warn about a process dropped running.
     _previews[:] = [preview for preview in _previews if preview.poll() is None]
     _previews.append(
-        subprocess.Popen(
+        popen(
             ["qlmanage", "-p", str(source)],
-            executable=executable("qlmanage"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # outlives the script, as a preview opened from Finder does

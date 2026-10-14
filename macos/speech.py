@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
-from ._system import executable, require_macos, run as _run
-from .errors import NotSupportedError
+from ._system import popen, require_macos, run as _run
 
 __all__ = ["say", "voices", "Voice"]
 
@@ -80,12 +79,7 @@ def say(
         return target
 
     require_macos()
-    try:
-        process = subprocess.Popen(
-            args, executable=executable(args[0]), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except FileNotFoundError:
-        raise NotSupportedError("the 'say' command was not found on this system") from None
+    process = popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Write the text before returning, not from a background thread: if the
     # script ends right after this call, a thread could be killed before the

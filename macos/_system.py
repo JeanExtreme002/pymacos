@@ -60,6 +60,7 @@ def deprecated(replacement: str, *, removal: str) -> Callable[[_F], _F]:
 _SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 
+@lru_cache(maxsize=None)  # those folders are on the read-only system volume: what's there stays
 def executable(command: str) -> str:
     """
     The file to run for ``command``: the system's own command of that name, or ``command`` when it's a path.
@@ -74,6 +75,20 @@ def executable(command: str) -> str:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return os.path.join(_SYSTEM_DIRECTORIES[0], command)
+
+
+def popen(args: Sequence[str], **options: Any) -> "subprocess.Popen[Any]":
+    """
+    Start a system command and return its process, for the callers that read or wait on it themselves.
+
+    The command is found as :func:`run` finds it, and one the system doesn't
+    have raises :class:`NotSupportedError`, as there. ``options`` go to
+    :class:`subprocess.Popen`.
+    """
+    try:
+        return subprocess.Popen(list(args), executable=executable(args[0]), **options)
+    except FileNotFoundError:
+        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
 
 
 def run(
@@ -177,12 +192,7 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     alone (``kill`` of its pid) still leaves it to run until its own end.
     """
     require_macos()
-    try:
-        process = subprocess.Popen(
-            list(args), executable=executable(args[0]), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-        )
-    except FileNotFoundError:
-        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+    process = popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         _, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -298,6 +308,8 @@ LAUNCHCTL_TIMEOUT = 60.0
 """Seconds for a ``launchctl`` call: it answers at once, unless launchd is wedged."""
 PROFILER_TIMEOUT = 60.0
 """Seconds for ``system_profiler``: it takes a moment, and has hung on some Macs."""
+HIDUTIL_TIMEOUT = 30.0
+"""Seconds for ``hidutil``: it answers at once, unless the HID system is wedged."""
 
 
 def launchd_user_domain() -> str:
