@@ -500,7 +500,8 @@ def _due_timers(now: float) -> List[Timer]:
 
 def _pump(app: int, wait: float) -> None:
     """Deliver the events of the next ``wait`` seconds (clicks on the icons), then run what they queued."""
-    with _objc.autorelease_pool():
+    # A Ctrl-C while AppKit waits, or during a click's callback, is raised once the block ends.
+    with _cf.deferred_interrupt(), _objc.autorelease_pool():
         until = _objc.send(_objc.cls("NSDate"), "dateWithTimeIntervalSinceNow:", wait, argtypes=(ctypes.c_double,))
         event = _objc.send(
             app,
@@ -513,7 +514,6 @@ def _pump(app: int, wait: float) -> None:
         )
         if event:
             _objc.send(app, "sendEvent:", event, argtypes=(_objc.id,), restype=None)
-    _cf.raise_interrupt()  # a Ctrl-C during a click's callback, or one the run loop ran meanwhile
     # Their own pool: a timer that updates a title every second would
     # otherwise leave its strings behind for as long as the script runs.
     with _objc.autorelease_pool():

@@ -13,6 +13,7 @@ import ctypes
 from contextlib import contextmanager
 from functools import lru_cache, wraps
 import plistlib
+import signal
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -338,10 +339,10 @@ def run_loop(seconds: float, *, once: bool = True) -> bool:
 
     Returns ``False`` when the run loop had nothing to wait for and came back
     at once: the caller should pause instead of spinning. A Ctrl-C that came
-    during a callback is raised here (see :func:`callback`).
+    while it turned is raised here (see :func:`deferred_interrupt`).
     """
-    turned = lib().CFRunLoopRunInMode(default_mode(), seconds, once) != _RUN_FINISHED
-    raise_interrupt()
+    with deferred_interrupt():
+        turned = lib().CFRunLoopRunInMode(default_mode(), seconds, once) != _RUN_FINISHED
     return bool(turned)
 
 
@@ -352,16 +353,20 @@ _interrupt = threading.local()
 
 def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]] = None) -> Callable[..., Any]:
     """
-    Wrap ``function`` for C to call back, so a Ctrl-C inside it isn't lost.
+    Wrap ``function`` for C to call back, so a Ctrl-C or an exit inside it isn't lost.
+
+    A Ctrl-C that came while native code ran is raised at the callback's
+    entry, before this can catch it: :func:`deferred_interrupt`, around that
+    native code, keeps that one. This keeps those raised inside the callback
+    (a Ctrl-C under a handler the script installed, a ``sys.exit()``).
 
     Its own exceptions go on as before. A ``KeyboardInterrupt`` or
     ``SystemExit`` on the main thread is kept instead, the run loop is
     stopped, and :func:`raise_interrupt` raises it once the run loop hands
     back: in :func:`run_loop`, or where a caller turns the run loop some other
     way. The callback returns ``fallback(*arguments)`` meanwhile (``None``
-    without one): an event tap must hand its event back. On another thread,
-    where Python never delivers a Ctrl-C and nothing would raise it, it goes on
-    as before too.
+    without one): an event tap must hand its event back. On another thread
+    Python never delivers a Ctrl-C: an exit there goes on as before.
     """
     @wraps(function)
     def guarded(*arguments: Any) -> Any:
@@ -377,6 +382,38 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
             return fallback(*arguments) if fallback is not None else None
 
     return guarded
+
+
+@contextmanager
+def deferred_interrupt() -> Iterator[None]:
+    """
+    Keep a Ctrl-C that comes while native code runs in the block (a run loop, an analysis), and raise it once the block ends.
+
+    Python raises a Ctrl-C at the next Python code that runs: while native
+    code runs, that's the entry of the next callback C makes, before any
+    ``try`` in it, and ctypes drops it there. In the block, SIGINT only notes
+    it and stops the run loop, so the callbacks run on (and can stop their
+    work, see :func:`interrupted`). Only on the main thread, and only while
+    SIGINT has Python's own handler: one the script installed is left alone.
+    """
+    ours = threading.current_thread() is threading.main_thread() and signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    if not ours:
+        yield
+        raise_interrupt()  # one a callback kept
+        return
+
+    def keep(signum: int, frame: Any) -> None:
+        if getattr(_interrupt, "error", None) is None:
+            _interrupt.error = KeyboardInterrupt()
+        cf = lib()
+        cf.CFRunLoopStop(cf.CFRunLoopGetCurrent())
+
+    signal.signal(signal.SIGINT, keep)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    raise_interrupt()
 
 
 def interrupted() -> bool:

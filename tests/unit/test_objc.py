@@ -123,6 +123,61 @@ def test_a_ctrl_c_inside_a_callback_comes_out_of_the_run_loop():
     _objc.run_until(lambda: False, 0.05)  # raised once
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="turns a CoreFoundation run loop")
+def test_a_real_ctrl_c_while_callbacks_run_comes_out_of_the_run_loop():
+    import ctypes
+    import os
+    import signal
+    import threading
+    import time
+
+    from macos import _objc, _system
+
+    _system.framework("Foundation")
+    # A callback every millisecond: a SIGINT that comes while the run loop turns is raised at the
+    # entry of the next one, before any try in it, unless the run loop keeps it.
+    ticked = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    probe = _objc.define_class("PymacosTestSigint", {"tick:": ("v@:@", ticked, lambda self, cmd, timer: None)})
+    with _objc.autorelease_pool():
+        target = _objc.send(_objc.send(probe, "alloc"), "init")
+        timer = _objc.send(
+            _objc.cls("NSTimer"),
+            "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:",
+            0.001,
+            target,
+            _objc.sel("tick:"),
+            None,
+            True,
+            argtypes=(ctypes.c_double, _objc.id, ctypes.c_void_p, _objc.id, _objc.BOOL),
+        )
+        try:
+            threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGINT)).start()
+            started = time.monotonic()
+            with pytest.raises(KeyboardInterrupt):
+                _objc.run_until(lambda: False, 5)
+            assert time.monotonic() - started < 2  # when it came, not when the wait ran out
+        finally:
+            _objc.send(timer, "invalidate", restype=None)
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # put back
+
+
+def test_a_sigint_handler_the_script_installed_is_left_alone():
+    import signal
+
+    from macos import _cf
+
+    def mine(signum, frame):
+        pass
+
+    previous = signal.signal(signal.SIGINT, mine)
+    try:
+        with _cf.deferred_interrupt():
+            assert signal.getsignal(signal.SIGINT) is mine
+        assert signal.getsignal(signal.SIGINT) is mine
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
 def test_a_callback_interrupted_hands_back_its_fallback():
     import ctypes

@@ -114,36 +114,42 @@ def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
     import textwrap
     import wave
 
-    # Three minutes of noise: sixty of the classifier's three-second windows.
+    # Five minutes of sound: some hundred of the classifier's overlapping windows.
     source = tmp_path / "long.wav"
     with wave.open(str(source), "wb") as out:
         out.setnchannels(1)
         out.setsampwidth(2)
         out.setframerate(16000)
         second = bytes(range(256)) * 125  # 16000 samples of 2 bytes
-        out.writeframes(second * 180)
-    # In a process of its own: the observer's class is made once, with the callback first given.
+        out.writeframes(second * 300)
+    # In a process of its own: a real SIGINT, as Ctrl-C sends, a quarter of the way into the analysis
+    # (timed by a full one first). It comes while the analysis runs natively, the hard case.
     code = textwrap.dedent(
         """
-        import sys
+        import os, signal, sys, threading, time
         import macos.audio as audio
 
         original, calls = audio._on_result, []
 
         def on_result(*args):
             calls.append(1)
-            if len(calls) == 1:
-                raise KeyboardInterrupt  # Ctrl-C, landing while the observer reads the first result
             return original(*args)
 
         audio._on_result = on_result
+        started = time.monotonic()
+        audio.classify(sys.argv[1])
+        full, took = len(calls), time.monotonic() - started
+        del calls[:]
+        threading.Timer(took / 4, os.kill, (os.getpid(), signal.SIGINT)).start()
         try:
             audio.classify(sys.argv[1])
+            print("finished", len(calls), full)
         except KeyboardInterrupt:
-            print(len(calls))
+            print("interrupted", len(calls), full)
         """
     )
     result = subprocess.run([sys.executable, "-c", code, str(source)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
-    # Raised, and the analysis cancelled at the next result, not after all sixty windows.
-    assert result.stdout.strip() and int(result.stdout) < 10
+    outcome, read, full = result.stdout.split()
+    # Raised, and the analysis cancelled there, not run to its end.
+    assert outcome == "interrupted" and int(read) < int(full) * 3 // 4, result.stdout

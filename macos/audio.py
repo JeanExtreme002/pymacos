@@ -1140,8 +1140,8 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error)))
         _heard.setdefault(observer, {"labels": {}})["analyzer"] = analyzer  # for a Ctrl-C to cancel it
         try:
-            _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
-            _cf.raise_interrupt()  # a Ctrl-C while the observer ran: it cancelled the analysis
+            with _cf.deferred_interrupt():  # a Ctrl-C meanwhile: the observer cancels the analysis, then it's raised
+                _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
             heard = _heard.get(observer, {"labels": {}})
         finally:
             _heard.pop(observer, None)
