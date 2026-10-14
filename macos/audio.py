@@ -1151,6 +1151,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error)))
         try:
             _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
+            _cf.raise_interrupt()  # a Ctrl-C while the observer ran, kept until the analysis ended
             heard = _heard.get(observer, {"labels": {}})
         finally:
             _heard.pop(observer, None)

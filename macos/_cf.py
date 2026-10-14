@@ -11,9 +11,10 @@ to :func:`release`; :func:`owned` does that automatically at the end of a
 
 import ctypes
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, wraps
 import plistlib
-from typing import Any, Dict, Iterator, List, Optional
+import threading
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ._system import framework
 from .errors import MacOSError
@@ -132,6 +133,8 @@ def lib() -> ctypes.CDLL:
     cf.CFRunLoopRemoveSource.restype = None
     cf.CFRunLoopRunInMode.argtypes = (CFTypeRef, ctypes.c_double, ctypes.c_bool)
     cf.CFRunLoopRunInMode.restype = ctypes.c_int32
+    cf.CFRunLoopStop.argtypes = (CFTypeRef,)
+    cf.CFRunLoopStop.restype = None
     cf.CFMachPortCreateRunLoopSource.argtypes = (CFTypeRef, CFTypeRef, CFIndex)
     cf.CFMachPortCreateRunLoopSource.restype = CFTypeRef
     cf.CFMachPortInvalidate.argtypes = (CFTypeRef,)
@@ -323,9 +326,52 @@ def run_loop(seconds: float, *, once: bool = True) -> bool:
     Turn this thread's run loop for up to ``seconds``; with ``once``, return after the first source handled.
 
     Returns ``False`` when the run loop had nothing to wait for and came back
-    at once: the caller should pause instead of spinning.
+    at once: the caller should pause instead of spinning. A Ctrl-C that came
+    during a callback is raised here (see :func:`callback`).
     """
-    return bool(lib().CFRunLoopRunInMode(default_mode(), seconds, once) != _RUN_FINISHED)
+    turned = lib().CFRunLoopRunInMode(default_mode(), seconds, once) != _RUN_FINISHED
+    raise_interrupt()
+    return bool(turned)
+
+
+# A Ctrl-C (or a SystemExit) raised inside a callback, on this thread, not raised yet. ctypes can't let it
+# out of a callback: it prints it and returns to C, so the script would go on as if Ctrl-C never came.
+_interrupt = threading.local()
+
+
+def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]] = None) -> Callable[..., Any]:
+    """
+    Wrap ``function`` for C to call back, so a Ctrl-C inside it isn't lost.
+
+    Its own exceptions go on as before. A ``KeyboardInterrupt`` or
+    ``SystemExit`` is kept instead, the run loop is stopped, and
+    :func:`raise_interrupt` raises it once the run loop hands back: in
+    :func:`run_loop`, or where a caller turns the run loop some other way.
+    The callback returns ``fallback(*arguments)`` meanwhile (``None`` without
+    one): an event tap must hand its event back.
+    """
+    @wraps(function)
+    def guarded(*arguments: Any) -> Any:
+        try:
+            return function(*arguments)
+        except Exception:
+            raise
+        except BaseException as error:
+            if getattr(_interrupt, "error", None) is None:  # the first one: a second Ctrl-C says nothing new
+                _interrupt.error = error
+            cf = lib()
+            cf.CFRunLoopStop(cf.CFRunLoopGetCurrent())
+            return fallback(*arguments) if fallback is not None else None
+
+    return guarded
+
+
+def raise_interrupt() -> None:
+    """Raise the Ctrl-C a :func:`callback` kept on this thread, if one did."""
+    error = getattr(_interrupt, "error", None)
+    if error is not None:
+        _interrupt.error = None
+        raise error
 
 
 class RunLoopSource:

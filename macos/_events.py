@@ -267,7 +267,8 @@ class Tap:
         self._listener = listener
         self.port: Optional[int] = None
         self.source: Optional[_cf.RunLoopSource] = None
-        self.callback = _TapCallback(self._tap)  # kept alive for as long as the tap runs
+        # Kept alive for as long as the tap runs. On Ctrl-C, the event goes on, as when an exception is caught below.
+        self.callback = _TapCallback(_cf.callback(self._tap, lambda proxy, kind, event, refcon: event))
         mask = 0
         for kind in kinds:
             mask |= 1 << kind
@@ -330,7 +331,7 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
 
 # Taps closed from a thread other than the one whose run loop they were on: kept for good, see
 # _Listening.close. Rare (a watch() closed or dropped on another thread), and small.
-_RETIRED: List[Tap] = []
+_RETIRED: List[Tap] = globals().get("_RETIRED", [])  # kept across importlib.reload, as _objc's registries
 
 
 class _Listening:

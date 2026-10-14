@@ -651,7 +651,7 @@ def watch(
         except Exception as error:  # an exception must not cross back into C: the loop below raises it
             errors.append(error)
 
-    callback = _Callback(changed)  # kept alive for as long as the stream runs
+    callback = _Callback(_cf.callback(changed))  # kept alive for as long as the stream runs
     with _cf.owned(_cf.from_python([str(folder)])) as paths:
         stream = services.FSEventStreamCreate(None, callback, None, paths, _SINCE_NOW, _LATENCY, _FILE_EVENTS | _NO_DEFER)
     if not stream:
@@ -671,6 +671,7 @@ def watch(
             if remaining <= 0:
                 return
             run_loop.CFRunLoopRunInMode(mode, remaining, True)
+            _cf.raise_interrupt()  # a Ctrl-C during the callback
     finally:
         services.FSEventStreamStop(stream)
         services.FSEventStreamInvalidate(stream)

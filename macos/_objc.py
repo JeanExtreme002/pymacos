@@ -349,7 +349,9 @@ _BLOCK_HAS_SIGNATURE = 1 << 30
 
 # The Python objects behind each block, kept alive as long as the process
 # runs: an API may call a block (or keep it) after the call that took it returns.
-_KEEP_ALIVE: list = []
+# Kept across importlib.reload too, which runs this file again in the same namespace:
+# a fresh list would free the callbacks of the blocks handed out before.
+_KEEP_ALIVE: list = globals().get("_KEEP_ALIVE", [])
 
 
 def block(function: Any, signature: bytes, *argtypes: Any) -> int:
@@ -360,7 +362,7 @@ def block(function: Any, signature: bytes, *argtypes: Any) -> int:
     ``void (^)(BOOL)``; ``argtypes`` are the ctypes of its arguments. The
     block lives for the rest of the process, so make few of them.
     """
-    invoke = ctypes.CFUNCTYPE(None, ctypes.c_void_p, *argtypes)(lambda _block, *arguments: function(*arguments))
+    invoke = ctypes.CFUNCTYPE(None, ctypes.c_void_p, *argtypes)(_cf.callback(lambda _block, *arguments: function(*arguments)))
     descriptor = _BlockDescriptor(0, ctypes.sizeof(_BlockLiteral), signature)
     global_block = ctypes.c_void_p.in_dll(ctypes.CDLL("/usr/lib/libSystem.B.dylib"), "_NSConcreteGlobalBlock")
     literal = _BlockLiteral(
@@ -374,7 +376,10 @@ def block(function: Any, signature: bytes, *argtypes: Any) -> int:
     return ctypes.addressof(literal)
 
 
-_CLASSES: dict = {}
+# The classes made, with the callbacks their methods call. Kept across importlib.reload, as
+# _KEEP_ALIVE is: the runtime keeps a class for good, so a reloaded module gets the same one
+# back, whose methods still point at these callbacks.
+_CLASSES: dict = globals().get("_CLASSES", {})
 # Two threads making the same class at once: the second would find the name taken
 # but not yet registered, and cache no class at all.
 _CLASSES_LOCK = threading.Lock()
@@ -414,7 +419,7 @@ def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
         return int(existing)
     implementations = []
     for selector, (types, function_type, function) in methods.items():
-        implementation = function_type(function)
+        implementation = function_type(_cf.callback(function))  # a Ctrl-C inside it isn't lost
         implementations.append(implementation)
         lib.class_addMethod(new_class, sel(selector), ctypes.cast(implementation, ctypes.c_void_p), types.encode())
     for protocol in protocols:

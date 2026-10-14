@@ -27,7 +27,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Callable, Deque, Dict, List, Optional, Union, cast
 
-from . import _objc
+from . import _cf, _objc
 from ._objc import BOOL, NSInteger
 from ._system import framework, require_macos
 
@@ -513,6 +513,7 @@ def _pump(app: int, wait: float) -> None:
         )
         if event:
             _objc.send(app, "sendEvent:", event, argtypes=(_objc.id,), restype=None)
+    _cf.raise_interrupt()  # a Ctrl-C during a click's callback, or one the run loop ran meanwhile
     # Their own pool: a timer that updates a title every second would
     # otherwise leave its strings behind for as long as the script runs.
     with _objc.autorelease_pool():
