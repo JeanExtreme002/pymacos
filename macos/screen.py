@@ -597,7 +597,7 @@ def set_wallpaper(path: Union[str, "os.PathLike[str]"], *, display_id: Union[int
                 restype=_objc.BOOL,
             )
             if not ok:
-                message = _objc.error_message(error) or "not an image macOS can show"
+                message = _objc.error_message(error, "not an image macOS can show")
                 raise MacOSError("could not set the wallpaper: {}".format(message))
 
 

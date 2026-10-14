@@ -45,7 +45,8 @@ In scope:
   the library itself, such as a `ctypes` or Objective-C signature mismatch or a
   missing release.
 - **Wrong target:** an operation acting on a different item than requested,
-  such as the Keychain item, the app process or the file.
+  such as the Keychain item, the app process or the file, or running another
+  program than the system command it means (one found along `PATH`).
 
 Out of scope:
 

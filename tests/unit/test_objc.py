@@ -170,3 +170,14 @@ def test_classes_made_before_a_reload_keep_working():
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "1234"  # the method still calls its own callback, not freed memory
+
+
+def test_an_error_macos_gave_no_reason_for_still_reads_as_a_message():
+    import ctypes
+
+    from macos import _objc
+
+    nothing = ctypes.c_void_p()  # the NSError out-parameter, left unset
+    assert _objc.error_message(nothing) == "unknown error"
+    assert _objc.error_message(nothing, "no image") == "no image"
+    assert _objc.error_message(nothing, None) is None

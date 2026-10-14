@@ -34,6 +34,7 @@ from ._system import (
     framework,
     launchd_disabled,
     launchd_user_domain,
+    popen,
     require_macos,
     restart_process,
     run as _run,
@@ -2219,7 +2220,7 @@ def logs(
         conditions.append("messageType >= error")  # errors and faults: a keyword, not a string
     elif level == "fault":
         conditions.append("messageType == fault")
-    args = ["/usr/bin/log", "show", "--style", "ndjson", "--last", last]
+    args = ["log", "show", "--style", "ndjson", "--last", last]
     if level in ("info", "debug"):
         args.append("--info")  # log show leaves info and debug messages out unless asked
     if level == "debug":
@@ -2231,7 +2232,7 @@ def logs(
     # (64 KB) on a chatty failure, and log show would wait on it forever while we wait on the output.
     with tempfile.TemporaryFile() as errors_file:
         # Bytes that aren't UTF-8 become U+FFFD, as with run(): one odd message mustn't end the read.
-        reader = subprocess.Popen(
+        reader = popen(
             args, stdout=subprocess.PIPE, stderr=errors_file, text=True, encoding="utf-8", errors="replace"
         )
         assert reader.stdout is not None

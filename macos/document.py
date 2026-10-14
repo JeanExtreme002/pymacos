@@ -122,7 +122,7 @@ def _load(source: Path) -> int:
         argtypes=(_objc.id, _objc.id, ctypes.c_void_p, ctypes.c_void_p),
     )
     if not loaded:
-        raise MacOSError("could not read {}: {}".format(source, _objc.error_message(error) or "unknown format"))
+        raise MacOSError("could not read {}: {}".format(source, _objc.error_message(error, "unknown format")))
     return _objc.send(loaded, "autorelease")
 
 
@@ -166,7 +166,7 @@ def _save(document: int, target: Path, kind: str) -> None:
         argtypes=(_files.NSRange, _objc.id, ctypes.c_void_p),
     )
     if not data:
-        raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error)))
     payload = _objc.pybytes(data) or b""
     _files.write_atomically(target, lambda name: Path(name).write_bytes(payload))
 

@@ -208,9 +208,14 @@ def file_url(path: "os.PathLike[str] | str") -> int:
     return send(cls("NSURL"), "fileURLWithPath:", nsstring(os.fspath(path)), argtypes=(id,))
 
 
-def error_message(error: ctypes.c_void_p) -> Optional[str]:
-    """The ``localizedDescription`` of an ``NSError`` out-parameter, or ``None`` if none was set."""
-    return pystring(send(error.value, "localizedDescription")) if error.value else None
+def error_message(error: ctypes.c_void_p, default: Optional[str] = "unknown error") -> Optional[str]:
+    """
+    The ``localizedDescription`` of an ``NSError`` out-parameter, or ``default`` if none was set.
+
+    macOS doesn't always say why a call failed: the default keeps a message from ending in "None".
+    """
+    message = pystring(send(error.value, "localizedDescription")) if error.value else None
+    return message or default
 
 
 def png(rep: int) -> bytes:

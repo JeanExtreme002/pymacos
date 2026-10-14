@@ -30,6 +30,7 @@ _SCRIPT_EDITOR = "com.apple.ScriptEditor2"
 # (e.g. the ncprefs.py project) and matches what toggling the switch changes.
 _ALLOW_NOTIFICATIONS = 1 << 25
 _SETTINGS_TIMEOUT = 30.0  # seconds for ``defaults export``: it answers at once unless cfprefsd is wedged
+_POST_TIMEOUT = 30.0  # seconds for ``osascript`` to hand the notification over: it never waits for it to show
 
 
 def is_allowed() -> Optional[bool]:
@@ -104,7 +105,7 @@ def notify(
     if allowed is False:
         _refuse()
 
-    _run(["osascript", "-e", "on run argv", "-e", statement, "-e", "end run", "--", *values])
+    _run(["osascript", "-e", "on run argv", "-e", statement, "-e", "end run", "--", *values], timeout=_POST_TIMEOUT)
 
     # The first notification ever registers Script Editor with notifications
     # off, and macOS drops it without a prompt: check again now that it's known.

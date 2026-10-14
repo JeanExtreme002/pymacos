@@ -60,6 +60,8 @@ No Objective-C selectors, no parsing command output, no exit codes.
 
 Your text is never pasted into shell or AppleScript source, so quotes,
 backslashes or a message starting with `-` can't break a call or inject code.
+The commands it runs are macOS's own, from `/usr/bin` and its siblings, never
+a program of the same name found earlier in your `PATH`.
 Passwords go straight to the Keychain and never show up in the process list.
 
 ### Errors that explain themselves

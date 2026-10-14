@@ -234,7 +234,7 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
             restype=ctypes.c_void_p,
         )
         if not image:
-            raise MacOSError("could not read the frame at {}s: {}".format(at, _objc.error_message(error) or "no image"))
+            raise MacOSError("could not read the frame at {}s: {}".format(at, _objc.error_message(error, "no image")))
         return _objc.cgimage_png(image)
 
 
@@ -353,7 +353,7 @@ def _frames_at(
                 )
                 if not picture:
                     raise MacOSError(
-                        "could not read the frame at {:.2f}s: {}".format(moment, _objc.error_message(error) or "no image")
+                        "could not read the frame at {:.2f}s: {}".format(moment, _objc.error_message(error, "no image"))
                     )
                 pictures.append(picture)
     except BaseException:
