@@ -1679,8 +1679,9 @@ def images(
                     if graphics.CGPDFObjectGetValue(value, _STREAM, ctypes.byref(stream)) and stream.value:
                         named.append((key, stream.value))
 
-                visitor = _Visitor(visit)
+                visitor = _Visitor(_cf.callback(visit))
                 graphics.CGPDFDictionaryApplyFunction(objects, visitor, None)
+                _cf.raise_interrupt()  # a Ctrl-C during the visit, rather than a page read with images missing
                 # The dictionary's own order isn't fixed: go by name, naturally (Im2 before Im10), the same on any Mac.
                 named.sort(key=lambda item: _natural(item[0]))
                 for _, stream in named:

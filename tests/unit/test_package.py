@@ -157,3 +157,44 @@ def test_each_core_graphics_function_is_declared_in_one_module():
         for name in re.findall(r'"(CG\w+)":\s*\(', source) + re.findall(r"\.(CG\w+)\.(?:argtypes|restype)\s*=", source):
             declared[name].add(path.name)
     assert {name: sorted(modules) for name, modules in declared.items() if len(modules) > 1} == {}
+
+
+def test_every_callback_lets_a_ctrl_c_out():
+    import ast
+    import pathlib
+
+    # ctypes swallows a KeyboardInterrupt raised inside a callback: each Python function handed to C
+    # goes through _cf.callback, which keeps it for the run loop to raise. The callback types are
+    # the CFUNCTYPEs bound to a name, in any module; _objc's `signature` is the other way round (it calls C).
+    trees = {path.name: ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path(macos.__file__).parent.glob("*.py")}
+    types = {
+        target.id
+        for tree in trees.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "CFUNCTYPE"
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id != "signature"
+    }
+    assert {"_TapCallback", "POWER_CALLBACK", "DisplayCallback", "_Callback", "_Visitor"} <= types
+
+    def guarded(argument):
+        return (
+            isinstance(argument, ast.Call)
+            and isinstance(argument.func, ast.Attribute)
+            and argument.func.attr == "callback"
+            and isinstance(argument.func.value, ast.Name)
+            and argument.func.value.id == "_cf"
+        )
+
+    unguarded = []
+    for name, tree in sorted(trees.items()):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            made = node.func
+            typed = (isinstance(made, ast.Name) and made.id in types) or (isinstance(made, ast.Attribute) and made.attr in types)
+            inline = isinstance(made, ast.Call) and isinstance(made.func, ast.Attribute) and made.func.attr == "CFUNCTYPE"
+            if (typed or inline) and not guarded(node.args[0]):
+                unguarded.append("{}:{}".format(name, node.lineno))
+    assert unguarded == []
