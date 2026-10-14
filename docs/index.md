@@ -84,6 +84,7 @@ installation
 quickstart
 recipes
 permissions
+compatibility
 ```
 
 ```{toctree}

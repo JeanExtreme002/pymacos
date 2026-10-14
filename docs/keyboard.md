@@ -257,6 +257,8 @@ with [`macos.schedule`](schedule.md).
 - {func}`macos.keyboard.set_layout`
 - {func}`macos.keyboard.has_permission`
 - {func}`macos.keyboard.request_permission`
+- {func}`macos.keyboard.has_listen_permission`
+- {func}`macos.keyboard.request_listen_permission`
 - {func}`macos.keyboard.brightness`
 - {func}`macos.keyboard.set_brightness`
 - {func}`macos.keyboard.auto_brightness`

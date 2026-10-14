@@ -48,7 +48,7 @@ def test_events_run_calls_the_callbacks_of_each_event(monkeypatch):
     events.on("sleep", print)  # a builtin: it gets the event
 
     def listen(names, on_event, timeout):
-        assert names == ["sleep", "wake"]
+        assert names == list(events.NAMES)  # every event: a callback registered meanwhile gets its events too
         for name in ("wake", "sleep"):
             on_event(macos.events.Event(name))
 
@@ -56,6 +56,25 @@ def test_events_run_calls_the_callbacks_of_each_event(monkeypatch):
     events.run()
 
     assert calls == [("a", "wake"), ("b", "wake"), ("c", "sleep"), ("d", "no arguments")]
+
+
+def test_events_run_calls_a_callback_registered_while_it_runs(monkeypatch):
+    calls = []
+
+    def first(event):
+        calls.append(("first", event.name))
+        events.on("app_quit", lambda event: calls.append(("late", event.name)))  # from a callback, for another event
+
+    events.on("wake", first)
+
+    def listen(names, on_event, timeout):
+        for name in ("wake", "app_quit", "app_quit"):
+            on_event(macos.events.Event(name))
+
+    monkeypatch.setattr(events, "_listen", listen)
+    events.run()
+
+    assert calls == [("first", "wake"), ("late", "app_quit"), ("late", "app_quit")]
 
 
 def test_events_wait_returns_the_awaited_event(monkeypatch):

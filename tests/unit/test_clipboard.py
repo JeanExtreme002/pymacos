@@ -71,7 +71,7 @@ def test_clipboard_watch_yields_each_copy(monkeypatch):
     monkeypatch.setattr(clipboard, "paste", paste)
     monkeypatch.setattr(clipboard.time, "sleep", tick)
 
-    watched = clipboard.watch()
+    watched = clipboard.watch(include_sensitive=True)
     assert next(watched) == "one"
     state["copy_while_reading"] = True
     state["now"] = (4, "image")
@@ -154,7 +154,7 @@ def test_watch_can_skip_what_is_marked_sensitive(monkeypatch):
     assert next(clipboard.watch(include_sensitive=False)) == "hello"  # the password is skipped
     moments = iter([(1, "old", False), (2, "s3cret", True)])
     state["now"] = (1, "old", False)
-    assert next(clipboard.watch()) == "s3cret"  # by default, every copy, as before
+    assert next(clipboard.watch(include_sensitive=True)) == "s3cret"  # asked for, every copy
 
 
 def test_sensitive_means_either_marker(monkeypatch):
@@ -174,3 +174,22 @@ def test_sensitive_means_either_marker(monkeypatch):
     assert clipboard._is_sensitive()
     types[:] = ["org.nspasteboard.ConcealedType"]
     assert clipboard._is_sensitive()
+
+
+def test_clipboard_wait_for_change_can_wait_on_past_a_concealed_copy(monkeypatch):
+    counts = iter([1, 2, 2, 3])  # a password is copied (2), then a link (3)
+    sensitive = iter([True, False])
+    monkeypatch.setattr(macos.clipboard, "change_count", lambda: next(counts))
+    monkeypatch.setattr(macos.clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(macos.clipboard, "_is_sensitive", lambda: next(sensitive))
+    monkeypatch.setattr(macos.clipboard, "paste", lambda: "copied")
+
+    assert macos.clipboard.wait_for_change(interval=0.001, include_sensitive=False) == "copied"
+    assert next(counts, None) is None  # it waited for the third count
+
+
+def test_clipboard_watch_warns_until_told_about_concealed_copies(monkeypatch):
+    """The default (every copy) stays until 2.0, which will skip concealed ones: leaving it out says so."""
+    monkeypatch.setattr(macos.clipboard, "change_count", lambda: 1)
+    with pytest.warns(DeprecationWarning, match="include_sensitive"):
+        assert list(macos.clipboard.watch(timeout=0.001, interval=0.001)) == []

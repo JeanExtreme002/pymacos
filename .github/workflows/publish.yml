@@ -89,7 +89,7 @@ jobs:
       # A test skipped for a missing permission fails, as in test.yml.
       env:
         PYMACOS_REQUIRE_PERMISSIONS: "1"
-      run: /tmp/env/bin/python -m pytest tests/live -v -rs --reruns 1 --reruns-delay 5
+      run: /tmp/env/bin/python -m pytest tests/live -v -rsR --reruns 1 --reruns-delay 5
 
   # The publish action only runs on Linux, hence a separate job. It uploads the
   # artifact the jobs above checked and tested, untouched.

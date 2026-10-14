@@ -1058,14 +1058,24 @@ def _on_result(observer: int, _cmd: int, request: int, result: int) -> None:
             _objc.send(analyzer, "cancelAnalysis", restype=None)
         return
     labels = heard["labels"]
-    for item in _objc.nsarray(_objc.send(result, "classifications")):
-        label = _objc.pystring(_objc.send(item, "identifier")) or ""
-        confidence = float(_objc.send(item, "confidence", restype=ctypes.c_double))
-        labels.setdefault(label, []).append(confidence)
+    try:
+        for item in _objc.nsarray(_objc.send(result, "classifications")):
+            label = _objc.pystring(_objc.send(item, "identifier")) or ""
+            confidence = float(_objc.send(item, "confidence", restype=ctypes.c_double))
+            labels.setdefault(label, []).append(confidence)
+    except Exception as problem:  # an exception must not cross back into Objective-C: classify() raises it
+        heard["error"] = "{} while reading a result".format(problem or type(problem).__name__)
+        analyzer = heard.get("analyzer")
+        if analyzer:
+            _objc.send(analyzer, "cancelAnalysis", restype=None)  # rather than read the rest of the file for nothing
 
 
 def _on_failure(observer: int, _cmd: int, request: int, error: int) -> None:
-    _heard.setdefault(observer, {"labels": {}})["error"] = _objc.error_message(ctypes.c_void_p(error))
+    try:
+        message = _objc.error_message(ctypes.c_void_p(error))
+    except Exception as problem:  # an exception must not cross back into Objective-C: classify() raises it
+        message = "{} while reading the error".format(problem or type(problem).__name__)
+    _heard.setdefault(observer, {"labels": {}})["error"] = message
 
 
 def _on_complete(observer: int, _cmd: int, request: int) -> None:

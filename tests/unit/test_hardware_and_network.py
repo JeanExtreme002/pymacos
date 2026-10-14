@@ -1,13 +1,10 @@
 """Unit tests for the charger, USB devices, startup items, network interfaces, DNS, proxies and the largest files."""
 
-import sys
 
 import pytest
 
 import macos
 from macos import finder, network, power, system
-
-darwin = pytest.mark.skipif(sys.platform != "darwin", reason="reads this Mac's own state")
 
 
 def test_adapter_from_its_description():
@@ -79,23 +76,6 @@ def test_largest_walks_a_folder_spotlight_skips(tmp_path, monkeypatch):
         finder.largest(tmp_path, 0)
     with pytest.raises(NotADirectoryError):
         finder.largest(tmp_path / "small.txt")
-
-
-@darwin
-def test_interfaces_dns_and_startup_items_read():
-    found = network.interfaces()
-    assert found and all(item.name != "lo0" for item in found)
-    for item in found:
-        if item.active:
-            assert item.up and (item.ipv4 or item.ipv6)
-    assert all(isinstance(server, str) for server in network.dns_servers())
-    assert isinstance(network.proxies(), network.Proxies)
-    for item in system.startup_items():
-        assert item.label and item.kind in ("agent", "daemon") and item.path.suffix == ".plist"
-    for device in system.usb_devices():  # CI's VM may have none
-        assert device.speed in (None, "low", "full", "high", "super", "super_plus")
-    charger = power.adapter()  # read once: it may change between reads
-    assert charger is None or charger.watts is None or charger.watts > 0
 
 
 def test_largest_also_walks_what_spotlight_leaves_out(tmp_path, monkeypatch):

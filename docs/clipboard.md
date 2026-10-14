@@ -98,8 +98,11 @@ for text in macos.clipboard.watch(include_sensitive=False):
 
 `include_sensitive=False` skips what's marked as concealed or transient (a
 password copied with `sensitive=True`, see above, or by a password manager), as
-clipboard managers do: a history shouldn't keep it. By default every copy is
-yielded.
+clipboard managers do: a history shouldn't keep it. Say which you want: today
+every copy is yielded unless told otherwise, and pymacos 2.0 will skip the
+concealed ones by default, so leaving it out warns (`DeprecationWarning`).
+{func}`~macos.clipboard.wait_for_change` takes `include_sensitive=False` too, to
+wait on past a concealed copy for the next one.
 
 ## Detecting changes
 

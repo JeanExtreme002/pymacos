@@ -35,7 +35,7 @@ from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
 from ._objc import BOOL, NSInteger, NSUInteger
 from ._system import applescript, framework, require_macos, run as _run
-from .errors import AppNotFoundError, CommandError, MacOSError, WaitTimeoutError
+from .errors import AppNotFoundError, CommandError, MacOSError, PermissionDeniedError, WaitTimeoutError
 
 __all__ = [
     "App",
@@ -808,6 +808,9 @@ def unquarantine(path: Union[str, "os.PathLike[str]"]) -> int:
 # --- Installed apps -------------------------------------------------------------
 
 _APP_FOLDERS = ("/Applications", "/System/Applications", "~/Applications")
+# Seconds for the Spotlight query of installed(): it answers from the index in a moment, unless
+# Spotlight is wedged or reindexing a slow volume. Then the Applications folders alone are listed.
+_SPOTLIGHT_TIMEOUT = 60.0
 
 
 @dataclass(frozen=True)
@@ -849,7 +852,9 @@ def installed() -> List[InstalledApp]:
         {app.name: app.version for app in macos.apps.installed()}   # {'Safari': '18.3', 'Xcode': '16.2', ...}
 
     It lists the Applications folders (yours, the Mac's and the system's),
-    their subfolders included, and the apps Spotlight knows elsewhere.
+    their subfolders included, and the apps Spotlight knows elsewhere. When
+    Spotlight is off, or doesn't answer within a minute, only the folders
+    are listed.
     """
     require_macos()
     paths = set()
@@ -861,8 +866,8 @@ def installed() -> List[InstalledApp]:
                     paths.add(os.path.realpath(os.path.join(current, name)))
                     folders.remove(name)  # an app's insides aren't other apps: only other folders are walked
     try:
-        # Apps installed elsewhere, as Spotlight knows them; nothing is lost if it's off.
-        found = spotlight.search('kMDItemContentType == "com.apple.application-bundle"')
+        # Apps installed elsewhere, as Spotlight knows them; nothing is lost if it's off or stuck.
+        found = spotlight.search('kMDItemContentType == "com.apple.application-bundle"', timeout=_SPOTLIGHT_TIMEOUT)
         paths.update(os.path.realpath(str(path)) for path in found if "/Contents/" not in str(path))
     except MacOSError:
         pass
@@ -916,8 +921,18 @@ def _leftovers(library: Path, bundle_id: Optional[str], names: Sequence[str], ot
     def entries(folder: str) -> List[str]:
         try:
             return sorted(os.listdir(library / folder))
+        except PermissionError:
+            # Cookies, HTTPStorages and some Containers are protected: without Full Disk Access the
+            # listing fails, and an uninstall that went on would report success with the app's files
+            # still there.
+            raise PermissionDeniedError(
+                "could not read {}: Full Disk Access is missing. Allow the app running Python (your terminal "
+                "or IDE) in System Settings › Privacy & Security › Full Disk Access, then restart it".format(
+                    library / folder
+                )
+            ) from None
         except OSError:
-            return []
+            return []  # no such folder, or not a folder
 
     if bundle_id:
         for folder in _BY_BUNDLE_ID:
@@ -996,6 +1011,9 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     first; ``dry_run`` works all the same) or that comes with macOS, and :class:`~macos.AppNotFoundError` for
     one that isn't found. An app installed for every user may need an
     administrator to be moved: then nothing is moved, and the error says so.
+    Some Library folders (Cookies, HTTPStorages) can only be read with Full
+    Disk Access: without it, :class:`~macos.PermissionDeniedError` is raised
+    before anything is moved, rather than leave those files behind unseen.
     """
     require_macos()
     path = _locate(name)

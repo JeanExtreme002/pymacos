@@ -453,3 +453,49 @@ def test_waiting_for_another_default_app_change_counts_against_the_timeout(monke
     finally:
         apps._default_call.release()
     assert not any(selector.startswith("setDefaultApplication") for selector in sent)  # never asked: out of time
+
+
+def test_uninstall_refuses_to_go_on_when_a_library_folder_cannot_be_read(tmp_path, monkeypatch):
+    """Without Full Disk Access some Library folders can't be listed: an uninstall that went on would leave their files."""
+    from macos.apps import _leftovers
+
+    library = tmp_path / "Library"
+    (library / "Caches" / "com.example.Chat").mkdir(parents=True)
+    (library / "Cookies").mkdir()
+    listdir = macos.apps.os.listdir
+
+    def protected(path):
+        if str(path).endswith("/Cookies"):
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return listdir(path)
+
+    monkeypatch.setattr(macos.apps.os, "listdir", protected)
+    with pytest.raises(macos.PermissionDeniedError, match="Full Disk Access"):
+        _leftovers(library, "com.example.Chat", [])
+    # A folder that isn't there is nothing of the app's, as before.
+    (library / "Cookies").rmdir()
+    monkeypatch.setattr(macos.apps.os, "listdir", listdir)
+    assert _leftovers(library, "com.example.Chat", []) == [library / "Caches" / "com.example.Chat"]
+
+
+def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):
+    """A stuck Spotlight mustn't hang installed(), and uninstall() with it: the folders alone are listed then."""
+    from macos import apps
+
+    queries = []
+
+    def search(query, **options):
+        queries.append(options)
+        raise macos.CommandTimeoutError(["mdfind", query], options["timeout"])
+
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_APP_FOLDERS", (str(tmp_path),))
+    monkeypatch.setattr(apps.spotlight, "search", search)
+    bundle = tmp_path / "Tool.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        b'<plist version="1.0"><dict><key>CFBundleName</key><string>Tool</string></dict></plist>'
+    )
+
+    assert [app.name for app in apps.installed()] == ["Tool"]
+    assert queries and queries[0]["timeout"] == apps._SPOTLIGHT_TIMEOUT > 0

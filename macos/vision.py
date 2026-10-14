@@ -241,11 +241,6 @@ def lines(image: Image, *, languages: Optional[Sequence[str]] = None, fast: bool
     return sorted(found, key=lambda line: (round(line.box[1], 2), line.box[0]))
 
 
-def _utf16(text: str, index: int) -> int:
-    """The UTF-16 offset of ``text[index]``: NSString counts UTF-16 units, Python code points."""
-    return len(text[:index].encode("utf-16-le")) // 2
-
-
 def _spans(line: str, needle: str) -> List[Tuple[int, int]]:
     """
     Where ``needle`` is in ``line``, ignoring case: ``(start, end)`` indexes of ``line``.
@@ -291,8 +286,9 @@ def _words_of(observations: List[int]) -> List[Tuple[str, Tuple[float, float, fl
         candidates = _objc.send(observation, "topCandidates:", 1, argtypes=(NSUInteger,))
         for candidate in _objc.nsarray(candidates):
             line = _objc.pystring(_objc.send(candidate, "string")) or ""
+            offsets = _objc.utf16_offsets(line)  # NSString counts UTF-16 units, Python code points
             for match in re.finditer(r"\S+", line):
-                first, last = _utf16(line, match.start()), _utf16(line, match.end())
+                first, last = offsets[match.start()], offsets[match.end()]
                 error = ctypes.c_void_p()
                 part = _objc.send(
                     candidate,
@@ -323,8 +319,9 @@ def _occurrences(
             candidates = _objc.send(observation, "topCandidates:", 1, argtypes=(NSUInteger,))
             for candidate in _objc.nsarray(candidates):
                 line = _objc.pystring(_objc.send(candidate, "string")) or ""
+                offsets = _objc.utf16_offsets(line)
                 for start, end in _spans(line, needle):
-                    first, last = _utf16(line, start), _utf16(line, end)
+                    first, last = offsets[start], offsets[end]
                     error = ctypes.c_void_p()
                     part = _objc.send(
                         candidate,

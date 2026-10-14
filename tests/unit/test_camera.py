@@ -194,3 +194,26 @@ def test_a_device_that_cant_be_used_says_so_even_without_a_reason(monkeypatch):
 
     with pytest.raises(macos.MacOSError, match=r"^could not use FaceTime HD Camera: unknown error$"):
         macos.camera._input(7)
+
+
+def test_an_exception_in_the_capture_callback_is_the_captures_error(monkeypatch):
+    """ctypes drops an exception raised in a callback: unkept, the wait would only time out, saying nothing."""
+    from macos import camera
+
+    monkeypatch.setattr(camera._objc, "run_until", lambda done, timeout: done())
+    monkeypatch.setattr(camera._objc, "new", lambda name: 0xBEEF)
+    monkeypatch.setattr(camera._objc, "define_class", lambda *args, **kwargs: None)
+
+    def broken(*args, **kwargs):
+        raise ValueError("no image data")
+
+    monkeypatch.setattr(camera._objc, "send", broken)
+    delegate = camera._delegate("photo")
+    camera._photo_done(delegate, 0, 0, 0x1, 0)  # a photo whose data can't be read
+    with pytest.raises(macos.MacOSError, match="no image data while reading the photo"):
+        camera._wait(delegate, "photo")
+
+    delegate = camera._delegate("movie")
+    camera._movie_done(delegate, 0, 0, 0, 0, 0x1)  # an error whose details can't be read
+    with pytest.raises(macos.MacOSError, match="no image data while reading the recording"):
+        camera._wait(delegate, "movie")

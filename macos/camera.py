@@ -177,10 +177,13 @@ _MovieDone = ctypes.CFUNCTYPE(
 
 def _photo_done(delegate: int, _cmd: int, output: int, photo: int, error: int) -> None:
     result: Dict[str, Any] = {"done": True}
-    if error:
-        result["error"] = _objc.error_message(ctypes.c_void_p(error))
-    else:
-        result["data"] = _objc.pybytes(_objc.send(photo, "fileDataRepresentation"))
+    try:
+        if error:
+            result["error"] = _objc.error_message(ctypes.c_void_p(error))
+        else:
+            result["data"] = _objc.pybytes(_objc.send(photo, "fileDataRepresentation"))
+    except Exception as problem:  # an exception must not cross back into Objective-C: _wait would only time out
+        result["error"] = "{} while reading the photo".format(problem or type(problem).__name__)
     _store(delegate, result)
 
 
@@ -192,14 +195,17 @@ def _movie_started(delegate: int, _cmd: int, output: int, url: int, connections:
 
 def _movie_done(delegate: int, _cmd: int, output: int, url: int, connections: int, error: int) -> None:
     result: Dict[str, Any] = {"done": True}
-    if error:
-        # "Recording stopped" is how a normal stop is reported: the file is fine then.
-        info = _objc.send(error, "userInfo")
-        finished = _objc.send(
-            info, "objectForKey:", _objc.nsstring("AVErrorRecordingSuccessfullyFinishedKey"), argtypes=(_objc.id,)
-        )
-        if not (finished and _objc.send(finished, "boolValue", restype=_objc.BOOL)):
-            result["error"] = _objc.error_message(ctypes.c_void_p(error))
+    try:
+        if error:
+            # "Recording stopped" is how a normal stop is reported: the file is fine then.
+            info = _objc.send(error, "userInfo")
+            finished = _objc.send(
+                info, "objectForKey:", _objc.nsstring("AVErrorRecordingSuccessfullyFinishedKey"), argtypes=(_objc.id,)
+            )
+            if not (finished and _objc.send(finished, "boolValue", restype=_objc.BOOL)):
+                result["error"] = _objc.error_message(ctypes.c_void_p(error))
+    except Exception as problem:  # an exception must not cross back into Objective-C: _wait would only time out
+        result["error"] = "{} while reading the recording's result".format(problem or type(problem).__name__)
     _store(delegate, result)
 
 

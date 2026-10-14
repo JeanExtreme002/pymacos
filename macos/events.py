@@ -131,7 +131,8 @@ def on(name: str, callback: Callable[..., object]) -> Handler:
     To wait for dark or light mode to switch, see :func:`macos.appearance.wait_for_change`.
 
     The callback may also take no arguments. One registered for several
-    events can tell them apart by ``event.name``.
+    events can tell them apart by ``event.name``. Registered while
+    :func:`run` runs, it's called from the next event on.
     """
     _check(name)
     handler = Handler(name, callback)
@@ -525,10 +526,14 @@ def run(*, timeout: Optional[float] = None) -> None:
     for events that never come. Callbacks run one at a time; an exception in
     one stops :func:`run` and propagates. Ctrl-C stops it too. Raises
     :class:`ValueError` when no callback is registered.
+
+    Every event is listened for, so a callback registered with :func:`on`
+    while it runs (from another callback, or from another thread) is called
+    from the next event on, and one removed isn't called again.
     """
     with _lock:
-        names = sorted({handler.name for handler in _handlers})
-    if not names:
+        registered = bool(_handlers)
+    if not registered:
         raise ValueError("no callbacks registered: add some with macos.events.on() first")
 
     def call(event: Event) -> bool:
@@ -541,7 +546,7 @@ def run(*, timeout: Optional[float] = None) -> None:
                 callback()
         return False
 
-    _listen(names, call, timeout)
+    _listen(list(NAMES), call, timeout)
 
 
 def wait(name: str, *, timeout: Optional[float] = None) -> Optional[Event]:

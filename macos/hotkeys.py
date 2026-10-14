@@ -55,7 +55,7 @@ def has_permission() -> bool:
     Accessibility, to keep the shortcuts from the app in front: ``True`` only
     when both are granted.
     """
-    return bool(_events.graphics().CGPreflightListenEventAccess()) and _events.has_permission()
+    return _events.has_listen_permission() and _events.has_permission()
 
 
 def request_permission() -> bool:
@@ -65,7 +65,7 @@ def request_permission() -> bool:
     After the user allows the app running Python in System Settings ›
     Privacy & Security › Input Monitoring and › Accessibility, that app must be restarted.
     """
-    listening = bool(_events.graphics().CGRequestListenEventAccess())
+    listening = _events.request_listen_permission()
     return _events.request_permission() and listening
 
 

@@ -177,3 +177,9 @@ def test_uninstall_moves_the_app_and_its_leftovers_to_the_trash(tmp_path):
 def test_uninstall_refuses_the_apps_of_macos():
     with pytest.raises(macos.MacOSError, match="comes with macOS"):
         macos.apps.uninstall("Calculator", dry_run=True)
+
+
+def test_installed():
+    found = macos.apps.installed()
+    assert any(app.bundle_id == "com.apple.calculator" and app.version for app in found)
+    assert all(app.path.suffix == ".app" for app in found)

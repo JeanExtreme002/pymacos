@@ -30,7 +30,10 @@ macos.windows.list("Preview", title="invoice")    # Preview's invoice windows
 ```
 
 {func}`~macos.windows.focused` returns the window keystrokes go to, or `None`
-when the app in front has none.
+when the app in front has none. An app that doesn't answer within two seconds
+(busy, or still starting) counts as having no windows, for
+{func}`~macos.windows.list` too: ask again, or use
+{func}`~macos.windows.wait_for`.
 
 ## Moving and resizing
 

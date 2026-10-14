@@ -108,6 +108,22 @@ def request_permission() -> bool:
     return bool(graphics().CGRequestPostEventAccess())
 
 
+def has_listen_permission() -> bool:
+    """Whether this process may listen to the keyboard and the mouse (Input Monitoring), without prompting the user."""
+    return bool(graphics().CGPreflightListenEventAccess())
+
+
+def request_listen_permission() -> bool:
+    """
+    Ask for the Input Monitoring permission, which listening to the keyboard and the mouse needs; return whether it's granted.
+
+    macOS asks only once: after that, the user must allow the app running
+    Python (your terminal or IDE) in System Settings › Privacy & Security ›
+    Input Monitoring, and restart it.
+    """
+    return bool(graphics().CGRequestListenEventAccess())
+
+
 def require_permission() -> None:
     # Without the permission macOS doesn't fail: it silently drops the events.
     if not has_permission():
