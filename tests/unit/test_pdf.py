@@ -37,6 +37,23 @@ def test_pdf_argument_checks(tmp_path):
         macos.pdf.watermark(__file__, "DRAFT", tmp_path / "out.pdf", color="red")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="rotates pages with PDFKit")
+def test_rotate_turns_a_page_listed_twice_once(tmp_path):
+    import ctypes
+
+    from macos import _objc
+    from tests.helpers import pdf_with_text
+
+    page = tmp_path / "page.pdf"
+    page.write_bytes(pdf_with_text([("Hello", 72, 700)]))
+    document = macos.pdf.merge([page, page], tmp_path / "two.pdf")
+
+    macos.pdf.rotate(document, 90, document, pages=[2, 2])
+    with macos.pdf._open(document) as opened:
+        rotations = [_objc.send(macos.pdf._page(opened, n), "rotation", restype=ctypes.c_long) for n in (1, 2)]
+    assert rotations == [0, 90]
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes PDF forms with PDFKit")
 def test_forms(tmp_path):
     from tests.helpers import pdf_form
