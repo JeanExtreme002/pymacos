@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import macos
-from macos import apps, network, system
+from macos import _system, apps, network, system
 
 darwin = pytest.mark.skipif(sys.platform != "darwin", reason="reads this Mac's own state")
 
@@ -185,7 +185,7 @@ def test_logs_report_log_shows_failures(monkeypatch):
         def wait(self, timeout=None):
             self.returncode = 64
 
-    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
     monkeypatch.setattr(subprocess, "Popen", Failed)
     with pytest.raises(macos.CommandError) as raised:
         system.logs(process="Safari")
@@ -219,7 +219,7 @@ def test_logs_stop_a_log_show_that_takes_too_long(monkeypatch):
         def wait(self, timeout=None):
             self.returncode = -9
 
-    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
     monkeypatch.setattr(subprocess, "Popen", Endless)
     with pytest.raises(macos.CommandTimeoutError) as raised:
         system.logs(timeout=0.05)
@@ -255,7 +255,7 @@ def test_logs_stop_log_show_when_reading_it_fails(monkeypatch):
             assert self.killed, "waited for a log show nobody stopped"
             self.returncode = -9
 
-    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
     monkeypatch.setattr(subprocess, "Popen", Reading)
     with pytest.raises(KeyboardInterrupt):
         system.logs(last="1d", limit=None)
@@ -286,7 +286,7 @@ def test_logs_asks_for_info_and_debug_messages(monkeypatch):
             pass
 
     monkeypatch.setattr(subprocess, "Popen", Done)
-    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
     for level in ("info", "debug", "error"):
         system.logs(level=level, last="1m", limit=1)
     flags = [[flag for flag in args if flag in ("--info", "--debug")] for args in seen]
