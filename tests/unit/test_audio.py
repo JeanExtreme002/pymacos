@@ -434,13 +434,16 @@ def test_a_name_property_too_short_to_hold_a_string_reads_as_empty(monkeypatch):
 
 
 def test_classify_says_it_needs_macos_12_where_the_classifier_is_missing(monkeypatch, tmp_path):
-    import ctypes
+    from macos import _cf, audio
 
-    from macos import audio
+    def constant(library, name):
+        assert name == "SNClassifierIdentifierVersion1"
+        raise _cf.Unavailable("{} isn't in this version of macOS".format(name))
 
     clip = tmp_path / "clip.m4a"
     clip.write_bytes(b"")
-    monkeypatch.setattr(audio, "framework", lambda name: ctypes.CDLL(None))  # without SNClassifierIdentifierVersion1
+    monkeypatch.setattr(audio, "framework", lambda name: None)
+    monkeypatch.setattr(_cf, "constant", constant)
     monkeypatch.setattr(audio._objc, "define_class", lambda *args, **kwargs: pytest.fail("must stop before the observer"))
     with pytest.raises(macos.NotSupportedError, match=r"classify\(\) needs macOS 12 or later"):
         macos.audio.classify(clip)

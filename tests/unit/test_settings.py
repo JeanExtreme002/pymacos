@@ -293,7 +293,7 @@ def test_remap(monkeypatch):
         macos.keyboard.remap("hyper", "escape")
 
 
-@pytest.mark.parametrize("empty", ["(null)\n", "(\n)\n", ""])
+@pytest.mark.parametrize("empty", ["(null)\n", "(\n)\n"])
 def test_no_remapping_is_read_from_each_empty_answer(monkeypatch, empty):
     monkeypatch.setattr(_system, "run", lambda args, timeout=None: empty)
     assert macos.keyboard.remappings() == {}
@@ -306,6 +306,7 @@ def test_no_remapping_is_read_from_each_empty_answer(monkeypatch, empty):
         "(\n    {\n        Source = 30064771129;\n        Destination = 30064771113;\n    }\n)\n",  # keys renamed
         "(\n    {\n        HIDKeyboardModifierMappingDst = 30064771113;\n        HIDKeyboardModifierMappingSrc = 30064771129;\n"
         "    },\n    {\n        Other = 1;\n    }\n)\n",  # only some read
+        "",  # nothing at all
     ],
 )
 def test_a_remapping_answer_it_cant_read_raises_rather_than_overwriting(monkeypatch, output):

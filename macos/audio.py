@@ -1091,8 +1091,8 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
         raise ValueError("limit must be at least 1, not {}".format(limit))
     source = _existing(path)
     try:
-        identifier = ctypes.c_void_p.in_dll(framework("SoundAnalysis"), "SNClassifierIdentifierVersion1").value
-    except ValueError:  # the symbol isn't there
+        identifier = _cf.constant(framework("SoundAnalysis"), "SNClassifierIdentifierVersion1")
+    except LookupError:
         raise NotSupportedError("classify() needs macOS 12 or later") from None
     _objc.define_class(
         "PymacosSoundObserver",

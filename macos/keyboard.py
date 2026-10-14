@@ -1045,7 +1045,7 @@ def _mappings() -> Dict[int, int]:
             read += 1
     # Read wrong, the remappings would look like none, and the next remap()
     # would write its own over the ones in place: a format this doesn't know raises.
-    known_empty = not blocks and re.fullmatch(r"\(null\)|\(\s*\)|", output.strip())
+    known_empty = not blocks and re.fullmatch(r"\(null\)|\(\s*\)", output.strip())
     if read != len(blocks) or not (blocks or known_empty):
         raise MacOSError("can't read the key remappings: hidutil printed {!r}".format(output.strip()[:200]))
     return found
