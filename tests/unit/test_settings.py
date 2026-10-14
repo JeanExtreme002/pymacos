@@ -565,13 +565,20 @@ def test_mouse_acceleration(prefs, monkeypatch):
     assert commands == [(["hidutil", "property", "--set", '{"HIDUseLinearScalingMouseAcceleration": 1}'], True)]
 
 
-def test_mouse_acceleration_is_saved_when_the_mouse_driver_doesnt_answer(prefs, monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda args, timeout: macos.CommandTimeoutError(args, timeout),
+        lambda args, timeout: macos.CommandError(args, 1, "refused"),
+    ],
+)
+def test_mouse_acceleration_is_saved_when_the_mouse_driver_doesnt_take_it(prefs, monkeypatch, failure):
     store, _ = prefs
 
-    def wedged(args, timeout=None):
-        raise macos.CommandTimeoutError(args, timeout)
+    def refused(args, timeout=None):
+        raise failure(args, timeout)
 
-    monkeypatch.setattr(_system, "run", wedged)
+    monkeypatch.setattr(_system, "run", refused)
     macos.mouse.set_acceleration(False)  # applies at the next login, as apply_input_settings() leaves it
     assert store[(G, "com.apple.mouse.linear", False)] is True
 

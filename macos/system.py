@@ -34,8 +34,8 @@ from ._system import (
     framework,
     launchd_disabled,
     launchd_user_domain,
-    require_macos,
     popen,
+    require_macos,
     restart_process,
     run as _run,
 )

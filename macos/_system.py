@@ -82,9 +82,10 @@ def popen(args: Sequence[str], **options: Any) -> "subprocess.Popen[Any]":
     Start a system command and return its process, for the callers that read or wait on it themselves.
 
     The command is found as :func:`run` finds it, and one the system doesn't
-    have raises :class:`NotSupportedError`, as there. ``options`` go to
-    :class:`subprocess.Popen`.
+    have raises :class:`NotSupportedError`, as there (and as anything does
+    outside macOS). ``options`` go to :class:`subprocess.Popen`.
     """
+    require_macos()
     try:
         return subprocess.Popen(list(args), executable=executable(args[0]), **options)
     except FileNotFoundError:
@@ -191,7 +192,6 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     than leave the screen recording with nobody to stop it. A signal to Python
     alone (``kill`` of its pid) still leaves it to run until its own end.
     """
-    require_macos()
     process = popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         _, stderr = process.communicate(timeout=timeout)

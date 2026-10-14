@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Tuple
 
 from . import _cf, _events
 from ._objc import CGPoint
-from .errors import CommandTimeoutError, MacOSError
+from .errors import CommandError, CommandTimeoutError, MacOSError
 
 if TYPE_CHECKING:
     from .screen import TextMatch
@@ -372,7 +372,7 @@ def set_acceleration(on: bool = True) -> None:
 
     Like *Pointer acceleration* in System Settings › Mouse › Advanced
     (macOS 14 and later). Applies at once (or, when the mouse driver doesn't
-    answer, at the next login), and stays after a restart.
+    take it, at the next login), and stays after a restart.
     """
     import json
 
@@ -384,5 +384,5 @@ def set_acceleration(on: bool = True) -> None:
     setting = json.dumps({"HIDUseLinearScalingMouseAcceleration": 0 if on else 1})
     try:
         _run(["hidutil", "property", "--set", setting], timeout=HIDUTIL_TIMEOUT)
-    except CommandTimeoutError:
+    except (CommandError, CommandTimeoutError):
         pass  # the setting is saved anyway, as apply_input_settings() leaves it: it applies at the next login
