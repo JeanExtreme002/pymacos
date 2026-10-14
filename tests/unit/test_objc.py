@@ -161,21 +161,59 @@ def test_a_real_ctrl_c_while_callbacks_run_comes_out_of_the_run_loop():
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler  # put back
 
 
-def test_a_sigint_handler_the_script_installed_is_left_alone():
+@pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
+def test_a_ctrl_c_held_during_native_code_goes_to_the_scripts_own_handler():
     import signal
 
     from macos import _cf
 
-    def mine(signum, frame):
-        pass
+    called = []
+
+    def mine(signum, frame):  # asyncio's, a notebook's...
+        called.append(signum)
 
     previous = signal.signal(signal.SIGINT, mine)
     try:
         with _cf.deferred_interrupt():
-            assert signal.getsignal(signal.SIGINT) is mine
-        assert signal.getsignal(signal.SIGINT) is mine
+            signal.raise_signal(signal.SIGINT)  # handled by Python here, as it would be at a callback's entry
+            assert called == [] and _cf.interrupted()  # held: the work can stop
+        assert called == [signal.SIGINT]  # delivered when the block ended, as if it came then
+        assert signal.getsignal(signal.SIGINT) is mine and not _cf.interrupted()
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
+def test_a_ctrl_c_held_comes_out_even_when_the_block_fails():
+    import signal
+
+    from macos import _cf
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        with _cf.deferred_interrupt():
+            signal.raise_signal(signal.SIGINT)
+            raise ValueError("the block's own error")
+    assert isinstance(raised.value.__context__, ValueError)  # the block's error stays in the traceback
+    assert not _cf.interrupted()
+    with _cf.deferred_interrupt():
+        pass  # nothing left over to raise later, from unrelated code
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
+def test_a_sigint_handler_installed_during_the_block_is_kept():
+    import signal
+
+    from macos import _cf
+
+    def theirs(signum, frame):
+        pass
+
+    try:
+        with _cf.deferred_interrupt():
+            signal.signal(signal.SIGINT, theirs)  # by a callback, or a library it calls
+        assert signal.getsignal(signal.SIGINT) is theirs
+    finally:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")

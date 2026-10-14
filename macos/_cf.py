@@ -346,8 +346,9 @@ def run_loop(seconds: float, *, once: bool = True) -> bool:
     return bool(turned)
 
 
-# A Ctrl-C (or a SystemExit) raised inside a callback, on this thread, not raised yet. ctypes can't let it
-# out of a callback: it prints it and returns to C, so the script would go on as if Ctrl-C never came.
+# This thread's Ctrl-C not raised yet: ``error``, a KeyboardInterrupt or SystemExit a callback kept (ctypes
+# can't let it out of a callback: it prints it and returns to C, so the script would go on as if it never came),
+# and ``signalled``, a SIGINT that deferred_interrupt noted while native code ran.
 _interrupt = threading.local()
 
 
@@ -358,15 +359,15 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
     A Ctrl-C that came while native code ran is raised at the callback's
     entry, before this can catch it: :func:`deferred_interrupt`, around that
     native code, keeps that one. This keeps those raised inside the callback
-    (a Ctrl-C under a handler the script installed, a ``sys.exit()``).
+    (a ``sys.exit()``, a Ctrl-C that came while the callback itself ran).
 
     Its own exceptions go on as before. A ``KeyboardInterrupt`` or
     ``SystemExit`` on the main thread is kept instead, the run loop is
-    stopped, and :func:`raise_interrupt` raises it once the run loop hands
-    back: in :func:`run_loop`, or where a caller turns the run loop some other
-    way. The callback returns ``fallback(*arguments)`` meanwhile (``None``
-    without one): an event tap must hand its event back. On another thread
-    Python never delivers a Ctrl-C: an exit there goes on as before.
+    stopped, and it's raised once the block of :func:`deferred_interrupt`
+    around the native code ends (:func:`run_loop` is one). The callback
+    returns ``fallback(*arguments)`` meanwhile (``None`` without one): an
+    event tap must hand its event back. On another thread Python never
+    delivers a Ctrl-C: an exit there goes on as before.
     """
     @wraps(function)
     def guarded(*arguments: Any) -> Any:
@@ -387,24 +388,31 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
 @contextmanager
 def deferred_interrupt() -> Iterator[None]:
     """
-    Keep a Ctrl-C that comes while native code runs in the block (a run loop, an analysis), and raise it once the block ends.
+    Hold a Ctrl-C that comes while native code runs in the block (a run loop, an analysis) until the block ends.
 
-    Python raises a Ctrl-C at the next Python code that runs: while native
+    Python handles a signal at the next Python code that runs: while native
     code runs, that's the entry of the next callback C makes, before any
-    ``try`` in it, and ctypes drops it there. In the block, SIGINT only notes
-    it and stops the run loop, so the callbacks run on (and can stop their
-    work, see :func:`interrupted`). Only on the main thread, and only while
-    SIGINT has Python's own handler: one the script installed is left alone.
+    ``try`` in it, where ctypes drops what the handler raises. In the block,
+    SIGINT only notes the Ctrl-C and stops the run loop, so the callbacks run
+    on (and can stop their work, see :func:`interrupted`). When the block
+    ends, even by an error, each Ctrl-C noted goes to the handler SIGINT had,
+    as if it came then: Python's own raises ``KeyboardInterrupt``, one the
+    script installed (asyncio's, a notebook's) does what it does. What a
+    :func:`callback` kept is raised then too. Only on the main thread, where
+    Python handles signals, and only over a handler written in Python.
     """
-    ours = threading.current_thread() is threading.main_thread() and signal.getsignal(signal.SIGINT) is signal.default_int_handler
-    if not ours:
-        yield
-        raise_interrupt()  # one a callback kept
+    previous = signal.getsignal(signal.SIGINT) if threading.current_thread() is threading.main_thread() else None
+    if not callable(previous):  # another thread, or SIGINT ignored or left to the system: nothing to hold
+        try:
+            yield
+        finally:
+            raise_interrupt()  # what a callback kept
         return
+    noted: List[int] = []
 
     def keep(signum: int, frame: Any) -> None:
-        if getattr(_interrupt, "error", None) is None:
-            _interrupt.error = KeyboardInterrupt()
+        noted.append(signum)
+        _interrupt.signalled = True
         cf = lib()
         cf.CFRunLoopStop(cf.CFRunLoopGetCurrent())
 
@@ -412,17 +420,23 @@ def deferred_interrupt() -> Iterator[None]:
     try:
         yield
     finally:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
-    raise_interrupt()
+        if signal.getsignal(signal.SIGINT) is keep:  # not one the block installed meanwhile
+            signal.signal(signal.SIGINT, previous)
+        _interrupt.signalled = False
+        try:
+            for signum in noted:
+                previous(signum, None)  # Python's own raises at the first; asyncio's raises at the second
+        finally:
+            raise_interrupt()  # what a callback kept
 
 
 def interrupted() -> bool:
-    """Whether a :func:`callback` kept a Ctrl-C on this thread, not raised yet: work it can stop should stop."""
-    return getattr(_interrupt, "error", None) is not None
+    """Whether a Ctrl-C (or an exit) came on this thread and wasn't raised yet: work that can stop should stop."""
+    return getattr(_interrupt, "error", None) is not None or bool(getattr(_interrupt, "signalled", False))
 
 
 def raise_interrupt() -> None:
-    """Raise the Ctrl-C a :func:`callback` kept on this thread, if one did."""
+    """Raise the ``KeyboardInterrupt`` or ``SystemExit`` a :func:`callback` kept on this thread, if one did."""
     error = getattr(_interrupt, "error", None)
     if error is not None:
         _interrupt.error = None

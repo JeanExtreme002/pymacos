@@ -136,6 +136,8 @@ def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
             return original(*args)
 
         audio._on_result = on_result
+        audio.classify(sys.argv[1])  # the first run loads the model: timed on the second
+        del calls[:]
         started = time.monotonic()
         audio.classify(sys.argv[1])
         full, took = len(calls), time.monotonic() - started
@@ -150,6 +152,6 @@ def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
     )
     result = subprocess.run([sys.executable, "-c", code, str(source)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
-    outcome, read, full = result.stdout.split()
-    # Raised, and the analysis cancelled there, not run to its end.
-    assert outcome == "interrupted" and int(read) < int(full) * 3 // 4, result.stdout
+    outcome, read, full = result.stdout.strip().splitlines()[-1].split()
+    # Raised while the analysis ran (some results read), and the analysis cancelled there, not run to its end.
+    assert outcome == "interrupted" and 0 < int(read) < int(full) * 3 // 4, result.stdout
