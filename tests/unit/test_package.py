@@ -203,3 +203,49 @@ def test_every_callback_lets_a_ctrl_c_out():
             if (typed or inline) and not guarded(node.args[0]):
                 unguarded.append("{}:{}".format(name, node.lineno))
     assert unguarded == []
+
+
+def test_every_native_call_that_calls_back_holds_a_ctrl_c():
+    import ast
+    import pathlib
+
+    # A Ctrl-C while C runs is handled at the entry of the next callback, where ctypes drops what it raises:
+    # a native call that runs our callbacks before it returns sits in a block of _cf.deferred_interrupt, which
+    # holds the Ctrl-C until the block ends. These are those calls; a new one goes here too.
+    functions = {"CFRunLoopRunInMode", "CGPDFDictionaryApplyFunction"}
+    selectors = {"nextEventMatchingMask:untilDate:inMode:dequeue:", "sendEvent:", "analyze"}
+
+    def called(node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            return None
+        if node.func.attr in functions:
+            return node.func.attr
+        sent = node.func.attr == "send" and isinstance(node.func.value, ast.Name) and node.func.value.id == "_objc"
+        if sent and len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and node.args[1].value in selectors:
+            return node.args[1].value
+        return None
+
+    def holds(node):
+        return isinstance(node, ast.With) and any(
+            isinstance(item.context_expr, ast.Call)
+            and getattr(item.context_expr.func, "attr", getattr(item.context_expr.func, "id", None)) == "deferred_interrupt"
+            for item in node.items
+        )
+
+    found, unheld = set(), []
+    for path in sorted(pathlib.Path(macos.__file__).parent.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            name = called(node)
+            if name is None:
+                continue
+            found.add(name)
+            around = parents.get(node)
+            # Up to the function it's in: a block in the caller of that function doesn't show here.
+            while around is not None and not holds(around) and not isinstance(around, (ast.FunctionDef, ast.Lambda)):
+                around = parents.get(around)
+            if not holds(around):
+                unheld.append("{}:{} {}".format(path.name, node.lineno, name))
+    assert found == functions | selectors  # each one still called: a renamed one would pass unchecked
+    assert unheld == []
