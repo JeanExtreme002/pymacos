@@ -183,7 +183,7 @@ def _photo_done(delegate: int, _cmd: int, output: int, photo: int, error: int) -
         else:
             result["data"] = _objc.pybytes(_objc.send(photo, "fileDataRepresentation"))
     except Exception as problem:  # an exception must not cross back into Objective-C: _wait would only time out
-        result["error"] = "{} while reading the photo".format(problem or type(problem).__name__)
+        result["error"] = "{} while reading the photo".format(str(problem) or type(problem).__name__)
     _store(delegate, result)
 
 
@@ -205,7 +205,7 @@ def _movie_done(delegate: int, _cmd: int, output: int, url: int, connections: in
             if not (finished and _objc.send(finished, "boolValue", restype=_objc.BOOL)):
                 result["error"] = _objc.error_message(ctypes.c_void_p(error))
     except Exception as problem:  # an exception must not cross back into Objective-C: _wait would only time out
-        result["error"] = "{} while reading the recording's result".format(problem or type(problem).__name__)
+        result["error"] = "{} while reading the recording's result".format(str(problem) or type(problem).__name__)
     _store(delegate, result)
 
 

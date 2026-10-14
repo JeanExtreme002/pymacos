@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import warnings
+
 import pytest
 
 import macos
@@ -455,27 +457,43 @@ def test_waiting_for_another_default_app_change_counts_against_the_timeout(monke
     assert not any(selector.startswith("setDefaultApplication") for selector in sent)  # never asked: out of time
 
 
-def test_uninstall_refuses_to_go_on_when_a_library_folder_cannot_be_read(tmp_path, monkeypatch):
-    """Without Full Disk Access some Library folders can't be listed: an uninstall that went on would leave their files."""
-    from macos.apps import _leftovers
+def test_uninstall_says_which_library_folders_it_could_not_look_in(tmp_path, monkeypatch):
+    """Cookies is protected on every Mac: without Full Disk Access the uninstall goes on, and says what it couldn't see."""
+    import plistlib
 
-    library = tmp_path / "Library"
+    from macos import apps
+
+    bundle = tmp_path / "Applications" / "Chat.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleName": "Chat", "CFBundleIdentifier": "com.example.Chat"})
+    )
+    home = tmp_path / "home"
+    library = home / "Library"
     (library / "Caches" / "com.example.Chat").mkdir(parents=True)
     (library / "Cookies").mkdir()
-    listdir = macos.apps.os.listdir
+    listdir = apps.os.listdir
 
     def protected(path):
         if str(path).endswith("/Cookies"):
-            raise PermissionError(1, "Operation not permitted", str(path))
+            raise PermissionError(1, "Operation not permitted", str(path))  # EPERM: how TCC refuses
         return listdir(path)
 
-    monkeypatch.setattr(macos.apps.os, "listdir", protected)
-    with pytest.raises(macos.PermissionDeniedError, match="Full Disk Access"):
-        _leftovers(library, "com.example.Chat", [])
-    # A folder that isn't there is nothing of the app's, as before.
+    monkeypatch.setattr(apps.os, "listdir", protected)
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "installed", lambda: [apps._installed_app(str(bundle))])
+    monkeypatch.setattr(apps.Path, "home", lambda: home)
+
+    with pytest.warns(RuntimeWarning, match="Cookies couldn't be looked in.*Full Disk Access is missing") as caught:
+        assert apps.uninstall("Chat", dry_run=True) == [bundle, library / "Caches" / "com.example.Chat"]
+    assert caught[0].filename == __file__  # the warning points at the caller
+    # A folder that isn't there is nothing of the app's: no warning.
     (library / "Cookies").rmdir()
-    monkeypatch.setattr(macos.apps.os, "listdir", listdir)
-    assert _leftovers(library, "com.example.Chat", []) == [library / "Caches" / "com.example.Chat"]
+    monkeypatch.setattr(apps.os, "listdir", listdir)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert apps.uninstall("Chat", dry_run=True) == [bundle, library / "Caches" / "com.example.Chat"]
 
 
 def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):

@@ -491,7 +491,7 @@ def batch() -> Iterator[None]:
 
     The settings are written as each call runs; what waits is the restart that
     makes them show (the Dock's, Finder's, Control Center's, SystemUIServer's,
-    the input settings'). Each runs once when the block ends, even when it
+    the window manager's, the input settings'). Each runs once when the block ends, even when it
     ends with an error, and an error of a restart doesn't hide the block's own.
     Nested blocks count as one. :func:`apply` does this by itself.
     """

@@ -102,7 +102,8 @@ clipboard managers do: a history shouldn't keep it. Say which you want: today
 every copy is yielded unless told otherwise, and pymacos 2.0 will skip the
 concealed ones by default, so leaving it out warns (`DeprecationWarning`).
 {func}`~macos.clipboard.wait_for_change` takes `include_sensitive=False` too, to
-wait on past a concealed copy for the next one.
+wait on past a concealed copy for the next one; its default stays as it is,
+since one copy was asked for, not a history.
 
 ## Detecting changes
 

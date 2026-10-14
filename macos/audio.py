@@ -1064,7 +1064,7 @@ def _on_result(observer: int, _cmd: int, request: int, result: int) -> None:
             confidence = float(_objc.send(item, "confidence", restype=ctypes.c_double))
             labels.setdefault(label, []).append(confidence)
     except Exception as problem:  # an exception must not cross back into Objective-C: classify() raises it
-        heard["error"] = "{} while reading a result".format(problem or type(problem).__name__)
+        heard["error"] = "{} while reading a result".format(str(problem) or type(problem).__name__)
         analyzer = heard.get("analyzer")
         if analyzer:
             _objc.send(analyzer, "cancelAnalysis", restype=None)  # rather than read the rest of the file for nothing
@@ -1074,8 +1074,9 @@ def _on_failure(observer: int, _cmd: int, request: int, error: int) -> None:
     try:
         message = _objc.error_message(ctypes.c_void_p(error))
     except Exception as problem:  # an exception must not cross back into Objective-C: classify() raises it
-        message = "{} while reading the error".format(problem or type(problem).__name__)
-    _heard.setdefault(observer, {"labels": {}})["error"] = message
+        message = "{} while reading the error".format(str(problem) or type(problem).__name__)
+    # The first error stays: cancelling the analysis after a Python error may be reported here too.
+    _heard.setdefault(observer, {"labels": {}}).setdefault("error", message)
 
 
 def _on_complete(observer: int, _cmd: int, request: int) -> None:

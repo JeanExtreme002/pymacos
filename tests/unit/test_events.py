@@ -47,8 +47,9 @@ def test_events_run_calls_the_callbacks_of_each_event(monkeypatch):
     events.on("sleep", lambda: calls.append(("d", "no arguments")))
     events.on("sleep", print)  # a builtin: it gets the event
 
-    def listen(names, on_event, timeout):
+    def listen(names, on_event, timeout, required=None):
         assert names == list(events.NAMES)  # every event: a callback registered meanwhile gets its events too
+        assert required == {"sleep", "wake"}  # the sources these need must work; the others may only warn
         for name in ("wake", "sleep"):
             on_event(macos.events.Event(name))
 
@@ -67,7 +68,7 @@ def test_events_run_calls_a_callback_registered_while_it_runs(monkeypatch):
 
     events.on("wake", first)
 
-    def listen(names, on_event, timeout):
+    def listen(names, on_event, timeout, required=None):
         for name in ("wake", "app_quit", "app_quit"):
             on_event(macos.events.Event(name))
 
@@ -276,3 +277,34 @@ def test_at_the_timeout_queued_events_come_but_no_later_ones(monkeypatch):
     # Everything queued by the time it ran out comes, none of what kept coming after: no event is lost,
     # and a steady stream can't keep it going past the timeout.
     assert handled == [0, 1, 2, 3, 100, 101, 102]
+
+
+def test_listen_only_warns_when_a_source_no_registered_event_needs_fails(monkeypatch):
+    """run() listens for every event, so a system source failing must not stop a run() that didn't ask for it."""
+    fake = _FakeObjC()
+    closed = []
+
+    class Power:
+        def __init__(self, listener):
+            pass
+
+        def close(self):
+            closed.append("power")
+
+    def network(listener):
+        raise macos.MacOSError("configd is out of reach")
+
+    monkeypatch.setattr(events, "_objc", fake)
+    monkeypatch.setattr(events, "framework", lambda name: None)
+    monkeypatch.setattr(events, "_notification_names", lambda: {"NSWorkspaceDidWakeNotification": "wake"})
+    monkeypatch.setattr(events, "_center", lambda kind: kind)
+    monkeypatch.setitem(events._WATCHERS, events._POWER, Power)
+    monkeypatch.setitem(events._WATCHERS, events._NETWORK, network)
+
+    with pytest.warns(RuntimeWarning, match="configd is out of reach: the network_changed events won't come"):
+        events._listen(["wake", "power_connected", "network_changed"], lambda event: True, 0, required={"wake"})
+    assert closed == ["power"]  # the run ended (timeout 0) with everything else set up and closed
+    assert events._observers == {} and events._listeners.active() == []
+
+    with pytest.raises(macos.MacOSError, match="configd"):  # the same source, needed by an event registered at the start
+        events._listen(["wake", "network_changed"], lambda event: True, 0, required={"network_changed"})

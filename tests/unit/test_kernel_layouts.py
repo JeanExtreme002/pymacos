@@ -6,7 +6,6 @@ answers at offsets declared as plain numbers: a layout that moved in a macOS rel
 numbers, not an error. This compiles a small C program against the installed SDK and compares.
 """
 
-import shutil
 import subprocess
 import sys
 
@@ -55,9 +54,12 @@ int main(void) {
 """
 
 
-@pytest.mark.skipif(
-    sys.platform != "darwin" or shutil.which("cc") is None, reason="needs the macOS SDK and a C compiler"
-)
+def _developer_tools() -> bool:
+    """Whether the Command Line Tools (or Xcode) are installed: ``cc`` is a shim on every Mac, which fails without them."""
+    return sys.platform == "darwin" and subprocess.run(["xcode-select", "-p"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _developer_tools(), reason="needs the macOS SDK and a C compiler (xcode-select --install)")
 def test_the_offsets_read_from_kernel_structures_match_the_sdk(tmp_path):
     source, binary = tmp_path / "probe.c", tmp_path / "probe"
     source.write_text(PROBE)

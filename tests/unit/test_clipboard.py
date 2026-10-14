@@ -177,7 +177,7 @@ def test_sensitive_means_either_marker(monkeypatch):
 
 
 def test_clipboard_wait_for_change_can_wait_on_past_a_concealed_copy(monkeypatch):
-    counts = iter([1, 2, 2, 3])  # a password is copied (2), then a link (3)
+    counts = iter([1, 2, 2, 3, 3])  # a password is copied (2), then a link (3); each read again after the paste
     sensitive = iter([True, False])
     monkeypatch.setattr(macos.clipboard, "change_count", lambda: next(counts))
     monkeypatch.setattr(macos.clipboard, "_is_empty", lambda: False)

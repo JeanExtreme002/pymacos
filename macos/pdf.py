@@ -899,7 +899,8 @@ def from_images(images: Sequence[Union[PathLike, bytes]], output: PathLike) -> P
     def draw(context: int, index: int, page_width: float, page_height: float) -> None:
         picture = decoded(images[index])
         try:
-            width, height = float(graphics.CGImageGetWidth(picture)), float(graphics.CGImageGetHeight(picture))
+            # The size the page was given (what the image describes): the picture is drawn to fill it.
+            width, height = float(described[index].width), float(described[index].height)
             orientation = described[index].orientation
             graphics.CGContextSaveGState(context)
             graphics.CGContextConcatCTM(context, _objc.CGAffineTransform(*_upright_transform(orientation, width, height)))

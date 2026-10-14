@@ -258,9 +258,8 @@ macos.apps.uninstall("Slack", dry_run=True, include_name_matches=True)[-1]
 
 Everything goes to the Trash, so *Put Back* undoes it. Only your own files are
 touched: `/Library`'s need an administrator. Some Library folders (Cookies,
-HTTPStorages) can only be read with Full Disk Access: without it,
-{class}`~macos.PermissionDeniedError` is raised before anything is moved, rather
-than leave those files behind unseen.
+HTTPStorages) can only be looked in with Full Disk Access: without it, a
+`RuntimeWarning` names them, as the app's files there, if any, stay.
 
 It raises {class}`~macos.MacOSError` for an app that's running (quit it first;
 a dry run works all the same) or that comes with macOS, like Safari, and

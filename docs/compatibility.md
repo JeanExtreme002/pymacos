@@ -9,7 +9,8 @@ document, so a macOS update may change them.
 Most of the package works from any thread. A few of Apple's frameworks only
 work on the main thread, the one that runs your script; elsewhere they would
 hang or crash the process, so these calls check first and raise
-{class}`~macos.MacOSError` from a worker thread:
+{class}`~macos.MacOSError` from a worker thread ({mod}`macos.menubar` raises
+`RuntimeError`):
 
 | Calls | Why |
 |---|---|
@@ -58,7 +59,7 @@ what was written.
 | {func}`macos.system.gpu_usage`, {func}`~macos.system.lid_closed` | properties of the graphics drivers and the lid in the IOKit registry |
 | Battery health ({func}`macos.power.battery`) | properties of the battery's IOKit service |
 | Window tiling settings ({func}`macos.windows.tiling`...) | the window manager's preference keys, and restarting it |
-| The Dock's, Finder's, the trackpad's, the mouse's, the menu bar's and the sound effects' settings ({mod}`macos.dock`, {mod}`macos.finder`, {mod}`macos.trackpad`, {mod}`macos.mouse`, {mod}`macos.appearance`, {mod}`macos.sound`) | the preference keys System Settings writes, and restarting the Dock, Finder or SystemUIServer |
+| The Dock's, Finder's, the trackpad's, the mouse's, the menu bar's, the screenshots' and the sound effects' settings ({mod}`macos.dock`, {mod}`macos.finder`, {mod}`macos.trackpad`, {mod}`macos.mouse`, {mod}`macos.appearance`, {mod}`macos.screen`, {mod}`macos.sound`) | the preference keys System Settings writes; the Dock, Finder and SystemUIServer are restarted to read theirs, and the input settings applied with a private tool |
 
 The release notes on [GitHub Releases](https://github.com/JeanExtreme002/pymacos/releases)
 are the changelog: a feature that a macOS release changed is fixed there, and

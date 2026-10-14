@@ -20,7 +20,7 @@ itself, so a script can work in one terminal and not in another.
 | {func}`macos.finder.selection`, {func}`~macos.finder.current_folder` | Automation of Finder (asked the first time) | System Settings › Privacy & Security › Automation |
 | {func}`macos.apps.login_items`, {func}`~macos.apps.add_login_item`, {func}`~macos.apps.remove_login_item` | Automation of *System Events* (asked the first time) | System Settings › Privacy & Security › Automation |
 | {func}`macos.time_machine.last_backup` | may need Full Disk Access | System Settings › Privacy & Security › Full Disk Access |
-| {func}`macos.apps.uninstall` | Full Disk Access, to read the Library folders macOS protects (Cookies, HTTPStorages) | System Settings › Privacy & Security › Full Disk Access |
+| {func}`macos.apps.uninstall` | Full Disk Access, to look in the Library folders macOS protects (Cookies, HTTPStorages); without it, a `RuntimeWarning` names them | System Settings › Privacy & Security › Full Disk Access |
 | {mod}`macos.music` | Automation of Music or Spotify (asked the first time) | System Settings › Privacy & Security › Automation |
 | {mod}`macos.browser` | Automation of the browser (asked the first time); {func}`~macos.browser.run_js` also needs the browser's *Allow JavaScript from Apple Events* | System Settings › Privacy & Security › Automation |
 | {func}`macos.screen.set_night_shift_schedule` with `"sunset"` | Location Services | System Settings › Privacy & Security › Location Services |

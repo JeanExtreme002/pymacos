@@ -18,11 +18,12 @@ notifications, the same ones apps listen to. No permission is needed.
 import ctypes
 import inspect
 import threading
+import warnings
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from . import _cf, _events, _files, _iokit, _objc, _sc, apps
 from ._system import framework
@@ -450,8 +451,16 @@ def _observer(listener: _events.Listener, cleanup: ExitStack) -> int:
     return observer
 
 
-def _listen(names: List[str], on_event: Callable[[Event], bool], timeout: Optional[float]) -> None:
-    """Observe ``names`` and turn the run loop until ``stop()``, the timeout, or ``on_event`` returning ``True``."""
+def _listen(
+    names: List[str], on_event: Callable[[Event], bool], timeout: Optional[float], *, required: Optional[Set[str]] = None
+) -> None:
+    """
+    Observe ``names`` and turn the run loop until ``stop()``, the timeout, or ``on_event`` returning ``True``.
+
+    A system source (the power, network, USB or display watcher) that can't be set up fails the
+    call when one of the ``required`` events needs it (all of ``names``, by default); for the other
+    events it's a :class:`RuntimeWarning`, and those events don't come.
+    """
     # The notification centers deliver on the main thread's run loop, which only this thread turns
     # when it is the main one: elsewhere nothing would ever arrive, and the wait would never end.
     _files.require_main_thread("macos.events.run() and wait()")
@@ -496,9 +505,19 @@ def _listen(names: List[str], on_event: Callable[[Event], bool], timeout: Option
                     restype=None,
                 )
         kinds = {kind for kind, _ in wanted.values()}
+        needed = {_NOTIFICATIONS[name][0] for name in (names if required is None else required)}
         for kind, watch in _WATCHERS.items():
-            if kind in kinds:
+            if kind not in kinds:
+                continue
+            try:
                 cleanup.callback(watch(listener).close)  # each one closed, even when a later one fails
+            except MacOSError as problem:
+                if kind in needed:
+                    raise
+                events = ", ".join(sorted(name for name, (source, _) in wanted.items() if source == kind))
+                warnings.warn(
+                    "{}: the {} events won't come while this run() lasts".format(problem, events), RuntimeWarning, stacklevel=3
+                )
         for event in listener.drain(timeout):
             with _objc.autorelease_pool():
                 if on_event(event):
@@ -529,10 +548,13 @@ def run(*, timeout: Optional[float] = None) -> None:
 
     Every event is listened for, so a callback registered with :func:`on`
     while it runs (from another callback, or from another thread) is called
-    from the next event on, and one removed isn't called again.
+    from the next event on, and one removed isn't called again. A system
+    source that can't be set up (the USB or network watcher, on a Mac that
+    refuses it) fails the call when an event registered at the start needs
+    it; otherwise it's a :class:`RuntimeWarning`, and those events don't come.
     """
     with _lock:
-        registered = bool(_handlers)
+        registered = {handler.name for handler in _handlers}
     if not registered:
         raise ValueError("no callbacks registered: add some with macos.events.on() first")
 
@@ -546,7 +568,7 @@ def run(*, timeout: Optional[float] = None) -> None:
                 callback()
         return False
 
-    _listen(list(NAMES), call, timeout)
+    _listen(list(NAMES), call, timeout, required=registered)
 
 
 def wait(name: str, *, timeout: Optional[float] = None) -> Optional[Event]:

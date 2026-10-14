@@ -125,7 +125,8 @@ def wait_for_change(
     within ``timeout`` seconds.
     ``interval`` is how often to check, in seconds.
     ``include_sensitive=False`` waits on past a copy marked as concealed or
-    transient (a password, see :func:`watch`), for the next one.
+    transient (a password, see :func:`watch`), for the next one. By default
+    every copy counts, and will: one copy was asked for, not a history.
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
@@ -135,7 +136,10 @@ def wait_for_change(
         # An app copies by clearing the clipboard, then writing to it, and the
         # clearing alone already bumps the change count: keep waiting while the
         # clipboard is empty, or the text could be read before it's written.
-        while change_count() == start or _is_empty():
+        while True:
+            count = change_count()
+            if count != start and not _is_empty():
+                break
             if deadline is None:
                 time.sleep(interval)
                 continue
@@ -145,9 +149,14 @@ def wait_for_change(
             # Never sleep past the deadline, even with a long interval.
             time.sleep(min(interval, remaining))
         content = paste()
-        if include_sensitive or not _is_sensitive():
+        if include_sensitive:
             return content
-        start = change_count()  # a concealed copy: wait for the next one
+        skipped = _is_sensitive()
+        if change_count() != count:
+            continue  # copied again while reading: read the newer copy instead (see watch)
+        if not skipped:
+            return content
+        start = count  # a concealed copy: wait for the next one
 
 
 def watch(
@@ -178,9 +187,13 @@ def watch(
             "macos.clipboard.watch() yields concealed copies (passwords) unless include_sensitive=False; "
             "pymacos 2.0 will skip them by default: pass include_sensitive=True to keep them, or False to skip them",
             DeprecationWarning,
-            stacklevel=2,
+            stacklevel=2,  # at the call: not a generator, so the warning names the line that left it out
         )
         include_sensitive = True
+    return _watch(timeout, interval, include_sensitive)
+
+
+def _watch(timeout: Optional[float], interval: float, include_sensitive: bool) -> Iterator[Optional[str]]:
     seen = change_count()
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
