@@ -26,10 +26,10 @@ from .errors import MacOSError
 
 __all__ = ["Track", "now_playing", "play", "pause", "play_pause", "next", "previous", "volume", "set_volume", "seek"]
 
-PLAYERS = ("Music", "Spotify")
 # How a running player is recognized: its name is localized ("Musik", "Música"...), while
-# AppleScript's `tell application "Music"` finds it by the names above in every language.
+# AppleScript's `tell application "Music"` finds it by the names below in every language.
 _BUNDLE_IDS = {"Music": "com.apple.Music", "Spotify": "com.spotify.client"}
+PLAYERS = tuple(_BUNDLE_IDS)
 _SEPARATOR = "\x1f"  # ASCII unit separator: never in a song's title
 
 

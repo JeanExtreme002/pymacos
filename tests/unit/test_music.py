@@ -48,7 +48,7 @@ def players(monkeypatch):
     monkeypatch.setattr(
         apps,
         "running",
-        lambda: [apps.App(name, music._BUNDLE_IDS[name], 100 + index, None) for index, name in enumerate(fake.running)],
+        lambda: [apps.App(name, music._BUNDLE_IDS.get(name), 100 + index, None) for index, name in enumerate(fake.running)],
     )
     return fake
 
