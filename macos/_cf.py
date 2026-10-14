@@ -15,7 +15,7 @@ from functools import lru_cache, wraps
 import plistlib
 import signal
 import threading
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ._system import framework
 from .errors import MacOSError
@@ -359,7 +359,7 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
     A Ctrl-C that came while native code ran is raised at the callback's
     entry, before this can catch it: :func:`deferred_interrupt`, around that
     native code, keeps that one. This keeps those raised inside the callback
-    (a ``sys.exit()``, a Ctrl-C that came while the callback itself ran).
+    (a ``sys.exit()``, or a Ctrl-C outside such a block).
 
     Its own exceptions go on as before. A ``KeyboardInterrupt`` or
     ``SystemExit`` on the main thread is kept instead, the run loop is
@@ -394,7 +394,8 @@ def deferred_interrupt() -> Iterator[None]:
     code runs, that's the entry of the next callback C makes, before any
     ``try`` in it, where ctypes drops what the handler raises. In the block,
     SIGINT only notes the Ctrl-C and stops the run loop, so the callbacks run
-    on (and can stop their work, see :func:`interrupted`). When the block
+    on; under Python's own handler, which will raise, they can stop their
+    work (see :func:`interrupted`). When the block
     ends, even by an error, each Ctrl-C noted goes to the handler SIGINT had,
     as if it came then: Python's own raises ``KeyboardInterrupt``, one the
     script installed (asyncio's, a notebook's) does what it does. What a
@@ -408,30 +409,38 @@ def deferred_interrupt() -> Iterator[None]:
         finally:
             raise_interrupt()  # what a callback kept
         return
-    noted: List[int] = []
+    noted: List[Tuple[int, Any]] = []
+    outer = bool(getattr(_interrupt, "signalled", False))  # what an enclosing block noted
 
     def keep(signum: int, frame: Any) -> None:
-        noted.append(signum)
-        _interrupt.signalled = True
+        noted.append((signum, frame))
+        if keep.raises:  # type: ignore[attr-defined]
+            _interrupt.signalled = True
         cf = lib()
         cf.CFRunLoopStop(cf.CFRunLoopGetCurrent())
 
+    # Only Python's own handler surely raises: under another (asyncio's first Ctrl-C only cancels a
+    # task, a script may ignore it) the work must go on whole, not stop early with part of its result.
+    keep.raises = previous is signal.default_int_handler or getattr(previous, "raises", False)  # type: ignore[attr-defined]
     signal.signal(signal.SIGINT, keep)
     try:
         yield
     finally:
+        # The state first, then the handler back: a Ctrl-C handled as soon as it's back finds nothing left over.
+        _interrupt.signalled = outer
+        kept, _interrupt.error = getattr(_interrupt, "error", None), None
         if signal.getsignal(signal.SIGINT) is keep:  # not one the block installed meanwhile
             signal.signal(signal.SIGINT, previous)
-        _interrupt.signalled = False
         try:
-            for signum in noted:
-                previous(signum, None)  # Python's own raises at the first; asyncio's raises at the second
+            for signum, frame in noted:
+                previous(signum, frame)  # Python's own raises at the first; asyncio's raises at the second
         finally:
-            raise_interrupt()  # what a callback kept
+            if kept is not None:
+                raise kept  # what a callback kept
 
 
 def interrupted() -> bool:
-    """Whether a Ctrl-C (or an exit) came on this thread and wasn't raised yet: work that can stop should stop."""
+    """Whether a Ctrl-C that will raise (or an exit) came on this thread and wasn't raised yet: work that can stop should stop."""
     return getattr(_interrupt, "error", None) is not None or bool(getattr(_interrupt, "signalled", False))
 
 

@@ -169,15 +169,16 @@ def test_a_ctrl_c_held_during_native_code_goes_to_the_scripts_own_handler():
 
     called = []
 
-    def mine(signum, frame):  # asyncio's, a notebook's...
-        called.append(signum)
+    def mine(signum, frame):  # asyncio's, a notebook's... which may not raise
+        called.append((signum, frame is not None))
 
     previous = signal.signal(signal.SIGINT, mine)
     try:
         with _cf.deferred_interrupt():
             signal.raise_signal(signal.SIGINT)  # handled by Python here, as it would be at a callback's entry
-            assert called == [] and _cf.interrupted()  # held: the work can stop
-        assert called == [signal.SIGINT]  # delivered when the block ended, as if it came then
+            # Held, but the work goes on whole: this handler may not raise, and a part would pass for the result.
+            assert called == [] and not _cf.interrupted()
+        assert called == [(signal.SIGINT, True)]  # delivered when the block ended, with the frame it came at
         assert signal.getsignal(signal.SIGINT) is mine and not _cf.interrupted()
     finally:
         signal.signal(signal.SIGINT, previous)
@@ -192,6 +193,7 @@ def test_a_ctrl_c_held_comes_out_even_when_the_block_fails():
     with pytest.raises(KeyboardInterrupt) as raised:
         with _cf.deferred_interrupt():
             signal.raise_signal(signal.SIGINT)
+            assert _cf.interrupted()  # Python's own handler will raise: the work can stop
             raise ValueError("the block's own error")
     assert isinstance(raised.value.__context__, ValueError)  # the block's error stays in the traceback
     assert not _cf.interrupted()
@@ -208,12 +210,29 @@ def test_a_sigint_handler_installed_during_the_block_is_kept():
     def theirs(signum, frame):
         pass
 
+    previous = signal.getsignal(signal.SIGINT)
     try:
         with _cf.deferred_interrupt():
             signal.signal(signal.SIGINT, theirs)  # by a callback, or a library it calls
         assert signal.getsignal(signal.SIGINT) is theirs
     finally:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
+def test_a_block_inside_another_keeps_the_ctrl_c_the_outer_one_held():
+    import signal
+
+    from macos import _cf
+
+    seen = []  # checked outside: an assert failing inside would only become the KeyboardInterrupt's context
+    with pytest.raises(KeyboardInterrupt):
+        with _cf.deferred_interrupt():
+            signal.raise_signal(signal.SIGINT)
+            with _cf.deferred_interrupt():  # a PDF walk inside a run loop's callback, say
+                seen.append(_cf.interrupted())
+            seen.append(_cf.interrupted())  # still: the work after it can stop too
+    assert seen == [True, True] and not _cf.interrupted()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="stops a CoreFoundation run loop")
