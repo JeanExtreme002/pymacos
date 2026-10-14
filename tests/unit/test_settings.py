@@ -307,6 +307,8 @@ def test_no_remapping_is_read_from_each_empty_answer(monkeypatch, empty):
         "(\n    {\n        HIDKeyboardModifierMappingDst = 30064771113;\n        HIDKeyboardModifierMappingSrc = 30064771129;\n"
         "    },\n    {\n        Other = 1;\n    }\n)\n",  # only some read
         "",  # nothing at all
+        "(\n    {\n        HIDKeyboardModifierMappingDst = 0x700000029;\n        HIDKeyboardModifierMappingSrc = 0x700000039;\n"
+        "    }\n)\n",  # hex, which mustn't read as 0
     ],
 )
 def test_a_remapping_answer_it_cant_read_raises_rather_than_overwriting(monkeypatch, output):

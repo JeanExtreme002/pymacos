@@ -4,6 +4,8 @@ import sys
 
 import pytest
 
+import macos
+
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
 def test_objc_blocks_and_classes():
@@ -319,3 +321,17 @@ def test_an_error_macos_gave_no_reason_for_still_reads_as_a_message():
     assert _objc.error_message(nothing) == "unknown error"
     assert _objc.error_message(nothing, "no image") == "no image"
     assert _objc.error_message(nothing, None) is None
+
+
+def test_a_class_the_runtime_doesnt_have_is_not_supported_and_still_a_lookup_error(monkeypatch):
+    from macos import _objc
+
+    class Runtime:
+        @staticmethod
+        def objc_getClass(name):
+            return None  # what objc_getClass gives for a class it doesn't know
+
+    monkeypatch.setattr(_objc, "_libobjc", lambda: Runtime)
+    with pytest.raises(macos.NotSupportedError, match="'VNSomethingNewer' is not loaded") as missing:
+        _objc.cls.__wrapped__("VNSomethingNewer")  # under the cache, which would keep a real lookup
+    assert isinstance(missing.value, LookupError)  # what the callers that turn it into "needs macOS N" catch

@@ -1034,20 +1034,20 @@ def _mappings() -> Dict[int, int]:
     from ._system import HIDUTIL_TIMEOUT, run
 
     output = run(["hidutil", "property", "--get", "UserKeyMapping"], timeout=HIDUTIL_TIMEOUT)
-    found = {}
+    # Read wrong, the remappings would look like none (or other keys), and the next remap() would
+    # write its own over the ones in place: an answer in a form this doesn't know raises.
+    unreadable = MacOSError("can't read the key remappings: hidutil printed {!r}".format(output.strip()[:200]))
     blocks = re.findall(r"\{(.*?)\}", output, re.S)
-    read = 0
+    if not blocks and not re.fullmatch(r"\(null\)|\(\s*\)", output.strip()):
+        raise unreadable
+    found = {}
     for block in blocks:
-        source = re.search(r"HIDKeyboardModifierMappingSrc\s*=\s*(\d+)", block)
-        target = re.search(r"HIDKeyboardModifierMappingDst\s*=\s*(\d+)", block)
-        if source and target:
-            found[int(source.group(1))] = int(target.group(1))
-            read += 1
-    # Read wrong, the remappings would look like none, and the next remap()
-    # would write its own over the ones in place: a format this doesn't know raises.
-    known_empty = not blocks and re.fullmatch(r"\(null\)|\(\s*\)", output.strip())
-    if read != len(blocks) or not (blocks or known_empty):
-        raise MacOSError("can't read the key remappings: hidutil printed {!r}".format(output.strip()[:200]))
+        # The whole number up to its ";": a hex one (0x700000039) mustn't read as its leading 0.
+        source = re.search(r"HIDKeyboardModifierMappingSrc\s*=\s*(\d+)\s*;", block)
+        target = re.search(r"HIDKeyboardModifierMappingDst\s*=\s*(\d+)\s*;", block)
+        if not (source and target):
+            raise unreadable
+        found[int(source.group(1))] = int(target.group(1))
     return found
 
 
