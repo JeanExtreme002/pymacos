@@ -407,6 +407,7 @@ explain how to use each part.
 .. autofunction:: macos.keyboard.set_fn_key_action
 .. autofunction:: macos.keyboard.full_keyboard_access
 .. autofunction:: macos.keyboard.set_full_keyboard_access
+.. autofunction:: macos.keyboard.has_listen_permission
 .. autofunction:: macos.keyboard.has_permission
 .. autofunction:: macos.keyboard.hold
 .. autofunction:: macos.keyboard.inline_predictions
@@ -422,6 +423,7 @@ explain how to use each part.
 .. autofunction:: macos.keyboard.set_press_and_hold
 .. autofunction:: macos.keyboard.remap
 .. autofunction:: macos.keyboard.remappings
+.. autofunction:: macos.keyboard.request_listen_permission
 .. autofunction:: macos.keyboard.request_permission
 .. autofunction:: macos.keyboard.smart_dashes
 .. autofunction:: macos.keyboard.set_smart_dashes
@@ -503,9 +505,11 @@ explain how to use each part.
 .. autofunction:: macos.mouse.double_click_speed
 .. autofunction:: macos.mouse.set_double_click_speed
 .. autofunction:: macos.mouse.drag
+.. autofunction:: macos.mouse.has_listen_permission
 .. autofunction:: macos.mouse.has_permission
 .. autofunction:: macos.mouse.move
 .. autofunction:: macos.mouse.position
+.. autofunction:: macos.mouse.request_listen_permission
 .. autofunction:: macos.mouse.request_permission
 .. autofunction:: macos.mouse.scroll
 .. autofunction:: macos.mouse.scroll_speed
@@ -707,6 +711,7 @@ explain how to use each part.
 .. module:: macos.settings
 
 .. autofunction:: macos.settings.apply
+.. autofunction:: macos.settings.batch
 .. autofunction:: macos.settings.export
 .. autofunction:: macos.settings.names
 ```

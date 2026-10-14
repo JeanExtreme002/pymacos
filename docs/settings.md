@@ -55,8 +55,23 @@ their own pages say.
 Key remappings are swapped in as a whole: the new list replaces the old one in
 one step, so a bad entry never leaves the keyboard without its remappings.
 
+## Several changes at once
+
+Outside {func}`~macos.settings.apply`, each setter of the Dock, Finder, the
+menu bar or the input devices restarts what shows the setting, so three Dock
+changes restart the Dock three times. {func}`~macos.settings.batch` holds the
+restarts until the end of its block, each done once:
+
+```python
+with macos.settings.batch():
+    macos.dock.set_autohide(True)
+    macos.dock.set_size(48)
+    macos.finder.set_show_extensions(True)   # the Dock and Finder each restart once, here
+```
+
 ## Reference
 
 - {func}`macos.settings.export`
+- {func}`macos.settings.batch`
 - {func}`macos.settings.apply`
 - {func}`macos.settings.names`

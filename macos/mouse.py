@@ -51,6 +51,8 @@ __all__ = [
     "set_tracking_speed",
     "has_permission",
     "request_permission",
+    "has_listen_permission",
+    "request_listen_permission",
     "scroll_speed",
     "set_scroll_speed",
     "double_click_speed",
@@ -61,6 +63,8 @@ __all__ = [
 
 has_permission = _events.has_permission
 request_permission = _events.request_permission
+has_listen_permission = _events.has_listen_permission
+request_listen_permission = _events.request_listen_permission
 
 # CGEventType values and CGMouseButton numbers, per button.
 _BUTTONS = {
@@ -264,9 +268,11 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[Click]:
 
     It only listens: the clicks still reach the apps. It goes on until you
     ``break`` out of the loop, or ``timeout`` seconds pass. Needs the *Input
-    Monitoring* permission: without it, the call itself raises
-    :class:`~macos.PermissionDeniedError`, before the loop starts. Loop on
-    the thread that called it: the clicks are heard on that thread's run loop.
+    Monitoring* permission (:func:`has_listen_permission` checks it, not
+    :func:`has_permission`, which is Accessibility): without it, the call
+    itself raises :class:`~macos.PermissionDeniedError`, before the loop
+    starts. Loop on the thread that called it: the clicks are heard on that
+    thread's run loop.
     """
     cg = _events.graphics()
     downs = {_BUTTONS["left"][0]: "left", _BUTTONS["right"][0]: "right", _BUTTONS["middle"][0]: None}

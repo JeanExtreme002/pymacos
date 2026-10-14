@@ -21,13 +21,14 @@ import math
 import os
 from pathlib import Path
 import warnings
-from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import appearance, dock, finder, keyboard, mouse, screen, sound, system, trackpad, windows
 from ._system import add_note, batched_restarts, require_macos
 from .errors import MacOSError, NotSupportedError
 
-__all__ = ["export", "apply", "names"]
+__all__ = ["export", "apply", "batch", "names"]
 
 
 def _anything(value: Any) -> None:
@@ -476,6 +477,26 @@ del _section, _table, _name, _setting
 def names() -> List[str]:
     """Every setting :func:`export` saves, as ``"section.name"``: ``["keyboard.key_repeat", ...]``."""
     return ["{}.{}".format(section, name) for section, settings in _SETTINGS.items() for name in settings]
+
+
+@contextmanager
+def batch() -> Iterator[None]:
+    """
+    Restart the Dock, Finder and the others once, at the end of the block, instead of after each change::
+
+        with macos.settings.batch():
+            macos.dock.set_autohide(True)
+            macos.dock.set_size(48)
+            macos.finder.set_show_extensions(True)   # the Dock and Finder each restart once, here
+
+    The settings are written as each call runs; what waits is the restart that
+    makes them show (the Dock's, Finder's, Control Center's, SystemUIServer's,
+    the window manager's, the input settings'). Each runs once when the block ends, even when it
+    ends with an error, and an error of a restart doesn't hide the block's own.
+    Nested blocks count as one. :func:`apply` does this by itself.
+    """
+    with batched_restarts():
+        yield
 
 
 def export() -> Dict[str, Dict[str, Any]]:

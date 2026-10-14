@@ -54,7 +54,8 @@ jobs:
       run: pytest tests/unit -v --cov=macos --cov-report=term --cov-report=xml --cov-fail-under=70
     - name: Live tests
       # They talk to a real, shared runner, where speech, launchd and the
-      # network are sometimes slow: a failure is retried before it counts.
+      # network are sometimes slow: a failure is retried before it counts,
+      # and -rR lists the tests that needed the retry, so a flaky one shows.
       # Their coverage is added to the unit tests' for the Codecov report.
       # GitHub's arm64 runners have Accessibility and Screen Recording granted:
       # a test skipped for a missing permission fails here, so an image that
@@ -63,7 +64,7 @@ jobs:
       env:
         PYMACOS_REQUIRE_PERMISSIONS: "1"
       run: >-
-        pytest tests/live -v -rs --reruns 1 --reruns-delay 5
+        pytest tests/live -v -rsR --reruns 1 --reruns-delay 5
         --cov=macos --cov-append --cov-report=term --cov-report=xml
         ${{ matrix.python-version == '3.12' && '--cov-fail-under=88' || '' }}
     - name: Upload coverage to Codecov
@@ -101,7 +102,7 @@ jobs:
     - name: Unit tests
       run: pytest tests/unit -v
     - name: Live tests
-      run: pytest tests/live -v -rs --reruns 1 --reruns-delay 5
+      run: pytest tests/live -v -rsR --reruns 1 --reruns-delay 5
 
   # The package must import anywhere and fail with NotSupportedError, so the
   # unit tests also run on Linux (the live ones skip themselves there).

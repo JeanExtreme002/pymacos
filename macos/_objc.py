@@ -135,6 +135,19 @@ def nsstring(text: str) -> int:
     return send(string, "autorelease")
 
 
+def utf16_offsets(text: str) -> List[int]:
+    """
+    Where each of Python's indexes in ``text`` falls counted as Foundation counts, in UTF-16 units (one
+    past the end included): a character beyond the Basic Multilingual Plane, like an emoji, takes two.
+
+    One table per text: computed per index, a long line would cost the square of its length.
+    """
+    offsets = [0]
+    for character in text:
+        offsets.append(offsets[-1] + (2 if ord(character) > 0xFFFF else 1))
+    return offsets
+
+
 def pystring(obj: Optional[int]) -> Optional[str]:
     """Convert an ``NSString`` to a Python string (``None`` stays ``None``), NUL characters included."""
     if not obj:

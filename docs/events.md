@@ -52,7 +52,12 @@ macos.events.run()
 that called it, which must be the main thread: macOS delivers these events
 there. It returns after {func}`~macos.events.stop` or `timeout` seconds; an
 exception in a callback stops it and propagates, as does one met while
-reading an event. With no callbacks registered, it raises `ValueError`.
+reading an event. With no callbacks registered, it raises `ValueError`. It
+listens for every event, so a callback registered while it runs (from another
+callback, or from another thread) is called from the next event on. A system
+source it can't set up (the USB or network watcher, on a Mac that refuses it)
+fails the call when an event registered at the start needs it; otherwise it
+warns (`RuntimeWarning`), and those events don't come.
 {func}`~macos.events.stop` stops every {func}`~macos.events.run` and
 {func}`~macos.events.wait` in progress, including one still starting. Each
 has its own queue of events, so one never takes the events another is waiting

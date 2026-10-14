@@ -38,7 +38,7 @@ exceptions instead:
 | `FileNotFoundError` | An input file or folder doesn't exist |
 | `FileExistsError` | The destination already exists |
 | `NotADirectoryError` | A folder was expected, but the path is a file |
-| `TimeoutError` | A wait ran out of time, such as {func}`macos.clipboard.wait_for_change` |
+| `TimeoutError` | Caught by `except TimeoutError`: every wait that ran out of time raises a subclass of it ({class}`~macos.WaitTimeoutError`, {class}`~macos.CommandTimeoutError`, {class}`~macos.PromptTimeoutError`) |
 | `OSError` | A file's attributes can't be read or changed |
 | `ProcessLookupError`, `PermissionError` | {func}`macos.system.kill` on a process that's gone, or another user's |
 

@@ -277,7 +277,7 @@ def tabs(app: Optional[str] = None) -> List[Tab]:
     running. It never opens a browser.
     """
     browser = _browser(app)
-    if browser is None or not _is_running(browser):
+    if browser is None or (app is not None and not _is_running(browser)):  # found running, or given: then checked
         return []
     found = []
     records = _script(browser, _LIST[_KINDS[browser]]).rstrip("\n").split(_RECORD)

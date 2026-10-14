@@ -133,6 +133,8 @@ macos.mouse.set_acceleration(False)
 - {func}`macos.mouse.scroll`
 - {func}`macos.mouse.has_permission`
 - {func}`macos.mouse.request_permission`
+- {func}`macos.mouse.has_listen_permission`
+- {func}`macos.mouse.request_listen_permission`
 - {func}`macos.mouse.click_text`
 - {func}`macos.mouse.watch`
 - {class}`macos.mouse.Click`

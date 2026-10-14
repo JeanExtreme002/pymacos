@@ -16,6 +16,7 @@ regardless of the terminal's locale (``pbcopy``/``pbpaste`` mangle it unless
 
 import os
 import time
+import warnings
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Union
 
@@ -112,7 +113,9 @@ def change_count() -> int:
         return _objc.send(_pasteboard(), "changeCount", restype=NSInteger)
 
 
-def wait_for_change(*, timeout: Optional[float] = None, interval: float = 0.2) -> Optional[str]:
+def wait_for_change(
+    *, timeout: Optional[float] = None, interval: float = 0.2, include_sensitive: bool = True
+) -> Optional[str]:
     """
     Wait until something new is copied, and return it as text.
 
@@ -121,28 +124,43 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 0.2) -
     :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if nothing is copied
     within ``timeout`` seconds.
     ``interval`` is how often to check, in seconds.
+    ``include_sensitive=False`` waits on past a copy marked as concealed or
+    transient (a password, see :func:`watch`), for the next one. By default
+    every copy counts, and will: one copy was asked for, not a history.
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
     start = change_count()
     deadline = None if timeout is None else time.monotonic() + timeout
-    # An app copies by clearing the clipboard, then writing to it, and the
-    # clearing alone already bumps the change count: keep waiting while the
-    # clipboard is empty, or the text could be read before it's written.
-    while change_count() == start or _is_empty():
-        if deadline is None:
-            time.sleep(interval)
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise WaitTimeoutError("nothing was copied within {}s".format(timeout))
-        # Never sleep past the deadline, even with a long interval.
-        time.sleep(min(interval, remaining))
-    return paste()
+    while True:
+        # An app copies by clearing the clipboard, then writing to it, and the
+        # clearing alone already bumps the change count: keep waiting while the
+        # clipboard is empty, or the text could be read before it's written.
+        while True:
+            count = change_count()
+            if count != start and not _is_empty():
+                break
+            if deadline is None:
+                time.sleep(interval)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WaitTimeoutError("nothing was copied within {}s".format(timeout))
+            # Never sleep past the deadline, even with a long interval.
+            time.sleep(min(interval, remaining))
+        content = paste()
+        if include_sensitive:
+            return content
+        skipped = _is_sensitive()
+        if change_count() != count:
+            continue  # copied again while reading: read the newer copy instead (see watch)
+        if not skipped:
+            return content
+        start = count  # a concealed copy: wait for the next one
 
 
 def watch(
-    *, timeout: Optional[float] = None, interval: float = 0.2, include_sensitive: bool = True
+    *, timeout: Optional[float] = None, interval: float = 0.2, include_sensitive: Optional[bool] = None
 ) -> Iterator[Optional[str]]:
     """
     Yield each new thing copied, as text (``None`` for images, files...), for a clipboard history::
@@ -157,10 +175,25 @@ def watch(
 
     ``include_sensitive=False`` skips what's marked as concealed or transient
     (a password copied with ``copy(sensitive=True)``, or by a password
-    manager), as clipboard managers do: a history shouldn't keep it.
+    manager), as clipboard managers do: a history shouldn't keep it. Say
+    which you want: today every copy is yielded unless told otherwise, and
+    pymacos 2.0 will skip the concealed ones by default, so leaving it out
+    warns (``DeprecationWarning``).
     """
     if interval <= 0:
         raise ValueError("interval must be positive, not {}".format(interval))
+    if include_sensitive is None:
+        warnings.warn(
+            "macos.clipboard.watch() yields concealed copies (passwords) unless include_sensitive=False; "
+            "pymacos 2.0 will skip them by default: pass include_sensitive=True to keep them, or False to skip them",
+            DeprecationWarning,
+            stacklevel=2,  # at the call: not a generator, so the warning names the line that left it out
+        )
+        include_sensitive = True
+    return _watch(timeout, interval, include_sensitive)
+
+
+def _watch(timeout: Optional[float], interval: float, include_sensitive: bool) -> Iterator[Optional[str]]:
     seen = change_count()
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:

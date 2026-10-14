@@ -113,9 +113,9 @@ def test_clipboard_watch():
 
     threading.Thread(target=copies).start()
     seen = []
-    for text in macos.clipboard.watch(timeout=3):
+    for text in macos.clipboard.watch(timeout=3, include_sensitive=True):
         seen.append(text)
         if len(seen) == 2:
             break
     assert seen == ["one", "two"]
-    assert list(macos.clipboard.watch(timeout=0.3)) == []
+    assert list(macos.clipboard.watch(timeout=0.3, include_sensitive=True)) == []

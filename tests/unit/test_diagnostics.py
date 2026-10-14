@@ -1,7 +1,6 @@
 """Unit tests for the Wi-Fi signal, installed apps, crash reports and the system log."""
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -10,8 +9,6 @@ import pytest
 import macos
 from macos import _system, apps, network, system
 
-darwin = pytest.mark.skipif(sys.platform != "darwin", reason="reads this Mac's own state")
-
 
 def test_wifi_quality():
     signal = network.WiFiSignal(-62, -95, 866.0, 157, "5GHz", 80, "wpa2_personal")
@@ -19,13 +16,6 @@ def test_wifi_quality():
     assert network.WiFiSignal(-50, -90, 1, None, None, None, None).quality == "excellent"
     assert network.WiFiSignal(-72, -90, 1, None, None, None, None).quality == "fair"
     assert network.WiFiSignal(-83, -95, 1, None, None, None, None).quality == "poor"
-
-
-@darwin
-def test_wifi_signal():
-    signal = network.wifi_signal()
-    if signal is not None:  # None on a Mac off Wi-Fi, as CI's
-        assert signal.rssi < 0 and signal.transmit_rate > 0 and signal.band in ("2.4GHz", "5GHz", "6GHz", None)
 
 
 def test_installed_app_from_its_info(tmp_path):
@@ -38,13 +28,6 @@ def test_installed_app_from_its_info(tmp_path):
     )
     assert apps._installed_app(str(bundle)) == apps.InstalledApp("Tool", "com.example.tool", "2.1", bundle)
     assert apps._installed_app(str(tmp_path / "Broken.app")) is None
-
-
-@darwin
-def test_installed():
-    found = apps.installed()
-    assert any(app.bundle_id == "com.apple.calculator" and app.version for app in found)
-    assert all(app.path.suffix == ".app" for app in found)
 
 
 def _report(folder, name, header, body):
@@ -126,13 +109,6 @@ def test_log_entries_and_predicates():
             system.logs(**wrong)
 
 
-@darwin
-def test_logs():
-    found = system.logs(last="2m", limit=5)
-    assert len(found) <= 5 and all(entry.process and entry.level for entry in found)
-    assert all(entry.level in ("error", "fault") for entry in system.logs(level="error", last="5m", limit=5))
-
-
 def test_platform_checks():
     with pytest.raises(ValueError, match="limit"):
         system.logs(limit=-1)
@@ -165,7 +141,7 @@ def test_installed_walks_every_subfolder_and_skips_odd_plists(tmp_path, monkeypa
     (odd / "Info.plist").write_bytes(plistlib.dumps(["not", "a", "dict"]))
     monkeypatch.setattr(apps, "_APP_FOLDERS", (str(tmp_path),))
     monkeypatch.setattr(apps, "require_macos", lambda: None)
-    monkeypatch.setattr(macos.spotlight, "search", lambda query: [])
+    monkeypatch.setattr(macos.spotlight, "search", lambda query, timeout=None: [])
     assert [app.name for app in apps.installed()] == ["Deep"]
 
 

@@ -58,6 +58,8 @@ __all__ = [
     "set_layout",
     "has_permission",
     "request_permission",
+    "has_listen_permission",
+    "request_listen_permission",
     "brightness",
     "set_brightness",
     "auto_brightness",
@@ -86,6 +88,8 @@ __all__ = [
 
 has_permission = _events.has_permission
 request_permission = _events.request_permission
+has_listen_permission = _events.has_listen_permission
+request_listen_permission = _events.request_listen_permission
 
 # Virtual key codes (HIToolbox's kVK_*), which name physical keys.
 _KEYS = {
@@ -501,10 +505,12 @@ def type(text: str, *, interval: float = 0.0) -> None:
     Type ``text`` into the app in front, as if typed on the keyboard.
 
     Any character works (accents, emoji...), whatever the keyboard layout.
-    New lines (``\\n``, ``\\r\\n`` or ``\\r``) press Enter and tabs press Tab. ``interval`` is the pause
-    between characters, in seconds, for apps that can't keep up. The keys
-    :func:`hold` holds down don't apply: the text comes out as written. Needs
-    the Accessibility permission.
+    New lines (``\\n``, ``\\r\\n`` or ``\\r``) press Enter and tabs press Tab:
+    in a chat box or a form, a new line sends or submits, so strip them from
+    text that comes from elsewhere (a web page, a message) before typing it.
+    ``interval`` is the pause between characters, in seconds, for apps that
+    can't keep up. The keys :func:`hold` holds down don't apply: the text
+    comes out as written. Needs the Accessibility permission.
     """
     if interval < 0:
         raise ValueError("interval must not be negative, not {}".format(interval))
@@ -785,14 +791,17 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
         for key in macos.keyboard.watch():
             if key.shortcut == "ctrl+option+q":
                 break
-            log.write(key.text)
+            if key.key == "f5":
+                rebuild()
 
     It only listens: the keys still reach the app in front (to take a
     shortcut for yourself, see :mod:`macos.hotkeys`). It goes on until you
     ``break`` out of the loop, or ``timeout`` seconds pass. Needs the *Input
-    Monitoring* permission: without it, the call itself raises
-    :class:`~macos.PermissionDeniedError`, before the loop starts. Loop on
-    the thread that called it: the keys are heard on that thread's run loop.
+    Monitoring* permission (:func:`has_listen_permission` checks it, not
+    :func:`has_permission`, which is Accessibility): without it, the call
+    itself raises :class:`~macos.PermissionDeniedError`, before the loop
+    starts. Loop on the thread that called it: the keys are heard on that
+    thread's run loop.
     macOS hides the keys typed in password fields. A modifier pressed on its own
     (Shift, Cmd, Option, Ctrl, Fn) isn't a key press to macOS, and isn't
     reported: it shows in the ``modifiers`` of the next key.

@@ -874,37 +874,46 @@ def from_images(images: Sequence[Union[PathLike, bytes]], output: PathLike) -> P
 
     io = image_module._io()
     graphics = _graphics()
-    # Read every image first, so a bad one fails before anything is written.
-    pictures = []
-    try:
-        for image in images:
-            source, label = _image_source(image)
-            with _cf.owned(source):
-                orientation = image_module._describe(source).orientation
-                picture = io.CGImageSourceCreateImageAtIndex(source, 0, None)
-            if not picture:
-                raise ValueError("{} is not an image macOS can read".format(label))
-            pictures.append((picture, orientation))
 
-        def stored(picture: int) -> Tuple[float, float]:
-            return float(graphics.CGImageGetWidth(picture)), float(graphics.CGImageGetHeight(picture))
+    def decoded(image: Union[PathLike, bytes]) -> int:
+        """An owned ``CGImage`` of ``image``, which the caller releases."""
+        source, label = _image_source(image)
+        with _cf.owned(source):
+            picture = io.CGImageSourceCreateImageAtIndex(source, 0, None)
+        if not picture:
+            raise ValueError("{} is not an image macOS can read".format(label))
+        return int(picture)
 
-        def draw(context: int, index: int, page_width: float, page_height: float) -> None:
-            picture, orientation = pictures[index]
-            width, height = stored(picture)
+    # Every image is read first (its size and orientation, not its pixels), so a bad one fails before
+    # anything is written; each is decoded as its page is drawn, and let go of right after: a scan of
+    # hundreds of photos would otherwise hold them all decoded at once.
+    described = []
+    for image in images:
+        source, label = _image_source(image)
+        with _cf.owned(source):
+            info = image_module._describe(source)
+        if not info.width or not info.height:
+            raise ValueError("{} is not an image macOS can read".format(label))
+        described.append(info)
+
+    def draw(context: int, index: int, page_width: float, page_height: float) -> None:
+        picture = decoded(images[index])
+        try:
+            # The size the page was given (what the image describes): the picture is drawn to fill it.
+            width, height = float(described[index].width), float(described[index].height)
+            orientation = described[index].orientation
             graphics.CGContextSaveGState(context)
             graphics.CGContextConcatCTM(context, _objc.CGAffineTransform(*_upright_transform(orientation, width, height)))
             graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)), picture)
             graphics.CGContextRestoreGState(context)
-
-        sizes = []
-        for picture, orientation in pictures:
-            width, height = stored(picture)
-            sizes.append((height, width) if orientation in (5, 6, 7, 8) else (width, height))
-        return _write_pages(output, sizes, draw)
-    finally:
-        for picture, _ in pictures:
+        finally:
             _cf.release(picture)
+
+    sizes = [
+        (float(info.height), float(info.width)) if info.orientation in (5, 6, 7, 8) else (float(info.width), float(info.height))
+        for info in described
+    ]
+    return _write_pages(output, sizes, draw)
 
 
 # --- Forms ----------------------------------------------------------------------
@@ -1790,15 +1799,7 @@ def _occurrences(texts: Iterable[str], pattern: "re.Pattern[str]") -> int:
     )
 
 
-def _utf16_offsets(text: str) -> List[int]:
-    """
-    Where each of Python's indexes in ``text`` falls counted as PDFKit counts, in UTF-16 units (one
-    past the end included): a character beyond the Basic Multilingual Plane, like an emoji, takes two.
-    """
-    offsets = [0]
-    for character in text:
-        offsets.append(offsets[-1] + (2 if ord(character) > 0xFFFF else 1))
-    return offsets
+_utf16_offsets = _objc.utf16_offsets  # PDFKit counts as Foundation does: UTF-16 units
 
 
 def _seen_box(page: int, box: Any) -> Tuple[float, ...]:

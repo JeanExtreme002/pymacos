@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import warnings
+
 import pytest
 
 import macos
@@ -453,3 +455,65 @@ def test_waiting_for_another_default_app_change_counts_against_the_timeout(monke
     finally:
         apps._default_call.release()
     assert not any(selector.startswith("setDefaultApplication") for selector in sent)  # never asked: out of time
+
+
+def test_uninstall_says_which_library_folders_it_could_not_look_in(tmp_path, monkeypatch):
+    """Cookies is protected on every Mac: without Full Disk Access the uninstall goes on, and says what it couldn't see."""
+    import plistlib
+
+    from macos import apps
+
+    bundle = tmp_path / "Applications" / "Chat.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleName": "Chat", "CFBundleIdentifier": "com.example.Chat"})
+    )
+    home = tmp_path / "home"
+    library = home / "Library"
+    (library / "Caches" / "com.example.Chat").mkdir(parents=True)
+    (library / "Cookies").mkdir()
+    listdir = apps.os.listdir
+
+    def protected(path):
+        if str(path).endswith("/Cookies"):
+            raise PermissionError(1, "Operation not permitted", str(path))  # EPERM: how TCC refuses
+        return listdir(path)
+
+    monkeypatch.setattr(apps.os, "listdir", protected)
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "installed", lambda: [apps._installed_app(str(bundle))])
+    monkeypatch.setattr(apps.Path, "home", lambda: home)
+
+    with pytest.warns(RuntimeWarning, match="Cookies couldn't be looked in.*Full Disk Access is missing") as caught:
+        assert apps.uninstall("Chat", dry_run=True) == [bundle, library / "Caches" / "com.example.Chat"]
+    assert caught[0].filename == __file__  # the warning points at the caller
+    # A folder that isn't there is nothing of the app's: no warning.
+    (library / "Cookies").rmdir()
+    monkeypatch.setattr(apps.os, "listdir", listdir)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert apps.uninstall("Chat", dry_run=True) == [bundle, library / "Caches" / "com.example.Chat"]
+
+
+def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):
+    """A stuck Spotlight mustn't hang installed(), and uninstall() with it: the folders alone are listed then."""
+    from macos import apps
+
+    queries = []
+
+    def search(query, **options):
+        queries.append(options)
+        raise macos.CommandTimeoutError(["mdfind", query], options["timeout"])
+
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_APP_FOLDERS", (str(tmp_path),))
+    monkeypatch.setattr(apps.spotlight, "search", search)
+    bundle = tmp_path / "Tool.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        b'<plist version="1.0"><dict><key>CFBundleName</key><string>Tool</string></dict></plist>'
+    )
+
+    assert [app.name for app in apps.installed()] == ["Tool"]
+    assert queries and queries[0]["timeout"] == apps._SPOTLIGHT_TIMEOUT > 0

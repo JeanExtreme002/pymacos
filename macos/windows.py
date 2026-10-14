@@ -520,7 +520,7 @@ def _windows_of(app: apps.App) -> "builtins.list[Window]":
         if status == _API_DISABLED:
             _check(status, "list the windows")
         if not value:
-            return []  # no windows, or an app that doesn't answer
+            return []  # no windows, or an app that doesn't answer (busy, or still starting): see list()
         with _cf.owned(value):
             found = []
             for window in _cf.items(value):
@@ -536,7 +536,9 @@ def list(app: Union[str, apps.App, None] = None, *, title: Optional[str] = None)
 
     ``app`` is an :class:`~macos.apps.App` or an app's name (``"Safari"``).
     ``title`` keeps the windows whose title contains it, ignoring case.
-    Minimized windows are included; check :attr:`Window.minimized`.
+    Minimized windows are included; check :attr:`Window.minimized`. An app
+    that doesn't answer within two seconds (busy, or still starting) counts
+    as having no windows: ask again, or use :func:`wait_for`.
     """
     if not has_permission():
         _check(_API_DISABLED, "list the windows")
@@ -584,7 +586,11 @@ def wait_for(
 
 
 def focused() -> Optional[Window]:
-    """Return the window in front (the one keystrokes go to), or ``None`` when the front app has none."""
+    """
+    Return the window in front (the one keystrokes go to), or ``None`` when the front app has none.
+
+    An app that doesn't answer within two seconds (busy, or still starting) counts as having none.
+    """
     if not has_permission():
         _check(_API_DISABLED, "read the focused window")
     front = apps.frontmost()
@@ -593,6 +599,8 @@ def focused() -> Optional[Window]:
     element = _app_element(front.pid)
     try:
         status, value = _copy(element, "AXFocusedWindow")
+        if status == _API_DISABLED:
+            _check(status, "read the focused window")
         return Window(value, front.name or "", front.pid) if value else None
     finally:
         _cf.release(element)

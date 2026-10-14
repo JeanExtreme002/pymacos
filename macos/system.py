@@ -858,7 +858,7 @@ def _restart_control_center() -> None:
     """
     Quit Control Center, which draws the menu bar's clock and icons: macOS starts it again, reading the settings.
 
-    Inside :func:`macos._system.batched_restarts` (as :func:`macos.settings.apply` runs), it's put off to the end of the batch.
+    Inside :func:`macos.settings.batch` (as :func:`macos.settings.apply` runs), it's put off to the end of the batch.
     """
     restart_process("ControlCenter")
 
@@ -1728,10 +1728,14 @@ def who_uses(path: Union[str, "os.PathLike[str]"]) -> List[Process]:
     details = os.stat(target)
     same_file = None if os.path.isdir(target) else (details.st_dev & 0xFFFFFFFF, details.st_ino)
 
+    resolved: Dict[str, str] = {}  # the libraries, fonts and caches every process holds: resolved once, not per process
+
     def uses(entry: _Opened) -> bool:
         if same_file and entry.file == same_file:
             return True  # the same file, opened by another of its names
-        return _is_in(os.path.realpath(entry.path), target)
+        if entry.path not in resolved:
+            resolved[entry.path] = os.path.realpath(entry.path)
+        return _is_in(resolved[entry.path], target)
 
     users = []
     for pid in _pids():
@@ -1926,8 +1930,9 @@ def gpu_usage() -> List[GPUUsage]:
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
     # The graphics drivers register as IOAccelerator; 0 is kIOMainPortDefault.
-    if io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator)) != 0:
-        return []
+    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator))
+    if status != 0:  # a Mac without a GPU driver still answers, with an empty iterator: this is IOKit failing
+        raise MacOSError("could not list the graphics processors (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []
     try:
         while True:
@@ -2336,8 +2341,9 @@ def usb_devices() -> List[USBDevice]:
     require_macos()
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
-    if io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator)) != 0:
-        return []
+    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator))
+    if status != 0:  # no USB device is an empty iterator, not an error: this is IOKit failing
+        raise MacOSError("could not list the USB devices (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []
     try:
         while True:

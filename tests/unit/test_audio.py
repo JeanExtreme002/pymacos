@@ -447,3 +447,20 @@ def test_classify_says_it_needs_macos_12_where_the_classifier_is_missing(monkeyp
     monkeypatch.setattr(audio._objc, "define_class", lambda *args, **kwargs: pytest.fail("must stop before the observer"))
     with pytest.raises(macos.NotSupportedError, match=r"classify\(\) needs macOS 12 or later"):
         macos.audio.classify(clip)
+
+
+def test_an_exception_in_the_classifier_callback_ends_the_analysis_with_that_error(monkeypatch):
+    """ctypes drops an exception raised in a callback: unkept, the rest of the file would be read for nothing."""
+    from macos import audio
+
+    sent = []
+    monkeypatch.setattr(audio._objc, "send", lambda receiver, selector, *args, **kwargs: sent.append(selector) or 0)
+    monkeypatch.setattr(audio._objc, "nsarray", lambda array: (_ for _ in ()).throw(ValueError("odd result")))
+    monkeypatch.setattr(audio._cf, "interrupted", lambda: False)
+    monkeypatch.setitem(audio._heard, 7, {"labels": {}, "analyzer": 0x1})
+    try:
+        audio._on_result(7, 0, 0, 0)
+        assert audio._heard[7]["error"] == "odd result while reading a result"
+        assert "cancelAnalysis" in sent
+    finally:
+        audio._heard.pop(7, None)

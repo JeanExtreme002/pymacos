@@ -20,6 +20,7 @@ itself, so a script can work in one terminal and not in another.
 | {func}`macos.finder.selection`, {func}`~macos.finder.current_folder` | Automation of Finder (asked the first time) | System Settings › Privacy & Security › Automation |
 | {func}`macos.apps.login_items`, {func}`~macos.apps.add_login_item`, {func}`~macos.apps.remove_login_item` | Automation of *System Events* (asked the first time) | System Settings › Privacy & Security › Automation |
 | {func}`macos.time_machine.last_backup` | may need Full Disk Access | System Settings › Privacy & Security › Full Disk Access |
+| {func}`macos.apps.uninstall` | Full Disk Access, to look in the Library folders macOS protects (Cookies, HTTPStorages); without it, a `RuntimeWarning` names them | System Settings › Privacy & Security › Full Disk Access |
 | {mod}`macos.music` | Automation of Music or Spotify (asked the first time) | System Settings › Privacy & Security › Automation |
 | {mod}`macos.browser` | Automation of the browser (asked the first time); {func}`~macos.browser.run_js` also needs the browser's *Allow JavaScript from Apple Events* | System Settings › Privacy & Security › Automation |
 | {func}`macos.screen.set_night_shift_schedule` with `"sunset"` | Location Services | System Settings › Privacy & Security › Location Services |
@@ -89,6 +90,11 @@ As with Screen Recording, **restart the app running Python** after allowing it.
 treats as Input Monitoring; keeping a shortcut from the app in front also
 needs Accessibility. Without them, {func}`~macos.hotkeys.run` and
 {func}`~macos.hotkeys.wait` raise {class}`~macos.PermissionDeniedError`.
+{func}`macos.keyboard.watch` and {func}`macos.mouse.watch` need Input
+Monitoring alone: {func}`macos.keyboard.has_listen_permission` and
+{func}`~macos.keyboard.request_listen_permission` (the same in
+{mod}`macos.mouse`) check and ask for it, as `has_permission` and
+`request_permission` do for Accessibility.
 
 ```python
 macos.hotkeys.has_permission()       # both granted? (checks without prompting)

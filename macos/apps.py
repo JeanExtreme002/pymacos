@@ -808,6 +808,9 @@ def unquarantine(path: Union[str, "os.PathLike[str]"]) -> int:
 # --- Installed apps -------------------------------------------------------------
 
 _APP_FOLDERS = ("/Applications", "/System/Applications", "~/Applications")
+# Seconds for the Spotlight query of installed(): it answers from the index in a moment, unless
+# Spotlight is wedged or reindexing a slow volume. Then the Applications folders alone are listed.
+_SPOTLIGHT_TIMEOUT = 60.0
 
 
 @dataclass(frozen=True)
@@ -849,7 +852,9 @@ def installed() -> List[InstalledApp]:
         {app.name: app.version for app in macos.apps.installed()}   # {'Safari': '18.3', 'Xcode': '16.2', ...}
 
     It lists the Applications folders (yours, the Mac's and the system's),
-    their subfolders included, and the apps Spotlight knows elsewhere.
+    their subfolders included, and the apps Spotlight knows elsewhere. When
+    Spotlight is off, or doesn't answer within a minute, only the folders
+    are listed.
     """
     require_macos()
     paths = set()
@@ -861,8 +866,8 @@ def installed() -> List[InstalledApp]:
                     paths.add(os.path.realpath(os.path.join(current, name)))
                     folders.remove(name)  # an app's insides aren't other apps: only other folders are walked
     try:
-        # Apps installed elsewhere, as Spotlight knows them; nothing is lost if it's off.
-        found = spotlight.search('kMDItemContentType == "com.apple.application-bundle"')
+        # Apps installed elsewhere, as Spotlight knows them; nothing is lost if it's off or stuck.
+        found = spotlight.search('kMDItemContentType == "com.apple.application-bundle"', timeout=_SPOTLIGHT_TIMEOUT)
         paths.update(os.path.realpath(str(path)) for path in found if "/Contents/" not in str(path))
     except MacOSError:
         pass
@@ -904,20 +909,32 @@ def _owned_by(entry: str, bundle_id: str) -> bool:
     return entry == bundle_id or (bundle_id.count(".") >= 2 and entry.startswith(bundle_id + "."))
 
 
-def _leftovers(library: Path, bundle_id: Optional[str], names: Sequence[str], others: Sequence[str] = ()) -> List[Path]:
+def _leftovers(
+    library: Path,
+    bundle_id: Optional[str],
+    names: Sequence[str],
+    others: Sequence[str] = (),
+    unreadable: Optional[List[Tuple[Path, int]]] = None,
+) -> List[Path]:
     """
     The files the app left in ``library`` (a ``~/Library``), by its bundle ID and its names.
 
     ``others`` are the bundle IDs of the other apps installed: ``com.google.Chrome.canary``'s
-    files aren't Chrome's, although they start with its ID.
+    files aren't Chrome's, although they start with its ID. A folder that can't be looked in is
+    added to ``unreadable`` with its errno: macOS protects Cookies and HTTPStorages (Full Disk
+    Access), so the app's files there, if any, can't be found.
     """
     found = []
 
     def entries(folder: str) -> List[str]:
         try:
             return sorted(os.listdir(library / folder))
-        except OSError:
+        except PermissionError as error:
+            if unreadable is not None:
+                unreadable.append((library / folder, error.errno or 0))
             return []
+        except OSError:
+            return []  # no such folder, or not a folder
 
     if bundle_id:
         for folder in _BY_BUNDLE_ID:
@@ -996,6 +1013,9 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     first; ``dry_run`` works all the same) or that comes with macOS, and :class:`~macos.AppNotFoundError` for
     one that isn't found. An app installed for every user may need an
     administrator to be moved: then nothing is moved, and the error says so.
+    Some Library folders (Cookies, HTTPStorages) can only be looked in with
+    Full Disk Access: without it, a :class:`RuntimeWarning` names them, as
+    the app's files there, if any, stay.
     """
     require_macos()
     path = _locate(name)
@@ -1007,7 +1027,22 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     names, others = _claims(app, installed())
     if not include_name_matches:
         names = []  # by bundle ID only: a folder named after the app may be another's too
-    found = [Path(path), *_leftovers(Path.home() / "Library", app.bundle_id, names, others)]
+    unreadable: List[Tuple[Path, int]] = []
+    found = [Path(path), *_leftovers(Path.home() / "Library", app.bundle_id, names, others, unreadable)]
+    if unreadable:
+        where = ", ".join(str(folder) for folder, _ in unreadable)
+        if any(code == errno.EPERM for _, code in unreadable):  # how macOS refuses a protected folder
+            why = (
+                "Full Disk Access is missing: allow the app running Python (your terminal or IDE) in "
+                "System Settings › Privacy & Security › Full Disk Access, then restart it"
+            )
+        else:
+            why = "they can't be read"
+        warnings.warn(
+            "{} couldn't be looked in, so files of {} there, if any, stay: {}".format(where, app.name, why),
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if dry_run:
         return found
     if get(path) is not None:

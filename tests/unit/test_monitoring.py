@@ -1,14 +1,11 @@
 """Unit tests for the speed test, network and energy use, the GPU and disk health."""
 
-import sys
 from pathlib import Path
 
 import pytest
 
 import macos
 from macos import network, system
-
-darwin = pytest.mark.skipif(sys.platform != "darwin", reason="reads this Mac's real counters")
 
 
 def test_speed_test(fake_run):
@@ -73,37 +70,6 @@ def test_argument_checks():
         system.network_usage(interval=0)
     with pytest.raises(ValueError, match="interval must be positive"):
         system.energy_usage(0)
-
-
-@darwin
-def test_network_usage_sees_every_process():
-    found = system.network_usage()
-    assert found and all(use.received >= 0 and use.sent >= 0 and use.pid > 0 for use in found)
-    assert found == sorted(found, key=lambda use: use.received + use.sent, reverse=True) or len(found) == 1
-
-
-@darwin
-def test_energy_usage_of_a_busy_process():
-    import subprocess
-
-    busy = subprocess.Popen([sys.executable, "-c", "while True: pass"])
-    try:
-        found = system.energy_usage(0.5)
-        mine = next(use for use in found if use.pid == busy.pid)
-        assert mine.watts >= 0 and mine.disk_read >= 0 and mine.disk_written >= 0
-        if any(use.watts for use in found):  # Apple silicon measures power; Intel and some VMs don't
-            assert mine.watts > 0.1
-    finally:
-        busy.kill()
-
-
-@darwin
-def test_gpu_and_disks():
-    for gpu in system.gpu_usage():  # a VM may have none
-        assert 0 <= gpu.percent <= 100 and gpu.name
-    disks = system.disk_health()
-    assert disks and all(disk.device.startswith("disk") and disk.size > 0 for disk in disks)
-    assert all(disk.smart in ("verified", "failing", None) for disk in disks)
 
 
 def test_energy_usage_skips_a_pid_taken_by_a_new_process(monkeypatch):

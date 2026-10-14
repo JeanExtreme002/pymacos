@@ -935,3 +935,21 @@ def test_input_settings_tool_is_given_a_timeout(monkeypatch):
     monkeypatch.setattr(_system, "run", hangs)
     _system.apply_input_settings()  # saved anyway: they apply at the next login
     assert calls and calls[0]["timeout"]
+
+
+def test_batch_holds_every_restart_until_the_block_ends(monkeypatch):
+    killed = []
+    monkeypatch.setattr(_system, "killall", lambda name, **options: killed.append(name))
+    monkeypatch.setattr(dock, "killall", lambda name, **options: killed.append(name))  # the Dock's own reference
+    monkeypatch.setattr(dock, "require_macos", lambda: None)
+    monkeypatch.setattr(dock.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(dock, "_pid", iter([1, 2]).__next__)  # the Dock: its pid before, then the new one's
+
+    with macos.settings.batch():
+        system._restart_control_center()
+        system._restart_control_center()
+        dock.restart()  # its own restart, which waits for the new Dock: held like the others
+        with macos.settings.batch():  # nested: still one batch
+            finder.restart()
+        assert killed == []  # nothing yet
+    assert sorted(killed) == ["ControlCenter", "Dock", "Finder"]  # each once
