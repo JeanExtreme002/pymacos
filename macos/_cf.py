@@ -355,19 +355,21 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
     Wrap ``function`` for C to call back, so a Ctrl-C inside it isn't lost.
 
     Its own exceptions go on as before. A ``KeyboardInterrupt`` or
-    ``SystemExit`` is kept instead, the run loop is stopped, and
-    :func:`raise_interrupt` raises it once the run loop hands back: in
-    :func:`run_loop`, or where a caller turns the run loop some other way.
-    The callback returns ``fallback(*arguments)`` meanwhile (``None`` without
-    one): an event tap must hand its event back.
+    ``SystemExit`` on the main thread is kept instead, the run loop is
+    stopped, and :func:`raise_interrupt` raises it once the run loop hands
+    back: in :func:`run_loop`, or where a caller turns the run loop some other
+    way. The callback returns ``fallback(*arguments)`` meanwhile (``None``
+    without one): an event tap must hand its event back. On another thread,
+    where Python never delivers a Ctrl-C and nothing would raise it, it goes on
+    as before too.
     """
     @wraps(function)
     def guarded(*arguments: Any) -> Any:
         try:
             return function(*arguments)
-        except Exception:
-            raise
-        except BaseException as error:
+        except (KeyboardInterrupt, SystemExit) as error:
+            if threading.current_thread() is not threading.main_thread():
+                raise
             if getattr(_interrupt, "error", None) is None:  # the first one: a second Ctrl-C says nothing new
                 _interrupt.error = error
             cf = lib()
@@ -375,6 +377,11 @@ def callback(function: Callable[..., Any], fallback: Optional[Callable[..., Any]
             return fallback(*arguments) if fallback is not None else None
 
     return guarded
+
+
+def interrupted() -> bool:
+    """Whether a :func:`callback` kept a Ctrl-C on this thread, not raised yet: work it can stop should stop."""
+    return getattr(_interrupt, "error", None) is not None
 
 
 def raise_interrupt() -> None:

@@ -1046,11 +1046,18 @@ def _read_samples(
 _Produced = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _Failed = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _Completed = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-_heard: dict = {}  # observer -> {"labels": {label: [confidence...]}, "error": ...}
+_heard: dict = {}  # observer -> {"labels": {label: [confidence...]}, "error": ..., "analyzer": ...}
 
 
 def _on_result(observer: int, _cmd: int, request: int, result: int) -> None:
-    labels = _heard.setdefault(observer, {"labels": {}})["labels"]
+    heard = _heard.setdefault(observer, {"labels": {}})
+    if _cf.interrupted():
+        # A Ctrl-C came while the analysis ran: stop it, rather than read the rest of the file first.
+        analyzer = heard.get("analyzer")
+        if analyzer:
+            _objc.send(analyzer, "cancelAnalysis", restype=None)
+        return
+    labels = heard["labels"]
     for item in _objc.nsarray(_objc.send(result, "classifications")):
         label = _objc.pystring(_objc.send(item, "identifier")) or ""
         confidence = float(_objc.send(item, "confidence", restype=ctypes.c_double))
@@ -1131,9 +1138,10 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             restype=_objc.BOOL,
         ):
             raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error)))
+        _heard.setdefault(observer, {"labels": {}})["analyzer"] = analyzer  # for a Ctrl-C to cancel it
         try:
             _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
-            _cf.raise_interrupt()  # a Ctrl-C while the observer ran, kept until the analysis ended
+            _cf.raise_interrupt()  # a Ctrl-C while the observer ran: it cancelled the analysis
             heard = _heard.get(observer, {"labels": {}})
         finally:
             _heard.pop(observer, None)

@@ -154,7 +154,12 @@ def test_each_core_graphics_function_is_declared_in_one_module():
     declared = collections.defaultdict(set)
     for path in pathlib.Path(macos.__file__).parent.glob("*.py"):
         source = path.read_text(encoding="utf-8")
-        for name in re.findall(r'"(CG\w+)":\s*\(', source) + re.findall(r"\.(CG\w+)\.(?:argtypes|restype)\s*=", source):
+        found = (
+            re.findall(r'"(CG\w+)":\s*\(', source)  # {"CGName": (argtypes, restype)}
+            + re.findall(r"\.(CG\w+)\.(?:argtypes|restype)\s*=", source)  # cg.CGName.argtypes = ...
+            + re.findall(r'framework\("CoreGraphics"\)\.(CG\w+)', source)  # function = framework(...).CGName
+        )
+        for name in found:
             declared[name].add(path.name)
     assert {name: sorted(modules) for name, modules in declared.items() if len(modules) > 1} == {}
 

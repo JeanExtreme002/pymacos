@@ -646,8 +646,7 @@ def watch(
             remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
             if remaining <= 0:
                 return
-            run_loop.CFRunLoopRunInMode(mode, remaining, True)
-            _cf.raise_interrupt()  # a Ctrl-C during the callback
+            _cf.run_loop(remaining)  # and raises a Ctrl-C the callback kept
     finally:
         services.FSEventStreamStop(stream)
         services.FSEventStreamInvalidate(stream)

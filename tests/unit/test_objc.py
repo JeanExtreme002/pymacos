@@ -143,6 +143,32 @@ def test_a_callback_interrupted_hands_back_its_fallback():
         _cf.callback(broken)(1)  # other exceptions go on as before
     _cf.raise_interrupt()  # and aren't kept
 
+    class Cancelled(BaseException):
+        pass
+
+    def cancelled(event):
+        raise Cancelled
+
+    with pytest.raises(Cancelled):
+        _cf.callback(cancelled)(1)  # nor are other BaseExceptions: only a Ctrl-C or an exit
+    assert not _cf.interrupted()
+
+    import threading
+
+    elsewhere = []
+
+    def worker():
+        try:
+            _cf.callback(tap)(1)
+        except KeyboardInterrupt:
+            elsewhere.append("raised")
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert elsewhere == ["raised"]  # off the main thread nothing would raise it later: it goes on as before
+    assert not _cf.interrupted()
+
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
 def test_classes_made_before_a_reload_keep_working():

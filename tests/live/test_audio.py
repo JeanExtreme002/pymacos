@@ -106,3 +106,44 @@ def test_record_until_silence(tmp_path):
         assert macos.audio.info(target).duration <= 2.5
     finally:
         target.unlink()
+
+
+def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
+    import subprocess
+    import sys
+    import textwrap
+    import wave
+
+    # Three minutes of noise: sixty of the classifier's three-second windows.
+    source = tmp_path / "long.wav"
+    with wave.open(str(source), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        second = bytes(range(256)) * 125  # 16000 samples of 2 bytes
+        out.writeframes(second * 180)
+    # In a process of its own: the observer's class is made once, with the callback first given.
+    code = textwrap.dedent(
+        """
+        import sys
+        import macos.audio as audio
+
+        original, calls = audio._on_result, []
+
+        def on_result(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt  # Ctrl-C, landing while the observer reads the first result
+            return original(*args)
+
+        audio._on_result = on_result
+        try:
+            audio.classify(sys.argv[1])
+        except KeyboardInterrupt:
+            print(len(calls))
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", code, str(source)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    # Raised, and the analysis cancelled at the next result, not after all sixty windows.
+    assert result.stdout.strip() and int(result.stdout) < 10
