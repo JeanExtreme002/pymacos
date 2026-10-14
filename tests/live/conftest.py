@@ -40,9 +40,11 @@ def speech(tmp_path):
     A few seconds of speech, made by ``say``, or of a warbling tone when ``say`` fails.
 
     On CI runners, say now and then writes files of a few milliseconds, even
-    several times in a row (afinfo, independent of pymacos, agrees). The tone
-    keeps the editing tests running; only the speech classifier needs real
-    speech, and checks the file's name.
+    several times in a row (afinfo, independent of pymacos, agrees), and once
+    wrote one of the right length in which the sound classifier heard nothing:
+    a file is kept only when it's long enough and mostly sound, not silence.
+    The tone keeps the editing tests running; only the speech classifier needs
+    real speech, and checks the file's name.
     """
     import math
     import re
@@ -55,7 +57,7 @@ def speech(tmp_path):
         subprocess.run(["say", "-o", str(path), "Good morning everyone, today we talk about the ocean."], check=True)
         details = subprocess.run(["afinfo", str(path)], capture_output=True, text=True, check=True).stdout
         found = re.search(r"estimated duration: ([0-9.]+)", details)
-        if found and float(found.group(1)) > 2:
+        if found and float(found.group(1)) > 2 and _mostly_sound(path):
             return path
     rate, seconds = 22050, 2.6
     samples = bytearray()
@@ -73,6 +75,32 @@ def speech(tmp_path):
     tone = tmp_path / "tone.aiff"
     subprocess.run(["afconvert", "-f", "AIFF", "-d", "BEI16", str(raw), str(tone)], check=True)
     return tone
+
+
+def _mostly_sound(path):
+    """
+    Whether most of ``path`` is sound: over half its 50 ms windows louder than -36 dBFS.
+
+    Read by afconvert and the wave module, independent of pymacos. Speech from say
+    is about 95% sound (the gaps between words are the rest); a silent file is 0%.
+    """
+    import array
+    import math
+    import subprocess
+    import sys
+    import wave
+
+    pcm = path.with_name(path.stem + "-check.wav")
+    subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16", str(path), str(pcm)], check=True)
+    with wave.open(str(pcm)) as audio:
+        step = int(audio.getframerate() * 0.05) * audio.getnchannels()
+        samples = array.array("h", audio.readframes(audio.getnframes()))
+    pcm.unlink()
+    if sys.byteorder == "big":
+        samples.byteswap()  # the WAV holds little-endian samples
+    windows = [samples[start:start + step] for start in range(0, len(samples) - step + 1, step)] if step else []
+    loud = sum(1 for window in windows if math.sqrt(sum(value * value for value in window) / len(window)) > 500)
+    return bool(windows) and loud > len(windows) / 2
 
 
 @pytest.fixture
