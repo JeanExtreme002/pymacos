@@ -2220,7 +2220,7 @@ def logs(
         conditions.append("messageType >= error")  # errors and faults: a keyword, not a string
     elif level == "fault":
         conditions.append("messageType == fault")
-    args = ["/usr/bin/log", "show", "--style", "ndjson", "--last", last]
+    args = ["log", "show", "--style", "ndjson", "--last", last]
     if level in ("info", "debug"):
         args.append("--info")  # log show leaves info and debug messages out unless asked
     if level == "debug":

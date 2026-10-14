@@ -186,7 +186,7 @@ def is_type(ref: Optional[int], type_id: int) -> bool:
 
 
 def to_str(ref: Optional[int]) -> Optional[str]:
-    """Copy a ``CFString`` into a Python string (``None`` for anything else), NUL characters included."""
+    """Copy a ``CFString`` into a Python string (``None`` for anything else), the NUL characters inside it included."""
     if not is_type(ref, lib().CFStringGetTypeID()):
         return None
     cf = lib()
@@ -197,7 +197,8 @@ def to_str(ref: Optional[int]) -> Optional[str]:
     # The bytes and their count, not a C string: one read up to the first NUL would cut the text there.
     if cf.CFStringGetBytes(ref, CFRange(0, length), kCFStringEncodingUTF8, 0, False, buffer, size, ctypes.byref(used)) != length:
         return None  # a character UTF-8 can't hold (a lone surrogate)
-    return buffer.raw[: used.value].decode("utf-8")
+    # NULs at the end are padding, as a device name read from a driver may carry: what a C string dropped.
+    return buffer.raw[: used.value].decode("utf-8").rstrip("\0")
 
 
 def data(payload: bytes) -> int:

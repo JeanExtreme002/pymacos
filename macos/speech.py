@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
-from ._system import popen, require_macos, run as _run
+from ._system import popen, run as _run
 
 __all__ = ["say", "voices", "Voice"]
+
+_VOICES_TIMEOUT = 30.0  # seconds for ``say -v ?``: it lists the voices at once, unless speech is wedged
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,6 @@ def say(
         _run(args, input=text)
         return target
 
-    require_macos()
     process = popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Write the text before returning, not from a background thread: if the
@@ -99,7 +100,7 @@ def say(
 def voices() -> List[Voice]:
     """Return the voices installed on this Mac."""
     found = []
-    for line in _run(["say", "-v", "?"], timeout=30).splitlines():  # it lists them at once, unless speech is wedged
+    for line in _run(["say", "-v", "?"], timeout=_VOICES_TIMEOUT).splitlines():
         # Format: "<name, may contain spaces> <locale>    # <sample sentence>"
         head, _, sample = line.partition("#")
         parts = head.split()

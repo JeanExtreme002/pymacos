@@ -22,7 +22,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from ._system import popen, require_macos, run_bytes
+from ._system import popen, run_bytes
 from .errors import CommandError, CommandTimeoutError, MacOSError
 
 __all__ = ["search", "search_name", "metadata"]
@@ -59,7 +59,6 @@ def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = No
         # query parser ignores it (same results either way).
         args = [*args[:-1], " " + query]
 
-    require_macos()
     # No `-interpret`: without it, mdfind already understands Spotlight-bar
     # syntax (plain words, kind:, date:), and with it raw `kMDItem...` queries
     # are taken as text and return wrong results. `-0` ends each path with a

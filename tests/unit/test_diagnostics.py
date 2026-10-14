@@ -223,7 +223,7 @@ def test_logs_stop_a_log_show_that_takes_too_long(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", Endless)
     with pytest.raises(macos.CommandTimeoutError) as raised:
         system.logs(timeout=0.05)
-    assert isinstance(raised.value, TimeoutError) and raised.value.cmd[:2] == ["/usr/bin/log", "show"]
+    assert isinstance(raised.value, TimeoutError) and raised.value.cmd[:2] == ["log", "show"]
     with pytest.raises(ValueError, match="timeout"):
         system.logs(timeout=0)
 

@@ -73,7 +73,10 @@ def test_spin_pauses_when_the_run_loop_has_nothing_to_wait_for(fake_cf, monkeypa
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="calls CoreFoundation")
-@pytest.mark.parametrize("text", ["", "plain", "a\0b é", "😀 ends with a NUL\0"])
-def test_strings_come_back_whole_nul_characters_included(text):
+@pytest.mark.parametrize(
+    "text, expected",
+    [("", ""), ("plain", "plain"), ("a\0b é", "a\0b é"), ("😀 \0 inside", "😀 \0 inside"), ("USB Audio\0\0\0", "USB Audio")],
+)
+def test_strings_come_back_whole_nul_characters_inside_included(text, expected):
     with _cf.owned(_cf.string(text)) as ref:
-        assert _cf.to_str(ref) == text
+        assert _cf.to_str(ref) == expected  # the NULs at the end are a driver's padding

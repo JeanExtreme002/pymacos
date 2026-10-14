@@ -908,7 +908,6 @@ def quick_look(path: PathLike) -> None:
     The preview stays until the user closes it.
     """
     source = _existing(path)
-    require_macos()
     # The processes already over are reaped here, instead of lingering as zombies until the script
     # ends; the ones still open are kept, so Python doesn't warn about a process dropped running.
     _previews[:] = [preview for preview in _previews if preview.poll() is None]
