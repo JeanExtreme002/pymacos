@@ -84,7 +84,7 @@ def cls(name: str) -> int:
     """Look up an Objective-C class by name."""
     pointer = _libobjc().objc_getClass(name.encode())
     if not pointer:
-        raise LookupError("Objective-C class {!r} is not loaded".format(name))
+        raise _cf.Unavailable("Objective-C class {!r} is not loaded: this version of macOS may not have it".format(name))
     return pointer
 
 

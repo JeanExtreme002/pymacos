@@ -98,3 +98,15 @@ def test_pdfs_are_refused_before_vision_sees_a_blank_image(tmp_path):
     _refuse_pdf(b"\x89PNG\r\n\x1a\n...tEXtComment\x00%PDF-1.4 exported")
     _refuse_pdf(b"%PDF-but no version")
     _refuse_pdf(tmp_path / "missing.png")  # left to the usual FileNotFoundError
+
+
+def test_scan_document_says_it_needs_macos_12_where_vision_cant(monkeypatch):
+    from macos import _cf, _objc, vision
+
+    def cls(name):
+        raise _cf.Unavailable("Objective-C class {!r} is not loaded".format(name))
+
+    monkeypatch.setattr(vision, "_load", lambda: None)
+    monkeypatch.setattr(_objc, "cls", cls)
+    with pytest.raises(macos.NotSupportedError, match=r"scan_document\(\) needs macOS 12 or later"):
+        macos.vision.scan_document(b"\x89PNG\r\n\x1a\n")

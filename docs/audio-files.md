@@ -61,7 +61,7 @@ macos.audio.classify("clip.m4a")
 
 It listens to the whole file, a few seconds at a time, and averages what it
 hears, most likely first. Sounds shorter than half a second are too short to
-tell. It runs offline and needs no permission. `limit`
+tell. It runs offline, needs no permission, and needs macOS 12 or later. `limit`
 and `min_confidence` work as for {func}`macos.vision.classify`.
 
 ## Reference
