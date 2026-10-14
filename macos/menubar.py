@@ -27,7 +27,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Callable, Deque, Dict, List, Optional, Union, cast
 
-from . import _objc
+from . import _cf, _objc
 from ._objc import BOOL, NSInteger
 from ._system import framework, require_macos
 
@@ -500,7 +500,8 @@ def _due_timers(now: float) -> List[Timer]:
 
 def _pump(app: int, wait: float) -> None:
     """Deliver the events of the next ``wait`` seconds (clicks on the icons), then run what they queued."""
-    with _objc.autorelease_pool():
+    # A Ctrl-C while AppKit waits, or during a click's callback, is raised once the block ends.
+    with _cf.deferred_interrupt(), _objc.autorelease_pool():
         until = _objc.send(_objc.cls("NSDate"), "dateWithTimeIntervalSinceNow:", wait, argtypes=(ctypes.c_double,))
         event = _objc.send(
             app,

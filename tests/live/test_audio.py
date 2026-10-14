@@ -106,3 +106,52 @@ def test_record_until_silence(tmp_path):
         assert macos.audio.info(target).duration <= 2.5
     finally:
         target.unlink()
+
+
+def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
+    import subprocess
+    import sys
+    import textwrap
+    import wave
+
+    # Five minutes of sound: some hundred of the classifier's overlapping windows.
+    source = tmp_path / "long.wav"
+    with wave.open(str(source), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        second = bytes(range(256)) * 125  # 16000 samples of 2 bytes
+        out.writeframes(second * 300)
+    # In a process of its own: a real SIGINT, as Ctrl-C sends, a quarter of the way into the analysis
+    # (timed by a full one first). It comes while the analysis runs natively, the hard case.
+    code = textwrap.dedent(
+        """
+        import os, signal, sys, threading, time
+        import macos.audio as audio
+
+        original, calls = audio._on_result, []
+
+        def on_result(*args):
+            calls.append(1)
+            return original(*args)
+
+        audio._on_result = on_result
+        audio.classify(sys.argv[1])  # the first run loads the model: timed on the second
+        del calls[:]
+        started = time.monotonic()
+        audio.classify(sys.argv[1])
+        full, took = len(calls), time.monotonic() - started
+        del calls[:]
+        threading.Timer(took / 4, os.kill, (os.getpid(), signal.SIGINT)).start()
+        try:
+            audio.classify(sys.argv[1])
+            print("finished", len(calls), full)
+        except KeyboardInterrupt:
+            print("interrupted", len(calls), full)
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", code, str(source)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    outcome, read, full = result.stdout.strip().splitlines()[-1].split()
+    # Raised while the analysis ran (some results read), and the analysis cancelled there, not run to its end.
+    assert outcome == "interrupted" and 0 < int(read) < int(full) * 3 // 4, result.stdout

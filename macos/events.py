@@ -265,7 +265,7 @@ class _PowerWatch(_Watch):
 
     def start(self) -> None:
         self.plugged = _on_charger()
-        self.callback = _iokit.POWER_CALLBACK(self.changed)  # kept alive while the source is scheduled
+        self.callback = _iokit.POWER_CALLBACK(_cf.callback(self.changed))  # kept alive while the source is scheduled
         self.source = _cf.RunLoopSource(
             _iokit.lib().IOPSNotificationCreateRunLoopSource(self.callback, None), owned=True, what="watch the power source"
         )
@@ -295,7 +295,7 @@ class _NetworkWatch(_Watch):
 
     def start(self) -> None:
         sc = _sc.lib()
-        self.callback = _sc.STORE_CALLBACK(self.changed)
+        self.callback = _sc.STORE_CALLBACK(_cf.callback(self.changed))
         with _cf.owned(_cf.string("pymacos.events")) as name:
             self.store = sc.SCDynamicStoreCreate(None, name, self.callback, None)
         if not self.store:
@@ -357,7 +357,7 @@ class _USBWatch(_Watch):
         if not self.port:
             raise MacOSError("could not watch the USB devices: IOKit gave no notification port")
         for kind, name in ((b"IOServiceFirstMatch", "usb_connected"), (b"IOServiceTerminate", "usb_disconnected")):
-            callback = _iokit.MATCHED_CALLBACK(lambda refcon, iterator, name=name: self.matched(iterator, name))
+            callback = _iokit.MATCHED_CALLBACK(_cf.callback(lambda refcon, iterator, name=name: self.matched(iterator, name)))
             self.callbacks.append(callback)
             iterator = ctypes.c_uint32()
             # The matching dictionary is consumed by the call.
@@ -408,7 +408,7 @@ class _DisplayWatch(_Watch):
     callback = None
 
     def start(self) -> None:
-        callback = _events.DisplayCallback(self.changed)
+        callback = _events.DisplayCallback(_cf.callback(self.changed))
         status = _events.graphics().CGDisplayRegisterReconfigurationCallback(callback, None)
         if status != 0:
             raise MacOSError("could not watch the displays (CGError {})".format(status))

@@ -31,7 +31,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Tuple, Union
 
-from . import _cf, _libc, _objc, defaults, spotlight
+from . import _cf, _cg, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
 from ._system import applescript, framework, popen, require_macos, restart_process, run as _run
 from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
@@ -212,33 +212,9 @@ _MAX_THUMBNAIL = 4096
 
 @lru_cache(maxsize=None)
 def _graphics() -> ctypes.CDLL:
-    cg = framework("CoreGraphics")
-    cg.CGImageGetWidth.argtypes = (ctypes.c_void_p,)
-    cg.CGImageGetWidth.restype = ctypes.c_size_t
-    cg.CGImageGetHeight.argtypes = (ctypes.c_void_p,)
-    cg.CGImageGetHeight.restype = ctypes.c_size_t
-    cg.CGColorSpaceCreateDeviceRGB.argtypes = ()
-    cg.CGColorSpaceCreateDeviceRGB.restype = ctypes.c_void_p
-    cg.CGColorSpaceRelease.argtypes = (ctypes.c_void_p,)
-    cg.CGColorSpaceRelease.restype = None
-    cg.CGBitmapContextCreate.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    )
-    cg.CGBitmapContextCreate.restype = ctypes.c_void_p
+    cg = _cg.lib()  # the functions other modules call too; this one's own below
     cg.CGContextSetInterpolationQuality.argtypes = (ctypes.c_void_p, ctypes.c_int32)
     cg.CGContextSetInterpolationQuality.restype = None
-    cg.CGContextDrawImage.argtypes = (ctypes.c_void_p, _objc.CGRect, ctypes.c_void_p)
-    cg.CGContextDrawImage.restype = None
-    cg.CGBitmapContextCreateImage.argtypes = (ctypes.c_void_p,)
-    cg.CGBitmapContextCreateImage.restype = ctypes.c_void_p
-    cg.CGContextRelease.argtypes = (ctypes.c_void_p,)
-    cg.CGContextRelease.restype = None
     return cg
 
 
@@ -617,7 +593,7 @@ def watch(
     folder = _as_on_disk(path)
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
-    services, run_loop = _core_services(), _cf.lib()  # the run loop's functions are declared there
+    services = _core_services()
     if pattern is not None and not isinstance(pattern, str):
         # Kept as a tuple: checking a generator would use it up before the first event.
         try:
@@ -651,13 +627,13 @@ def watch(
         except Exception as error:  # an exception must not cross back into C: the loop below raises it
             errors.append(error)
 
-    callback = _Callback(changed)  # kept alive for as long as the stream runs
+    callback = _Callback(_cf.callback(changed))  # kept alive for as long as the stream runs
     with _cf.owned(_cf.from_python([str(folder)])) as paths:
         stream = services.FSEventStreamCreate(None, callback, None, paths, _SINCE_NOW, _LATENCY, _FILE_EVENTS | _NO_DEFER)
     if not stream:
         raise MacOSError("could not watch {}".format(folder))
     mode = _cf.default_mode()
-    services.FSEventStreamScheduleWithRunLoop(stream, run_loop.CFRunLoopGetCurrent(), mode)
+    services.FSEventStreamScheduleWithRunLoop(stream, _cf.lib().CFRunLoopGetCurrent(), mode)
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
         if not services.FSEventStreamStart(stream):
@@ -670,7 +646,7 @@ def watch(
             remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
             if remaining <= 0:
                 return
-            run_loop.CFRunLoopRunInMode(mode, remaining, True)
+            _cf.run_loop(remaining)  # and raises a Ctrl-C that came meanwhile
     finally:
         services.FSEventStreamStop(stream)
         services.FSEventStreamInvalidate(stream)

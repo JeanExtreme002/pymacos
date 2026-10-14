@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import Any, Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from . import _cf
 from ._system import framework, require_macos
@@ -185,6 +185,22 @@ def nsarray_of(objects: Sequence[int]) -> int:
     """Create an autoreleased ``NSArray`` holding ``objects``."""
     items = (ctypes.c_void_p * len(objects))(*objects)
     return send(cls("NSArray"), "arrayWithObjects:count:", items, len(objects), argtypes=(ctypes.c_void_p, NSUInteger))
+
+
+def nsnumber(value: float) -> int:
+    """Create an autoreleased ``NSNumber`` holding ``value``, as a double: what every numeric setting takes."""
+    return send(cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,))
+
+
+def nsdictionary_of(items: Dict[str, int]) -> int:
+    """Create an autoreleased ``NSDictionary`` of ``items``: string keys, Objective-C objects as values."""
+    return send(
+        cls("NSDictionary"),
+        "dictionaryWithObjects:forKeys:",
+        nsarray_of(list(items.values())),
+        nsarray_of([nsstring(key) for key in items]),
+        argtypes=(id, id),
+    )
 
 
 def file_url(path: "os.PathLike[str] | str") -> int:
@@ -354,7 +370,9 @@ _BLOCK_HAS_SIGNATURE = 1 << 30
 
 # The Python objects behind each block, kept alive as long as the process
 # runs: an API may call a block (or keep it) after the call that took it returns.
-_KEEP_ALIVE: list = []
+# Kept across importlib.reload too, which runs this file again in the same namespace:
+# a fresh list would free the callbacks of the blocks handed out before.
+_KEEP_ALIVE: list = globals().get("_KEEP_ALIVE", [])
 
 
 def block(function: Any, signature: bytes, *argtypes: Any) -> int:
@@ -365,7 +383,7 @@ def block(function: Any, signature: bytes, *argtypes: Any) -> int:
     ``void (^)(BOOL)``; ``argtypes`` are the ctypes of its arguments. The
     block lives for the rest of the process, so make few of them.
     """
-    invoke = ctypes.CFUNCTYPE(None, ctypes.c_void_p, *argtypes)(lambda _block, *arguments: function(*arguments))
+    invoke = ctypes.CFUNCTYPE(None, ctypes.c_void_p, *argtypes)(_cf.callback(lambda _block, *arguments: function(*arguments)))
     descriptor = _BlockDescriptor(0, ctypes.sizeof(_BlockLiteral), signature)
     global_block = ctypes.c_void_p.in_dll(ctypes.CDLL("/usr/lib/libSystem.B.dylib"), "_NSConcreteGlobalBlock")
     literal = _BlockLiteral(
@@ -379,7 +397,10 @@ def block(function: Any, signature: bytes, *argtypes: Any) -> int:
     return ctypes.addressof(literal)
 
 
-_CLASSES: dict = {}
+# The classes made, with the callbacks their methods call. Kept across importlib.reload, as
+# _KEEP_ALIVE is: the runtime keeps a class for good, so a reloaded module gets the same one
+# back, whose methods still point at these callbacks.
+_CLASSES: dict = globals().get("_CLASSES", {})
 # Two threads making the same class at once: the second would find the name taken
 # but not yet registered, and cache no class at all.
 _CLASSES_LOCK = threading.Lock()
@@ -419,7 +440,7 @@ def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
         return int(existing)
     implementations = []
     for selector, (types, function_type, function) in methods.items():
-        implementation = function_type(function)
+        implementation = function_type(_cf.callback(function))  # a Ctrl-C inside it isn't lost
         implementations.append(implementation)
         lib.class_addMethod(new_class, sel(selector), ctypes.cast(implementation, ctypes.c_void_p), types.encode())
     for protocol in protocols:

@@ -390,16 +390,7 @@ def _recorder(target: Path, channels: int, metering: bool = False) -> int:
     """An autoreleased, prepared ``AVAudioRecorder`` writing to ``target``. Call inside an autorelease pool."""
     framework("AVFoundation")
     settings = dict(_RECORD_FORMATS[target.suffix.lower()], AVSampleRateKey=44100, AVNumberOfChannelsKey=channels)
-    number = lambda value: _objc.send(  # noqa: E731
-        _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
-    )
-    dictionary = _objc.send(
-        _objc.cls("NSDictionary"),
-        "dictionaryWithObjects:forKeys:",
-        _objc.nsarray_of([number(value) for value in settings.values()]),
-        _objc.nsarray_of([_objc.nsstring(key) for key in settings]),
-        argtypes=(_objc.id, _objc.id),
-    )
+    dictionary = _objc.nsdictionary_of({key: _objc.nsnumber(value) for key, value in settings.items()})
     error = ctypes.c_void_p()
     recorder = _objc.send(
         _objc.send(_objc.cls("AVAudioRecorder"), "alloc"),
@@ -1008,16 +999,7 @@ def _read_samples(
         "AVLinearPCMIsNonInterleaved": 0,
         "AVLinearPCMIsBigEndianKey": 1 if sys.byteorder == "big" else 0,  # this Mac's own order, as write() takes
     }
-    number = lambda value: _objc.send(  # noqa: E731
-        _objc.cls("NSNumber"), "numberWithDouble:", float(value), argtypes=(ctypes.c_double,)
-    )
-    dictionary = _objc.send(
-        _objc.cls("NSDictionary"),
-        "dictionaryWithObjects:forKeys:",
-        _objc.nsarray_of([number(value) for value in settings.values()]),
-        _objc.nsarray_of([_objc.nsstring(key) for key in settings]),
-        argtypes=(_objc.id, _objc.id),
-    )
+    dictionary = _objc.nsdictionary_of({key: _objc.nsnumber(value) for key, value in settings.items()})
     output = _objc.send(
         _objc.cls("AVAssetReaderAudioMixOutput"),
         "assetReaderAudioMixOutputWithAudioTracks:audioSettings:",
@@ -1064,11 +1046,18 @@ def _read_samples(
 _Produced = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _Failed = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
 _Completed = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-_heard: dict = {}  # observer -> {"labels": {label: [confidence...]}, "error": ...}
+_heard: dict = {}  # observer -> {"labels": {label: [confidence...]}, "error": ..., "analyzer": ...}
 
 
 def _on_result(observer: int, _cmd: int, request: int, result: int) -> None:
-    labels = _heard.setdefault(observer, {"labels": {}})["labels"]
+    heard = _heard.setdefault(observer, {"labels": {}})
+    if _cf.interrupted():
+        # A Ctrl-C came while the analysis ran: stop it, rather than read the rest of the file first.
+        analyzer = heard.get("analyzer")
+        if analyzer:
+            _objc.send(analyzer, "cancelAnalysis", restype=None)
+        return
+    labels = heard["labels"]
     for item in _objc.nsarray(_objc.send(result, "classifications")):
         label = _objc.pystring(_objc.send(item, "identifier")) or ""
         confidence = float(_objc.send(item, "confidence", restype=ctypes.c_double))
@@ -1149,8 +1138,10 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             restype=_objc.BOOL,
         ):
             raise MacOSError("could not analyze {}: {}".format(source, _objc.error_message(error)))
+        _heard.setdefault(observer, {"labels": {}})["analyzer"] = analyzer  # for a Ctrl-C to cancel it
         try:
-            _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
+            with _cf.deferred_interrupt():  # a Ctrl-C meanwhile: the observer cancels the analysis, then it's raised
+                _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
             heard = _heard.get(observer, {"labels": {}})
         finally:
             _heard.pop(observer, None)
