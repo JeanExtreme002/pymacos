@@ -27,6 +27,9 @@ from .errors import MacOSError
 __all__ = ["Track", "now_playing", "play", "pause", "play_pause", "next", "previous", "volume", "set_volume", "seek"]
 
 PLAYERS = ("Music", "Spotify")
+# How a running player is recognized: its name is localized ("Musik", "Música"...), while
+# AppleScript's `tell application "Music"` finds it by the names above in every language.
+_BUNDLE_IDS = {"Music": "com.apple.Music", "Spotify": "com.spotify.client"}
 _SEPARATOR = "\x1f"  # ASCII unit separator: never in a song's title
 
 
@@ -52,8 +55,8 @@ def _osascript(app: str, script: str) -> str:
 
 
 def _running() -> List[str]:
-    names = {app.name for app in apps.running()}
-    return [player for player in PLAYERS if player in names]
+    identifiers = {app.bundle_id for app in apps.running()}
+    return [player for player in PLAYERS if _BUNDLE_IDS[player] in identifiers]
 
 
 def _state(app: str) -> str:
