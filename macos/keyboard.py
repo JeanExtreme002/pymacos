@@ -1035,11 +1035,19 @@ def _mappings() -> Dict[int, int]:
 
     output = run(["hidutil", "property", "--get", "UserKeyMapping"], timeout=HIDUTIL_TIMEOUT)
     found = {}
-    for block in re.findall(r"\{(.*?)\}", output, re.S):
+    blocks = re.findall(r"\{(.*?)\}", output, re.S)
+    read = 0
+    for block in blocks:
         source = re.search(r"HIDKeyboardModifierMappingSrc\s*=\s*(\d+)", block)
         target = re.search(r"HIDKeyboardModifierMappingDst\s*=\s*(\d+)", block)
         if source and target:
             found[int(source.group(1))] = int(target.group(1))
+            read += 1
+    # Read wrong, the remappings would look like none, and the next remap()
+    # would write its own over the ones in place: a format this doesn't know raises.
+    known_empty = not blocks and re.fullmatch(r"\(null\)|\(\s*\)|", output.strip())
+    if read != len(blocks) or not (blocks or known_empty):
+        raise MacOSError("can't read the key remappings: hidutil printed {!r}".format(output.strip()[:200]))
     return found
 
 
@@ -1053,7 +1061,12 @@ def _set_mappings(mappings: Dict[int, int]) -> None:
 
 
 def remappings() -> Dict[str, str]:
-    """The keys remapped, as ``{"caps_lock": "escape"}``; ``{}`` when none is."""
+    """
+    The keys remapped, as ``{"caps_lock": "escape"}``; ``{}`` when none is.
+
+    Raises :class:`~macos.MacOSError` when hidutil answers in a form it can't read,
+    rather than taking that for no remapping.
+    """
     return {_HID_NAMES.get(source, hex(source)): _HID_NAMES.get(target, hex(target)) for source, target in _mappings().items()}
 
 
@@ -1072,7 +1085,9 @@ def remap(key: str, to: Optional[str]) -> None:
     ``option``, ``right_option``, ``ctrl``,
     ``shift``, ``fn``...) and ``caps_lock``, ``escape``, ``enter``, ``tab``...
     Applies at once, without a permission, until the Mac restarts: to keep
-    it, run it at login with :func:`macos.schedule.add`.
+    it, run it at login with :func:`macos.schedule.add`. The other keys'
+    remappings are kept: when they can't be read, :class:`~macos.MacOSError` is
+    raised and nothing is changed.
     """
     source = _hid_code(key)
     mappings = _mappings()

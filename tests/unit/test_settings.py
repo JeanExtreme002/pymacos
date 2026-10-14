@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import macos
-from macos import _system, appearance, defaults, dock, finder, screen, system, trackpad, windows
+from macos import MacOSError, _system, appearance, defaults, dock, finder, screen, system, trackpad, windows
 
 
 @pytest.fixture
@@ -291,6 +291,40 @@ def test_remap(monkeypatch):
     assert (macos.keyboard._HID_CODES["f12"], macos.keyboard._HID_CODES["f13"]) == (0x700000045, 0x700000068)
     with pytest.raises(ValueError, match="can't remap 'hyper'"):
         macos.keyboard.remap("hyper", "escape")
+
+
+@pytest.mark.parametrize("empty", ["(null)\n", "(\n)\n", ""])
+def test_no_remapping_is_read_from_each_empty_answer(monkeypatch, empty):
+    monkeypatch.setattr(_system, "run", lambda args, timeout=None: empty)
+    assert macos.keyboard.remappings() == {}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        '[{"HIDKeyboardModifierMappingSrc": 30064771129, "HIDKeyboardModifierMappingDst": 30064771113}]\n',  # JSON, say
+        "(\n    {\n        Source = 30064771129;\n        Destination = 30064771113;\n    }\n)\n",  # keys renamed
+        "(\n    {\n        HIDKeyboardModifierMappingDst = 30064771113;\n        HIDKeyboardModifierMappingSrc = 30064771129;\n"
+        "    },\n    {\n        Other = 1;\n    }\n)\n",  # only some read
+    ],
+)
+def test_a_remapping_answer_it_cant_read_raises_rather_than_overwriting(monkeypatch, output):
+    written = []
+
+    def hidutil(args, timeout=None):
+        if args[2] == "--set":
+            written.append(args)
+            return ""
+        return output
+
+    monkeypatch.setattr(_system, "run", hidutil)
+    with pytest.raises(MacOSError, match="can't read the key remappings"):
+        macos.keyboard.remappings()
+    with pytest.raises(MacOSError, match="can't read the key remappings"):
+        macos.keyboard.remap("right_option", "ctrl")
+    assert written == []  # the remappings in place weren't written over
+    macos.keyboard.clear_remappings()  # undoing them all needs no reading
+    assert len(written) == 1
 
 
 def test_more_trackpad_and_mouse_settings(prefs):
