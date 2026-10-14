@@ -15,6 +15,7 @@ def test_notify_passes_text_as_arguments(fake_run):
     assert args[0] == "osascript"
     assert "display notification (item 1 of argv) with title (item 2 of argv) sound name (item 3 of argv)" in args
     assert args[-3:] == ['say "hi" \\ end', "T", "Glass"]
+    assert fake_run.calls[-1]["timeout"]  # an osascript that never ends doesn't hang the caller
 
 
 def test_notify_message_only(fake_run):

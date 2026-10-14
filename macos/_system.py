@@ -54,6 +54,44 @@ def deprecated(replacement: str, *, removal: str) -> Callable[[_F], _F]:
     return decorate
 
 
+# Where macOS keeps the commands this package runs, on its read-only system volume. They're looked
+# up there only, never along PATH: a directory earlier in PATH that the user can write to (Homebrew's,
+# ~/.local/bin) mustn't put another program in their place, to be handed scripts and text.
+_SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+@lru_cache(maxsize=None)  # those folders are on the read-only system volume: what's there stays
+def executable(command: str) -> str:
+    """
+    The file to run for ``command``: the system's own command of that name, or ``command`` when it's a path.
+
+    For a name the system doesn't have, a path that doesn't exist either: running it raises
+    :class:`FileNotFoundError`, as a command missing from PATH did, rather than run a namesake.
+    """
+    if os.sep in command:
+        return command
+    for directory in _SYSTEM_DIRECTORIES:
+        path = os.path.join(directory, command)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return os.path.join(_SYSTEM_DIRECTORIES[0], command)
+
+
+def popen(args: Sequence[str], **options: Any) -> "subprocess.Popen[Any]":
+    """
+    Start a system command and return its process, for the callers that read or wait on it themselves.
+
+    The command is found as :func:`run` finds it, and one the system doesn't
+    have raises :class:`NotSupportedError`, as there (and as anything does
+    outside macOS). ``options`` go to :class:`subprocess.Popen`.
+    """
+    require_macos()
+    try:
+        return subprocess.Popen(list(args), executable=executable(args[0]), **options)
+    except FileNotFoundError:
+        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+
+
 def run(
     args: Sequence[str],
     *,
@@ -65,7 +103,9 @@ def run(
     Run a system command and return its standard output.
 
     Arguments are passed as a list (never through a shell), so user-provided
-    text can't be interpreted as shell syntax. A non-zero exit status raises
+    text can't be interpreted as shell syntax, and the command is the
+    system's own (see :func:`executable`), never a namesake found along
+    PATH. A non-zero exit status raises
     :class:`CommandError` carrying the command's stderr. With ``timeout``,
     a command still running after that many seconds is killed, and
     :class:`CommandTimeoutError` raised.
@@ -97,7 +137,9 @@ def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **opti
     """Run the command for :func:`run` and :func:`run_bytes`, and return its standard output, or raise what went wrong."""
     require_macos()
     try:
-        result = subprocess.run(list(args), capture_output=True, timeout=timeout, input=input, **options)
+        result = subprocess.run(
+            list(args), executable=executable(args[0]), capture_output=True, timeout=timeout, input=input, **options
+        )
     except FileNotFoundError:
         raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
     except subprocess.TimeoutExpired:
@@ -150,11 +192,7 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     than leave the screen recording with nobody to stop it. A signal to Python
     alone (``kill`` of its pid) still leaves it to run until its own end.
     """
-    require_macos()
-    try:
-        process = subprocess.Popen(list(args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        raise NotSupportedError("the {!r} command was not found on this system".format(args[0])) from None
+    process = popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         _, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -270,6 +308,8 @@ LAUNCHCTL_TIMEOUT = 60.0
 """Seconds for a ``launchctl`` call: it answers at once, unless launchd is wedged."""
 PROFILER_TIMEOUT = 60.0
 """Seconds for ``system_profiler``: it takes a moment, and has hung on some Macs."""
+HIDUTIL_TIMEOUT = 30.0
+"""Seconds for ``hidutil``: it answers at once, unless the HID system is wedged."""
 
 
 def launchd_user_domain() -> str:

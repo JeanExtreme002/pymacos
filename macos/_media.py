@@ -103,7 +103,7 @@ def insert(track: int, source_track: int, start: float, length: float, at: float
         restype=_objc.BOOL,
     )
     if not ok:
-        raise MacOSError("could not edit the track: {}".format(_objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not edit the track: {}".format(_objc.error_message(error)))
 
 
 def copy_track(target: int, track: int, kind: str, until: float) -> int:
@@ -128,7 +128,7 @@ def copy_track(target: int, track: int, kind: str, until: float) -> int:
             restype=_objc.BOOL,
         )
         if not ok:
-            raise MacOSError("could not edit the track: {}".format(_objc.error_message(error) or "unknown error"))
+            raise MacOSError("could not edit the track: {}".format(_objc.error_message(error)))
     return copy
 
 
@@ -166,7 +166,7 @@ def editable(media: int) -> int:
         restype=_objc.BOOL,
     )
     if not ok:
-        raise MacOSError("could not read the media: {}".format(_objc.error_message(error) or "unknown error"))
+        raise MacOSError("could not read the media: {}".format(_objc.error_message(error)))
     return edited
 
 

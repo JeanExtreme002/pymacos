@@ -1,4 +1,6 @@
-"""Unit tests for :mod:`macos._cf`. They run on any platform."""
+"""Unit tests for :mod:`macos._cf`. They run on any platform, but the round trips through CoreFoundation itself."""
+
+import sys
 
 import pytest
 
@@ -68,3 +70,13 @@ def test_spin_pauses_when_the_run_loop_has_nothing_to_wait_for(fake_cf, monkeypa
     monkeypatch.setattr(_objc.time, "sleep", slept.append)
     _objc.spin(0.1)
     assert slept == [0.1]  # rather than spinning the CPU
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls CoreFoundation")
+@pytest.mark.parametrize(
+    "text, expected",
+    [("", ""), ("plain", "plain"), ("a\0b é", "a\0b é"), ("😀 \0 inside", "😀 \0 inside"), ("USB Audio\0\0\0", "USB Audio")],
+)
+def test_strings_come_back_whole_nul_characters_inside_included(text, expected):
+    with _cf.owned(_cf.string(text)) as ref:
+        assert _cf.to_str(ref) == expected  # the NULs at the end are a driver's padding

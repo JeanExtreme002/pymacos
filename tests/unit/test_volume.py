@@ -27,6 +27,7 @@ def test_volume_set_mute_unmute(fake_run):
     assert fake_run.args == ["osascript", "-e", "set volume output muted true"]
     macos.volume.unmute()
     assert fake_run.args == ["osascript", "-e", "set volume output muted false"]
+    assert all(call["timeout"] for call in fake_run.calls)  # a wedged audio daemon doesn't hang the caller
 
 
 @pytest.mark.parametrize(
