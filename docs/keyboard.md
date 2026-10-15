@@ -123,7 +123,7 @@ the menu bar's input menu; add more in System Settings › Keyboard › Text
 Input. {func}`~macos.keyboard.set_layout` takes a name from that list, its
 identifier (such as `'com.apple.keylayout.ABC'`), or part of its name when
 only one layout matches. macOS allows these three on the main thread only:
-elsewhere they raise {class}`~macos.errors.MacOSError`.
+elsewhere they raise {class}`~macos.MainThreadError`.
 
 The same restriction decides which key types each character in
 {func}`~macos.keyboard.press` and the [Hotkeys](hotkeys.md) shortcuts.
@@ -131,7 +131,7 @@ The same restriction decides which key types each character in
 and works on any thread with any layout.) On another thread, they use the layout the main
 thread last read, or the US positions when the layout in use is US-compatible
 (US, ABC...). With any other layout they raise
-{class}`~macos.errors.MacOSError` instead of pressing the wrong keys: on an
+{class}`~macos.MainThreadError` instead of pressing the wrong keys: on an
 AZERTY keyboard, Cmd+A sent at the US position would be Cmd+Q. Call
 {func}`~macos.keyboard.layout` once from the main thread before starting the
 thread:

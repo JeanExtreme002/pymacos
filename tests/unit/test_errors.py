@@ -63,3 +63,8 @@ def test_run_decodes_bytes_whichever_way_it_was_asked(fake_run):
     fake_run.stdout = "Caf\xe9".encode("utf-8")  # bytes, even where text was asked for
     assert _system.run(["sw_vers"]) == "Café"  # decoded: never the "b'...'" str() would make of it
     assert _system.run(["ls"], exact_newlines=True) == "Café"
+
+
+def test_main_thread_error_is_also_a_runtime_error():
+    # menubar raised RuntimeError before, and the other checks MacOSError: a handler for either still catches it.
+    assert issubclass(macos.MainThreadError, RuntimeError) and issubclass(macos.MainThreadError, macos.MacOSError)

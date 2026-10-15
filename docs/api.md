@@ -983,6 +983,7 @@ explain how to use each part.
 .. autoexception:: macos.MacOSError
 .. autoexception:: macos.NotSupportedError
 .. autoexception:: macos.PermissionDeniedError
+.. autoexception:: macos.MainThreadError
 .. autoexception:: macos.PromptTimeoutError
 .. autoexception:: macos.WaitTimeoutError
 .. autoexception:: macos.AppNotFoundError

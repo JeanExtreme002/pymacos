@@ -576,6 +576,7 @@ def install_from_dmg(
     *,
     destination: Union[str, "os.PathLike[str]"] = "/Applications",
     replace: bool = False,
+    app: Optional[str] = None,
 ) -> str:
     """
     Install the app a disk image holds, as dragging it to Applications does, and return its new path.
@@ -589,6 +590,11 @@ def install_from_dmg(
     :class:`FileExistsError`, unless ``replace=True``; replacing an app that's
     running raises :class:`~macos.MacOSError` (quit it first). Installers
     (``.pkg``) aren't run.
+
+    An image that holds several apps installs the first by name, with a
+    :class:`RuntimeWarning` naming the others; ``app`` picks one instead
+    (``"Tool"`` or ``"Tool.app"``), and raises :class:`~macos.AppNotFoundError`
+    when the image has no app of that name.
     """
     target_folder = Path(destination).expanduser()
     if not target_folder.is_dir():
@@ -599,7 +605,7 @@ def install_from_dmg(
         found = sorted(entry for entry in mounted.iterdir() if entry.suffix == ".app" and entry.is_dir())
         if not found:
             raise AppNotFoundError("{} has no app at its top".format(Path(image).name))
-        source = found[0]
+        source = _chosen_app(found, app, Path(image).name)
         target = target_folder / source.name
         if target.exists() and not replace:
             raise FileExistsError(str(target))
@@ -648,6 +654,30 @@ def install_from_dmg(
                 raise  # installed, but the image stays mounted: say so
             # Otherwise the error that stopped the install is the one to see, not this one.
     return str(target)
+
+
+def _chosen_app(found: List[Path], app: Optional[str], image: str) -> Path:
+    """
+    The app to install from ``found``, the apps at the top of the disk image ``image``, sorted by name.
+
+    ``app`` names one (with or without ``.app``, case aside); without it, the
+    first, and a :class:`RuntimeWarning` says which others the image holds:
+    installing one of several without a word would leave the user guessing.
+    """
+    names = ", ".join(entry.name for entry in found)
+    if app is not None:
+        wanted = app.lower() if app.lower().endswith(".app") else app.lower() + ".app"
+        for entry in found:
+            if entry.name.lower() == wanted:
+                return entry
+        raise AppNotFoundError("{} has no app named {!r}: it holds {}".format(image, app, names))
+    if len(found) > 1:
+        warnings.warn(
+            "{} holds several apps ({}): installing {}; pass app= to pick another".format(image, names, found[0].name),
+            RuntimeWarning,
+            stacklevel=3,  # past install_from_dmg(), at its caller
+        )
+    return found[0]
 
 
 @dataclass(frozen=True)
@@ -824,13 +854,31 @@ class InstalledApp:
     path: Path
 
 
-def _installed_app(path: str) -> Optional[InstalledApp]:
+def _installed_app(path: str, *, skip_unreadable: bool = True) -> Optional[InstalledApp]:
+    """
+    The app at ``path``, read from its ``Info.plist``; ``None`` for a folder that isn't an app.
+
+    An ``Info.plist`` that's there but may not be read (a protected folder,
+    another user's app) is ``None`` too with ``skip_unreadable``, for
+    listings, where one such app mustn't hide the rest. Without it, that
+    ``PermissionError`` is raised: it says why, where ``None`` would say
+    "not an app". One that's missing, malformed or otherwise unreadable
+    (a folder in its place) isn't an app's description, so ``None`` either way.
+    """
     import plistlib
 
     try:
         # Path's own reader: this module's open() is the one that opens apps.
         info = plistlib.loads(Path(path, "Contents", "Info.plist").read_bytes())
-    except (OSError, ValueError, plistlib.InvalidFileException):
+    except PermissionError:
+        if skip_unreadable:
+            return None
+        raise
+    except Exception:
+        # Missing or malformed. plistlib raises InvalidFileException (a ValueError) for most bad files, but its
+        # XML parser lets out whatever it trips on: ExpatError for cut-off XML, AttributeError for a date it
+        # can't read, IndexError for a key outside a dict, LookupError for an unknown encoding. None of them
+        # is an app's description, so none should take the listing down with it.
         return None
     if not isinstance(info, dict):
         return None  # a valid plist, but not an app's description
@@ -1011,7 +1059,8 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
 
     Raises :class:`~macos.MacOSError` for an app that's running (quit it
     first; ``dry_run`` works all the same) or that comes with macOS, and :class:`~macos.AppNotFoundError` for
-    one that isn't found. An app installed for every user may need an
+    one that isn't found; one whose ``Info.plist`` can't be read (another
+    user's) raises that ``PermissionError``. An app installed for every user may need an
     administrator to be moved: then nothing is moved, and the error says so.
     Some Library folders (Cookies, HTTPStorages) can only be looked in with
     Full Disk Access: without it, a :class:`RuntimeWarning` names them, as
@@ -1019,7 +1068,7 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     """
     require_macos()
     path = _locate(name)
-    app = _installed_app(path)
+    app = _installed_app(path, skip_unreadable=False)  # one that can't be read says so, rather than "isn't an app"
     if app is None:
         raise AppNotFoundError("{} isn't an app".format(path))
     if path.startswith(("/System/", "/usr/")):

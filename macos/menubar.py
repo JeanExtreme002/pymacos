@@ -30,6 +30,7 @@ from typing import Callable, Deque, Dict, List, Optional, Union, cast
 from . import _cf, _objc
 from ._objc import BOOL, NSInteger
 from ._system import framework, require_macos
+from .errors import MainThreadError
 
 __all__ = ["Item", "MenuItem", "Timer", "run", "quit", "every"]
 
@@ -86,7 +87,7 @@ def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
 def _require_main_thread(what: str) -> None:
     require_macos()
     if threading.current_thread() is not threading.main_thread():
-        raise RuntimeError("{} must run on the main thread, as AppKit requires".format(what))
+        raise MainThreadError("{} must run on the main thread, as AppKit requires".format(what))
 
 
 _app: List[int] = []

@@ -60,7 +60,7 @@ public.mkdir(exist_ok=True)
 
 for pdf in Path("contracts").glob("*.pdf"):
     try:
-        done = macos.pdf.redact(pdf, ssn, public / pdf.name)
+        done = macos.pdf.redact(pdf, public / pdf.name, ssn)
     except ValueError:
         continue  # no SSN in this one
     print(pdf.name, done.matches[ssn.pattern], "SSNs on pages", sorted(done.pages))

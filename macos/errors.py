@@ -26,6 +26,17 @@ class PermissionDeniedError(MacOSError, PermissionError):
     """macOS refused the operation because a privacy permission is missing."""
 
 
+class MainThreadError(MacOSError, RuntimeError):
+    """
+    The call only works on the main thread, and was made from another.
+
+    The camera, the menu bar, the geocoder, keyboard layouts, system events (``events.run()``) and
+    documents (HTML, and conversions to PDF): see the *Threads and macOS internals* page of the docs.
+
+    A :class:`RuntimeError` too, as :mod:`macos.menubar` raised before.
+    """
+
+
 class AppNotFoundError(MacOSError, LookupError):
     """No application matched the given name, bundle identifier or path."""
 

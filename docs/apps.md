@@ -191,6 +191,13 @@ unless `replace=True`. When the install fails and the image then won't
 unmount either, the error raised is the install's. To mount an image
 yourself, see {func}`macos.system.mount_image`.
 
+An image that holds several apps installs the first by name and warns
+(`RuntimeWarning`) about the others; `app=` picks one:
+
+```python
+macos.apps.install_from_dmg("~/Downloads/Suite.dmg", app="Editor")   # '/Applications/Editor.app'
+```
+
 ## Downloaded apps
 
 macOS marks what's downloaded from the internet, and checks it the first
@@ -263,9 +270,10 @@ HTTPStorages) can only be looked in with Full Disk Access: without it, a
 
 It raises {class}`~macos.MacOSError` for an app that's running (quit it first;
 a dry run works all the same) or that comes with macOS, like Safari, and
-{class}`~macos.AppNotFoundError` for one that isn't installed. An app
-installed for every user may need an administrator to be moved: then nothing
-is moved, and the error says so.
+{class}`~macos.AppNotFoundError` for one that isn't installed; one whose
+`Info.plist` may not be read raises that `PermissionError`, rather than
+passing for "not an app". An app installed for every user may need an
+administrator to be moved: then nothing is moved, and the error says so.
 
 ## Reference
 

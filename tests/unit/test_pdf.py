@@ -9,32 +9,32 @@ import macos
 
 def test_pdf_argument_checks(tmp_path):
     with pytest.raises(ValueError, match="multiple of 90"):
-        macos.pdf.rotate(__file__, 45, tmp_path / "out.pdf")
+        macos.pdf.rotate(__file__, tmp_path / "out.pdf", 45)
     with pytest.raises(ValueError, match="int multiple of 90"):
-        macos.pdf.rotate(__file__, 90.0, tmp_path / "out.pdf")  # a float would reach ctypes as a C long
+        macos.pdf.rotate(__file__, tmp_path / "out.pdf", 90.0)  # a float would reach ctypes as a C long
     with pytest.raises(ValueError, match="int multiple of 90"):
-        macos.pdf.rotate(__file__, True, tmp_path / "out.pdf")
+        macos.pdf.rotate(__file__, tmp_path / "out.pdf", True)
 
     class Index:  # an integer of another kind (numpy's, say): an index, so it counts
         def __index__(self):
             return 45
 
     with pytest.raises(ValueError, match="multiple of 90, not 45"):
-        macos.pdf.rotate(__file__, Index(), tmp_path / "out.pdf")
+        macos.pdf.rotate(__file__, tmp_path / "out.pdf", Index())
     with pytest.raises(ValueError, match=r"\(title, page\)"):
-        macos.pdf.set_bookmarks(__file__, [("Intro",)], tmp_path / "out.pdf")
+        macos.pdf.set_bookmarks(__file__, tmp_path / "out.pdf", [("Intro",)])
     with pytest.raises(ValueError, match=r"\(title, page\)"):
-        macos.pdf.set_bookmarks(__file__, ["Intro"], tmp_path / "out.pdf")
+        macos.pdf.set_bookmarks(__file__, tmp_path / "out.pdf", ["Intro"])
     with pytest.raises(ValueError, match="empty"):
         macos.pdf.encrypt(__file__, tmp_path / "out.pdf", "")
     with pytest.raises(ValueError, match="at least one"):
         macos.pdf.from_images([], "out.pdf")
     with pytest.raises(ValueError, match="empty"):
-        macos.pdf.watermark(__file__, " ", tmp_path / "out.pdf")
+        macos.pdf.watermark(__file__, tmp_path / "out.pdf", " ")
     with pytest.raises(ValueError, match="opacity"):
-        macos.pdf.watermark(__file__, "DRAFT", tmp_path / "out.pdf", opacity=0)
+        macos.pdf.watermark(__file__, tmp_path / "out.pdf", "DRAFT", opacity=0)
     with pytest.raises(ValueError, match="hex color"):
-        macos.pdf.watermark(__file__, "DRAFT", tmp_path / "out.pdf", color="red")
+        macos.pdf.watermark(__file__, tmp_path / "out.pdf", "DRAFT", color="red")
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="rotates pages with PDFKit")
@@ -48,7 +48,7 @@ def test_rotate_turns_a_page_listed_twice_once(tmp_path):
     page.write_bytes(pdf_with_text([("Hello", 72, 700)]))
     document = macos.pdf.merge([page, page], tmp_path / "two.pdf")
 
-    macos.pdf.rotate(document, 90, document, pages=[2, 2])
+    macos.pdf.rotate(document, document, 90, pages=[2, 2])
     with macos.pdf._open(document) as opened:
         rotations = [_objc.send(macos.pdf._page(opened, n), "rotation", restype=ctypes.c_long) for n in (1, 2)]
     assert rotations == [0, 90]
@@ -67,7 +67,7 @@ def test_forms(tmp_path):
         "Size": ("radio", None, ("Small", "Large")),
     }
     values = {"Full name": "Ana Souza", "Agree": True, "Plan": "Pro", "Size": "Large"}
-    filled = macos.pdf.fill_form(form, values, tmp_path / "filled.pdf")
+    filled = macos.pdf.fill_form(form, tmp_path / "filled.pdf", values)
     assert {field.name: field.value for field in macos.pdf.form_fields(filled)} == {
         "Full name": "Ana Souza", "Agree": True, "Plan": "Pro", "Size": "Large"
     }
@@ -79,7 +79,7 @@ def test_forms(tmp_path):
     )
     for wrong, message in refused:
         with pytest.raises(ValueError, match=message):
-            macos.pdf.fill_form(form, wrong, tmp_path / "never.pdf")
+            macos.pdf.fill_form(form, tmp_path / "never.pdf", wrong)
     assert not (tmp_path / "never.pdf").exists()
 
 
@@ -87,17 +87,17 @@ def test_forms(tmp_path):
 def test_sign(tmp_path):
     from tests.helpers import pdf_form, rgb_png
 
-    form = macos.pdf.fill_form(pdf_form(tmp_path / "form.pdf"), {"Full name": "Ana Souza"}, tmp_path / "filled.pdf")
+    form = macos.pdf.fill_form(pdf_form(tmp_path / "form.pdf"), tmp_path / "filled.pdf", {"Full name": "Ana Souza"})
     signature = tmp_path / "signature.png"
     signature.write_bytes(rgb_png(300, 100, lambda x, y: (20, 40, 160)))
-    signed = macos.pdf.sign(form, signature, tmp_path / "signed.pdf", width=150)
+    signed = macos.pdf.sign(form, tmp_path / "signed.pdf", signature, width=150)
     assert macos.pdf.page_count(signed) == 1 and macos.pdf.form_fields(signed) == []  # flattened
     assert "Ana Souza" in macos.pdf.text(signed)  # the filled-in value is drawn in the page
     # The image is drawn where asked, at the size asked: look at the rendered page.
     assert _color_at(signed, tmp_path, (400, 632, 70, 28)) == "signature"   # bottom right, 36 points in
     assert _color_at(signed, tmp_path, (100, 400, 60, 60)) == "page"
     rotated = macos.pdf.sign(
-        macos.pdf.rotate(form, 90, tmp_path / "rotated.pdf"), signature, tmp_path / "rotated-signed.pdf",
+        macos.pdf.rotate(form, tmp_path / "rotated.pdf", 90), tmp_path / "rotated-signed.pdf", signature,
         position="top_left", width=120,
     )
     assert _color_at(rotated, tmp_path, (50, 40, 60, 20)) == "signature"      # upright, top left as it's seen
@@ -111,15 +111,15 @@ def test_sign(tmp_path):
     io = macos.image._io()
     with _cf.owned(macos.image._source(tall)) as source, _cf.owned(_cf.from_python({"Orientation": 6})) as options:
         macos.image._write(sideways, "public.jpeg", lambda d: io.CGImageDestinationAddImageFromSource(d, source, 0, options))
-    upright = macos.pdf.sign(form, sideways, tmp_path / "upright.pdf", width=150)
+    upright = macos.pdf.sign(form, tmp_path / "upright.pdf", sideways, width=150)
     assert _color_at(upright, tmp_path, (400, 632, 70, 28)) == "signature"  # where the upright one goes
     assert _color_at(upright, tmp_path, (400, 540, 70, 28)) == "page"  # not three times taller, on its side
     with pytest.raises(ValueError, match="out of range"):
-        macos.pdf.sign(form, signature, tmp_path / "never.pdf", page=2)
+        macos.pdf.sign(form, tmp_path / "never.pdf", signature, page=2)
     with pytest.raises(ValueError, match="position must be one of"):
-        macos.pdf.sign(form, signature, tmp_path / "never.pdf", position="middle")
+        macos.pdf.sign(form, tmp_path / "never.pdf", signature, position="middle")
     with pytest.raises(ValueError, match="width must be positive"):
-        macos.pdf.sign(form, signature, tmp_path / "never.pdf", width=0)
+        macos.pdf.sign(form, tmp_path / "never.pdf", signature, width=0)
 
 
 def _color_at(pdf_path, folder, box):
@@ -139,8 +139,8 @@ def test_add_text(tmp_path):
     white = tmp_path / "white.png"
     white.write_bytes(rgb_png(612, 792, lambda x, y: (255, 255, 255)))
     page = macos.pdf.from_images([white], tmp_path / "page.pdf")
-    stamped = macos.pdf.add_text(page, "Received", tmp_path / "one.pdf", size=20)
-    stamped = macos.pdf.add_text(stamped, "Checked\nby Ana", tmp_path / "two.pdf", position="bottom_right", color="#c00000")
+    stamped = macos.pdf.add_text(page, tmp_path / "one.pdf", "Received", size=20)
+    stamped = macos.pdf.add_text(stamped, tmp_path / "two.pdf", "Checked\nby Ana", position="bottom_right", color="#c00000")
 
     with macos.pdf._open(stamped) as document:
         notes = _objc.nsarray(_objc.send(macos.pdf._page(document, 1), "annotations"))
@@ -157,9 +157,9 @@ def test_add_text(tmp_path):
     assert _dominant(stamped, tmp_path, (250, 350, 80, 80)) == "#ffffff"  # the rest untouched
     for wrong, message in (({"size": 0}, "size must be positive"), ({"font": "NoSuchFont-Bold"}, "no font is named")):
         with pytest.raises(ValueError, match=message):
-            macos.pdf.add_text(page, "x", tmp_path / "never.pdf", **wrong)
+            macos.pdf.add_text(page, tmp_path / "never.pdf", "x", **wrong)
     with pytest.raises(ValueError, match="page 2 is out of range"):
-        macos.pdf.add_text(page, "x", tmp_path / "never.pdf", page=2)
+        macos.pdf.add_text(page, tmp_path / "never.pdf", "x", page=2)
 
 
 def _dominant(pdf_path, folder, box, count=1):
@@ -179,8 +179,8 @@ def test_add_text_on_a_rotated_page(tmp_path, angle, corner):
     white.write_bytes(rgb_png(612, 792, lambda x, y: (255, 255, 255)))
     page = macos.pdf.from_images([white], tmp_path / "page.pdf")
     if angle:
-        page = macos.pdf.rotate(page, angle, tmp_path / "rotated.pdf")
-    stamped = macos.pdf.add_text(page, "Received", tmp_path / "stamped.pdf", position=corner, size=24)
+        page = macos.pdf.rotate(page, tmp_path / "rotated.pdf", angle)
+    stamped = macos.pdf.add_text(page, tmp_path / "stamped.pdf", "Received", position=corner, size=24)
 
     png = tmp_path / "render.png"
     png.write_bytes(macos.pdf.render(stamped, 1, size=700))
@@ -214,17 +214,17 @@ def test_bookmarks(tmp_path):
     assert macos.pdf.bookmarks(book) == []
     # Tuples or lists (as json.loads gives them), mixed.
     contents = [("Intro", 1), ["Chapter 1", 2], ("1.1", 2, 1), ["1.1.1", 3, 2], ("Chapter 2", 3)]
-    marked = macos.pdf.set_bookmarks(book, contents, tmp_path / "marked.pdf")
+    marked = macos.pdf.set_bookmarks(book, tmp_path / "marked.pdf", contents)
     assert [(mark.title, mark.page, mark.level) for mark in macos.pdf.bookmarks(marked)] == [
         ("Intro", 1, 0), ("Chapter 1", 2, 0), ("1.1", 2, 1), ("1.1.1", 3, 2), ("Chapter 2", 3, 0)
     ]  # fmt: skip
-    assert macos.pdf.bookmarks(macos.pdf.set_bookmarks(marked, [], tmp_path / "cleared.pdf")) == []
+    assert macos.pdf.bookmarks(macos.pdf.set_bookmarks(marked, tmp_path / "cleared.pdf", [])) == []
     for wrong, message in (
         ([("Deep", 1, 1)], "deeper than"), ([("x", 9)], "out of range"), ([(" ", 1)], "must not be empty"),
         (["Intro"], "a bookmark is"), ([("Intro",)], "a bookmark is"),  # a bare string, a tuple too short
     ):
         with pytest.raises(ValueError, match=message):
-            macos.pdf.set_bookmarks(book, wrong, tmp_path / "never.pdf")
+            macos.pdf.set_bookmarks(book, tmp_path / "never.pdf", wrong)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads PDFs with CoreGraphics")
@@ -299,32 +299,32 @@ def test_sign_and_add_text_near_a_text(tmp_path):
     signature = tmp_path / "signature.png"
     signature.write_bytes(rgb_png(300, 100, lambda x, y: (20, 40, 160)))
 
-    signed = macos.pdf.sign(form, signature, tmp_path / "signed.pdf", near="signature:", width=120)  # any case
+    signed = macos.pdf.sign(form, tmp_path / "signed.pdf", signature, near="signature:", width=120)  # any case
     # "Signature:" ends near x=155 points, its line centered near y=206: the picture (120 x 40 points) sits just
     # right of it, which the 700-pixel render (0.884 pixels a point) shows around pixels 145-250 by 500-535.
     assert _color_at(signed, tmp_path, (180, 505, 40, 20)) == "signature"
     assert _color_at(signed, tmp_path, (160, 440, 40, 20)) == "page"  # not on the line above
 
-    named = macos.pdf.add_text(form, "Ana Souza", tmp_path / "named.pdf", near="Name:")
+    named = macos.pdf.add_text(form, tmp_path / "named.pdf", "Ana Souza", near="Name:")
     with macos.pdf._open(named) as document:
         note = list(_objc.nsarray(_objc.send(macos.pdf._page(document, 1), "annotations")))[0]
         bounds = _objc.send(note, "bounds", restype=_objc.CGRect)
     assert 115 < bounds.origin.x < 135 and 690 < bounds.origin.y < 710  # right after "Name:", on its line
 
-    below = macos.pdf.add_text(form, "Ana Souza", tmp_path / "below.pdf", near="Name:", side="below")
+    below = macos.pdf.add_text(form, tmp_path / "below.pdf", "Ana Souza", near="Name:", side="below")
     with macos.pdf._open(below) as document:
         note = list(_objc.nsarray(_objc.send(macos.pdf._page(document, 1), "annotations")))[0]
         bounds = _objc.send(note, "bounds", restype=_objc.CGRect)
     assert 70 <= bounds.origin.x < 75 and bounds.origin.y + bounds.size.height < 700  # under it
 
     with pytest.raises(ValueError, match="isn't on the PDF"):
-        macos.pdf.sign(form, signature, tmp_path / "never.pdf", near="Witness:")
+        macos.pdf.sign(form, tmp_path / "never.pdf", signature, near="Witness:")
     with pytest.raises(ValueError, match="isn't on page 1"):
-        macos.pdf.add_text(form, "x", tmp_path / "never.pdf", near="Witness:", page=1)
+        macos.pdf.add_text(form, tmp_path / "never.pdf", "x", near="Witness:", page=1)
     with pytest.raises(ValueError, match="position or near, not both"):
-        macos.pdf.add_text(form, "x", tmp_path / "never.pdf", near="Name:", position="top_left")
+        macos.pdf.add_text(form, tmp_path / "never.pdf", "x", near="Name:", position="top_left")
     with pytest.raises(ValueError, match="side must be one of"):
-        macos.pdf.sign(form, signature, tmp_path / "never.pdf", near="Name:", side="up")
+        macos.pdf.sign(form, tmp_path / "never.pdf", signature, near="Name:", side="up")
 
 
 def test_redact_targets():
@@ -429,7 +429,7 @@ def locked_book(tmp_path):
     plain = tmp_path / "plain.pdf"
     plain.write_bytes(pdf_with_text([("Contract of Jane Doe", 72, 700)]))
     two = macos.pdf.merge([plain, plain], tmp_path / "two.pdf")
-    marked = macos.pdf.set_bookmarks(two, [("Start", 1), ("Annex", 2), ("Detail", 2, 1)], tmp_path / "marked.pdf")
+    marked = macos.pdf.set_bookmarks(two, tmp_path / "marked.pdf", [("Start", 1), ("Annex", 2), ("Detail", 2, 1)])
     with macos.pdf._open(marked) as document:
         title = _objc.send(
             _objc.cls("NSDictionary"),
@@ -450,10 +450,10 @@ def test_edits_of_an_encrypted_pdf_are_not_encrypted(locked_book, tmp_path):
     assert macos.pdf.page_count(locked_book, password="s3cret") == 2
     with pytest.raises(macos.PermissionDeniedError):
         macos.pdf.text(locked_book)
-    rotated = macos.pdf.rotate(locked_book, 90, tmp_path / "rotated.pdf", password="s3cret")
-    redacted = macos.pdf.redact(locked_book, ["Jane Doe"], tmp_path / "redacted.pdf", password="s3cret").path
-    stamped = macos.pdf.add_text(locked_book, "Seen", tmp_path / "stamped.pdf", password="s3cret")
-    marked = macos.pdf.set_bookmarks(locked_book, [("Only", 2)], tmp_path / "marked-again.pdf", password="s3cret")
+    rotated = macos.pdf.rotate(locked_book, tmp_path / "rotated.pdf", 90, password="s3cret")
+    redacted = macos.pdf.redact(locked_book, tmp_path / "redacted.pdf", ["Jane Doe"], password="s3cret").path
+    stamped = macos.pdf.add_text(locked_book, tmp_path / "stamped.pdf", "Seen", password="s3cret")
+    marked = macos.pdf.set_bookmarks(locked_book, tmp_path / "marked-again.pdf", [("Only", 2)], password="s3cret")
     for result in (rotated, redacted, stamped, marked):
         assert not _is_encrypted(result), result.name
         assert macos.pdf.page_count(result) == 2
@@ -472,7 +472,7 @@ def test_filling_an_encrypted_form_gives_an_unencrypted_one(tmp_path):
     from tests.helpers import pdf_form
 
     locked = macos.pdf.encrypt(pdf_form(tmp_path / "form.pdf"), tmp_path / "locked.pdf", "s3cret")
-    filled = macos.pdf.fill_form(locked, {"Full name": "Ana Souza", "Agree": True}, tmp_path / "filled.pdf", password="s3cret")
+    filled = macos.pdf.fill_form(locked, tmp_path / "filled.pdf", {"Full name": "Ana Souza", "Agree": True}, password="s3cret")
     assert not _is_encrypted(filled)
     values = {field.name: field.value for field in macos.pdf.form_fields(filled)}
     assert values["Full name"] == "Ana Souza" and values["Agree"] is True
@@ -490,10 +490,10 @@ def test_outputs_get_the_usual_permissions(tmp_path):
         source = tmp_path / "source.pdf"
         source.write_bytes(pdf_with_text([("Hello", 72, 700)]))
         target = tmp_path / "not" / "yet" / "there" / "rotated.pdf"  # its folders are made, beside it
-        macos.pdf.rotate(source, 90, target)
+        macos.pdf.rotate(source, target, 90)
         assert stat.S_IMODE(target.stat().st_mode) == 0o644  # not a temporary file's 0o600
         os.chmod(str(target), 0o664)
-        macos.pdf.watermark(target, "DRAFT", target)  # rewritten in place: it keeps its permissions
+        macos.pdf.watermark(target, target, "DRAFT")  # rewritten in place: it keeps its permissions
         assert stat.S_IMODE(target.stat().st_mode) == 0o664
         assert sorted(os.listdir(str(target.parent))) == ["rotated.pdf"]
     finally:
@@ -581,9 +581,9 @@ def test_redrawn_pages_keep_the_crop_box(tmp_path):
     signature = tmp_path / "signature.png"
     signature.write_bytes(rgb_png(30, 10, lambda x, y: (20, 40, 160)))
     made = [
-        macos.pdf.watermark(cropped, "DRAFT", tmp_path / "watermarked.pdf"),
-        macos.pdf.sign(cropped, signature, tmp_path / "signed.pdf", width=30),
-        macos.pdf.add_text(cropped, "Approved", tmp_path / "noted.pdf"),
+        macos.pdf.watermark(cropped, tmp_path / "watermarked.pdf", "DRAFT"),
+        macos.pdf.sign(cropped, tmp_path / "signed.pdf", signature, width=30),
+        macos.pdf.add_text(cropped, tmp_path / "noted.pdf", "Approved"),
     ]
 
     def size(png):
@@ -610,7 +610,7 @@ def test_bookmarks_open_at_the_top_of_the_visible_part(tmp_path, rotate, corner)
 
     cropped = tmp_path / "cropped.pdf"
     cropped.write_bytes(pdf_with_text([("VISIBLE", 150, 150)], rotate=rotate, crop=(100, 100, 400, 400)))
-    marked = macos.pdf.set_bookmarks(cropped, [("Start", 1)], tmp_path / "marked.pdf")
+    marked = macos.pdf.set_bookmarks(cropped, tmp_path / "marked.pdf", [("Start", 1)])
 
     with macos.pdf._open(marked, None) as document:
         child = _objc.send(_objc.send(document, "outlineRoot"), "childAtIndex:", 0, argtypes=(ctypes.c_ulong,))

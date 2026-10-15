@@ -9,8 +9,8 @@ document, so a macOS update may change them.
 Most of the package works from any thread. A few of Apple's frameworks only
 work on the main thread, the one that runs your script; elsewhere they would
 hang or crash the process, so these calls check first and raise
-{class}`~macos.MacOSError` from a worker thread ({mod}`macos.menubar` raises
-`RuntimeError`):
+{class}`~macos.MainThreadError` (a {class}`~macos.MacOSError`, and a
+`RuntimeError`) from a worker thread:
 
 | Calls | Why |
 |---|---|

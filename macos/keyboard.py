@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from . import _cf, _events, _objc
 from ._system import framework, private_framework
-from .errors import AppNotFoundError, MacOSError, NotSupportedError
+from .errors import AppNotFoundError, MacOSError, MainThreadError, NotSupportedError
 
 __all__ = [
     "type",
@@ -250,7 +250,7 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
     The ``bool`` says whether it needs Shift. macOS only hands the layout
     over on the main thread: elsewhere, the one the main thread last read
     for the same layout serves, or the US table for a layout that matches
-    it. Any other layout raises :class:`MacOSError` there, rather than
+    it. Any other layout raises :class:`~macos.MainThreadError` there, rather than
     pressing the wrong keys (Cmd+A would be Cmd+Q on an AZERTY keyboard).
     """
     if threading.current_thread() is not threading.main_thread():
@@ -260,14 +260,14 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
         if current in _LAYOUTS:
             read_for, table = _LAYOUTS[current]
             if read_for is not None and read_for != _keyboard_type():
-                raise MacOSError(
+                raise MainThreadError(
                     "a different kind of keyboard is in use since the main thread read the layout, and its keys "
                     "sit elsewhere: call macos.keyboard.layout() from the main thread again"
                 )
             return table
         if current in _US_COMPATIBLE:
             return _us_layout()
-        raise MacOSError(
+        raise MainThreadError(
             "the keyboard layout in use ({}) can only be read on the main thread: call "
             "macos.keyboard.layout() once from the main thread first, so other threads know it".format(current or "unknown")
         )
@@ -570,7 +570,7 @@ def _require_main_thread(what: str) -> None:
     # Text Input Sources only work on the main thread: elsewhere macOS may
     # answer wrong, or stop the process.
     if threading.current_thread() is not threading.main_thread():
-        raise MacOSError("{} only works on the main thread, as macOS requires for keyboard layouts".format(what))
+        raise MainThreadError("{} only works on the main thread, as macOS requires for keyboard layouts".format(what))
 
 
 def _tis_constant(name: str) -> int:
