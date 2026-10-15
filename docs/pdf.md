@@ -30,8 +30,8 @@ The {class}`~macos.pdf.Metadata` also has the `subject`, the `keywords`, the
 
 ```python
 macos.pdf.merge(["january.pdf", "february.pdf"], "q1.pdf")
-macos.pdf.extract("report.pdf", [1], "cover.pdf")            # one page
-macos.pdf.extract("report.pdf", [3, 1, 2], "reordered.pdf")
+macos.pdf.extract("report.pdf", "cover.pdf", [1])            # one page
+macos.pdf.extract("report.pdf", "reordered.pdf", [3, 1, 2])
 ```
 
 {func}`~macos.pdf.extract` keeps the pages in the order you give, so it also
@@ -40,10 +40,12 @@ reorders pages.
 ## Rotating pages
 
 ```python
-macos.pdf.rotate("scan.pdf", 90, "scan.pdf")               # every page, clockwise
-macos.pdf.rotate("scan.pdf", -90, "fixed.pdf", pages=[2])  # only page 2, counter-clockwise
+macos.pdf.rotate("scan.pdf", "scan.pdf", 90)               # every page, clockwise
+macos.pdf.rotate("scan.pdf", "fixed.pdf", -90, pages=[2])  # only page 2, counter-clockwise
 ```
 
+Every function that writes a PDF takes the PDF first and the output second,
+as {mod}`macos.image` and {mod}`macos.video` do, then what to do to it.
 The output can be the input itself: it's replaced only once the new file is
 written. Every function here writes that way: the new file goes beside the
 output (its folder is made if missing) and is moved in place when complete,
@@ -56,8 +58,8 @@ permissions; a new one gets the usual ones, as any file you save.
 see-through:
 
 ```python
-macos.pdf.watermark("contract.pdf", "DRAFT", "contract-draft.pdf")
-macos.pdf.watermark("id.pdf", "Only for Acme Inc.", "id-acme.pdf", color="#d00000", opacity=0.3)
+macos.pdf.watermark("contract.pdf", "contract-draft.pdf", "DRAFT")
+macos.pdf.watermark("id.pdf", "id-acme.pdf", "Only for Acme Inc.", color="#d00000", opacity=0.3)
 ```
 
 The text is sized to fit each page. The pages keep their look and their text;
@@ -180,7 +182,7 @@ editable:
 for field in macos.pdf.form_fields("application.pdf"):
     print(field.name, field.kind, field.value)   # Full name text None
 
-macos.pdf.fill_form("application.pdf", {"Full name": "Jane Doe", "Agree": True, "Plan": "Pro"}, "filled.pdf")
+macos.pdf.fill_form("application.pdf", "filled.pdf", {"Full name": "Jane Doe", "Agree": True, "Plan": "Pro"})
 ```
 
 Text fields and choices take text; checkboxes `True` or `False`; a group of
@@ -193,16 +195,16 @@ doesn't offer, raises `ValueError` before anything is written.
 a page, the last one by default:
 
 ```python
-macos.pdf.sign("filled.pdf", "signature.png", "signed.pdf")                     # bottom right
-macos.pdf.sign("filled.pdf", "signature.png", "signed.pdf", page=1, position=(72, 120), width=180)
+macos.pdf.sign("filled.pdf", "signed.pdf", "signature.png")                     # bottom right
+macos.pdf.sign("filled.pdf", "signed.pdf", "signature.png", page=1, position=(72, 120), width=180)
 ```
 
 The easiest is to put it beside a text of the page, such as the line where
 it goes:
 
 ```python
-macos.pdf.sign("contract.pdf", "signature.png", "signed.pdf", near="Signature:")
-macos.pdf.sign("contract.pdf", "signature.png", "signed.pdf", near="Witness", side="below", gap=4)
+macos.pdf.sign("contract.pdf", "signed.pdf", "signature.png", near="Signature:")
+macos.pdf.sign("contract.pdf", "signed.pdf", "signature.png", near="Witness", side="below", gap=4)
 ```
 
 `near` finds the text as {func}`~macos.pdf.text` reads it (case doesn't
@@ -227,16 +229,16 @@ fill the form first.
 edit or move in Preview:
 
 ```python
-macos.pdf.add_text("contract.pdf", "Received on 29/09/2026", "stamped.pdf")      # page 1, top left
-macos.pdf.add_text("form.pdf", "Jane Doe", "filled.pdf", page=2, position=(120, 540), size=14)
-macos.pdf.add_text("draft.pdf", "Checked\nby Ana", "notes.pdf", position="top_right", color="#c00000")
+macos.pdf.add_text("contract.pdf", "stamped.pdf", "Received on 29/09/2026")      # page 1, top left
+macos.pdf.add_text("form.pdf", "filled.pdf", "Jane Doe", page=2, position=(120, 540), size=14)
+macos.pdf.add_text("draft.pdf", "notes.pdf", "Checked\nby Ana", position="top_right", color="#c00000")
 ```
 
 It goes where {func}`~macos.pdf.sign` puts a signature: beside a text of
 the page, such as a form's label, or in a corner, or at a point:
 
 ```python
-macos.pdf.add_text("form.pdf", "Jane Doe", "filled.pdf", near="Name:")
+macos.pdf.add_text("form.pdf", "filled.pdf", "Jane Doe", near="Name:")
 ```
 
 `size` is in points; `font` a font's name, such as `"Helvetica-Bold"`;
@@ -251,12 +253,12 @@ outline), and {func}`~macos.pdf.set_bookmarks` gives it one:
 for mark in macos.pdf.bookmarks("book.pdf"):
     print("  " * mark.level + mark.title, mark.page)
 
-macos.pdf.set_bookmarks("book.pdf", [
+macos.pdf.set_bookmarks("book.pdf", "book-with-contents.pdf", [
     ("Introduction", 1),
     ("Chapter 1", 3),
     ("1.1 Getting started", 4, 1),     # (title, page, level): a section of Chapter 1
     ("Chapter 2", 12),
-], "book-with-contents.pdf")
+])
 ```
 
 An empty list takes the table of contents away.
@@ -284,13 +286,13 @@ it for good before blacking it out:
 ```python
 import re
 
-done = macos.pdf.redact("contract.pdf", ["Jane Doe", "123-45-6789"], "contract-public.pdf")
+done = macos.pdf.redact("contract.pdf", "contract-public.pdf", ["Jane Doe", "123-45-6789"])
 done.matches   # {'Jane Doe': 3, '123-45-6789': 1}
 done.pages     # {1: 2, 4: 2}: the pages redrawn, with their matches
 
 ssn = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 email = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
-macos.pdf.redact("list.pdf", [ssn, email], "list-public.pdf")
+macos.pdf.redact("list.pdf", "list-public.pdf", [ssn, email])
 ```
 
 A text matches as whole words, ignoring case and any spacing or line break

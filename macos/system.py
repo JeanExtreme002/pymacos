@@ -2199,10 +2199,6 @@ def logs(
     to wait for as long as it takes) ``log show`` is stopped and
     :class:`~macos.errors.CommandTimeoutError` raised.
     """
-    import subprocess
-    import tempfile
-    import threading
-
     if isinstance(last, timedelta):
         last = "{}s".format(max(1, int(last.total_seconds())))
     if not re.fullmatch(r"\d+[smhd]", last):
@@ -2214,6 +2210,13 @@ def logs(
     if timeout is not None and timeout <= 0:
         raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     require_macos()
+    return _read_log(_log_show(process, subsystem, contains, level, last), limit, timeout)
+
+
+def _log_show(
+    process: Optional[str], subsystem: Optional[str], contains: Optional[str], level: Optional[str], last: str
+) -> List[str]:
+    """The ``log show`` command for :func:`logs`, its filters as a predicate."""
     conditions = []
     if process:
         conditions.append("process == {}".format(_quoted(process)))
@@ -2232,6 +2235,20 @@ def logs(
         args.append("--debug")  # --debug alone shows debug messages but still leaves info ones out
     if conditions:
         args += ["--predicate", " AND ".join(conditions)]
+    return args
+
+
+def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -> List[LogEntry]:
+    """
+    Run the ``log show`` command ``args`` and return its entries: the first ``limit``, or all of them.
+
+    Past ``timeout`` seconds the command is stopped and :class:`~macos.errors.CommandTimeoutError`
+    raised; one that fails raises :class:`~macos.errors.CommandError` with what it wrote.
+    """
+    import subprocess
+    import tempfile
+    import threading
+
     entries: List[LogEntry] = []
     # Its errors go to a file, not a second pipe: a pipe only read once the output ends would fill up
     # (64 KB) on a chatty failure, and log show would wait on it forever while we wait on the output.

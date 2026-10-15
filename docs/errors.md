@@ -19,6 +19,7 @@ catches {class}`~macos.PermissionDeniedError`, and `except LookupError` catches
 |---|---|
 | {class}`~macos.NotSupportedError` | Not running on macOS, or a required system tool is missing |
 | {class}`~macos.PermissionDeniedError` | A privacy permission is missing, or the user denied access |
+| {class}`~macos.MainThreadError` | A call that only works on the main thread (the camera, the menu bar, the geocoder, keyboard layouts, `events.run()`, documents) was made from another thread (also a `RuntimeError`); see [Threads](compatibility.md) |
 | {class}`~macos.PromptTimeoutError` | A camera or microphone permission prompt went unanswered (also a `TimeoutError`) |
 | {class}`~macos.WaitTimeoutError` | What was waited for (a copy, an appearance change, a geocoding answer, a folder walked, a Bluetooth or VPN switch, the Dock restarting, a default app's confirmation, a window's full-screen change) didn't happen in time (also a `TimeoutError`) |
 | {class}`~macos.AppNotFoundError` | No app matches the name, or it didn't start in time |

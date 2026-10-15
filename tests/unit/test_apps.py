@@ -517,3 +517,83 @@ def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):
 
     assert [app.name for app in apps.installed()] == ["Tool"]
     assert queries and queries[0]["timeout"] == apps._SPOTLIGHT_TIMEOUT > 0
+
+
+def test_install_from_dmg_with_several_apps_warns_or_takes_the_one_named(monkeypatch, tmp_path):
+    from macos import apps, system
+
+    volume = tmp_path / "Volume"
+    for name in ("Editor.app", "Viewer.app", "Read Me.rtf"):
+        (volume / name).mkdir(parents=True)
+    applications = tmp_path / "Applications"
+    applications.mkdir()
+    monkeypatch.setattr(system, "mount_image", lambda image: volume)
+    monkeypatch.setattr(system, "unmount_image", lambda mounted, force=False: None)
+    monkeypatch.setattr(apps, "get", lambda name: None)  # not running
+    monkeypatch.setattr(apps, "_run", lambda args: Path(args[-1]).mkdir())
+
+    # Nothing chosen: the first by name, with a word about the others, pointing at the caller.
+    with pytest.warns(RuntimeWarning, match=r"holds several apps \(Editor.app, Viewer.app\): installing Editor.app") as caught:
+        assert apps.install_from_dmg(tmp_path / "Suite.dmg", destination=applications) == str(applications / "Editor.app")
+    assert caught[0].filename == __file__
+    # Named, with or without .app, in any case: that one, and no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        installed = apps.install_from_dmg(tmp_path / "Suite.dmg", destination=applications, app="viewer")
+        assert installed == str(applications / "Viewer.app")
+        again = apps.install_from_dmg(tmp_path / "Suite.dmg", destination=applications, app="Viewer.app", replace=True)
+        assert again == installed
+    with pytest.raises(macos.AppNotFoundError, match="has no app named 'Player': it holds Editor.app, Viewer.app"):
+        apps.install_from_dmg(tmp_path / "Suite.dmg", destination=applications, app="Player")
+    assert sorted(path.name for path in applications.iterdir()) == ["Editor.app", "Viewer.app"]
+
+
+def test_uninstall_says_when_the_app_itself_cannot_be_read(tmp_path, monkeypatch):
+    """An Info.plist that can't be read is a permission problem, not "isn't an app"; a listing skips it all the same."""
+    import functools
+    import os
+    import plistlib
+
+    from macos import apps
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    bundle = tmp_path / "Applications" / "Chat.app"
+    (bundle / "Contents").mkdir(parents=True)
+    info = bundle / "Contents" / "Info.plist"
+    info.write_bytes(plistlib.dumps({"CFBundleName": "Chat", "CFBundleIdentifier": "com.example.Chat"}))
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "_APP_FOLDERS", (str(tmp_path / "Applications"),))
+    monkeypatch.setattr(apps.spotlight, "search", lambda query, **options: [])
+    monkeypatch.setattr(apps.Path, "home", lambda: tmp_path / "home")
+
+    info.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            apps.uninstall("Chat", dry_run=True)
+        assert apps.installed() == []  # one app that can't be read doesn't fail the listing
+    finally:
+        info.chmod(0o644)
+    assert [app.name for app in apps.installed()] == ["Chat"]
+    assert apps.uninstall("Chat", dry_run=True)[0] == bundle
+    # A folder that isn't an app at all is still "isn't an app": no Info.plist, a folder in its place
+    # (IsADirectoryError), or a malformed one. plistlib's XML parser lets out what it trips on, none of
+    # it a ValueError: cut-off XML (ExpatError), a date it can't read (AttributeError), a key outside a
+    # dict (IndexError), an unknown encoding (LookupError).
+    info.unlink()
+    with pytest.raises(macos.AppNotFoundError, match="isn't an app"):
+        apps.uninstall("Chat", dry_run=True)
+    malformed = (
+        b"<?xml version='1.0'?><plist><dict><key>",
+        b"<plist><dict><key>k</key><date>yesterday</date></dict></plist>",
+        b"<plist><key>k</key></plist>",
+        b"<?xml version='1.0' encoding='bogus'?><plist/>",
+    )
+    for broken in (info.mkdir, *(functools.partial(info.write_bytes, raw) for raw in malformed)):
+        if info.is_dir():
+            info.rmdir()
+        broken()
+        with pytest.raises(macos.AppNotFoundError, match="isn't an app"):
+            apps.uninstall("Chat", dry_run=True)
+        assert apps.installed() == []

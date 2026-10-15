@@ -33,7 +33,7 @@ def test_pdf_read_merge_extract_and_render(tmp_path):
 
     merged = macos.pdf.merge([document, document], tmp_path / "merged.pdf")
     assert macos.pdf.page_count(merged) == 4
-    reordered = macos.pdf.extract(document, [2, 1], tmp_path / "reordered.pdf")
+    reordered = macos.pdf.extract(document, tmp_path / "reordered.pdf", [2, 1])
     assert macos.pdf.text(reordered).startswith("Page two")
 
     with pytest.raises(ValueError, match="out of range"):
@@ -143,8 +143,8 @@ def test_pdf_metadata_rotate_and_encrypt(tmp_path):
     assert details.keywords == []
 
     # Rotating in place is safe: the output replaces the input only once written.
-    assert macos.pdf.rotate(document, 90, document, pages=[2]) == document
-    macos.pdf.rotate(document, -180, document)
+    assert macos.pdf.rotate(document, document, 90, pages=[2]) == document
+    macos.pdf.rotate(document, document, -180)
     with macos.pdf._open(document) as opened:
         rotations = [_objc.send(macos.pdf._page(opened, n), "rotation", restype=ctypes.c_long) for n in (1, 2)]
     assert rotations == [180, 270]
@@ -162,7 +162,7 @@ def test_pdf_redrawing_keeps_the_annotations(tmp_path):
     # Core Graphics draws a page without its annotations, which is how filled forms and notes once vanished.
     white = tmp_path / "white.png"
     white.write_bytes(rgb_png(300, 400, lambda x, y: (255, 255, 255)))
-    noted = macos.pdf.add_text(macos.pdf.from_images([white], tmp_path / "page.pdf"), "Received", tmp_path / "noted.pdf", size=40)
+    noted = macos.pdf.add_text(macos.pdf.from_images([white], tmp_path / "page.pdf"), tmp_path / "noted.pdf", "Received", size=40)
 
     def inked(document):
         """Whether the top-left corner, where the note is, holds anything but white."""
@@ -172,16 +172,16 @@ def test_pdf_redrawing_keeps_the_annotations(tmp_path):
         return macos.image.dominant_colors(crop, 2) != ["#ffffff"]
 
     assert inked(noted)
-    assert inked(macos.pdf.watermark(noted, "x", tmp_path / "marked.pdf", opacity=0.01))
+    assert inked(macos.pdf.watermark(noted, tmp_path / "marked.pdf", "x", opacity=0.01))
     assert inked(macos.pdf.ocr(noted, tmp_path / "searchable.pdf", redo=True))
-    assert inked(macos.pdf.sign(noted, white, tmp_path / "signed.pdf"))
+    assert inked(macos.pdf.sign(noted, tmp_path / "signed.pdf", white))
 
 
 def test_pdf_watermark_and_compress(tmp_path):
     document = _text_pdf(tmp_path, ["Page one says hello", "Page two says ola"])
-    macos.pdf.rotate(document, 90, document, pages=[2])
+    macos.pdf.rotate(document, document, 90, pages=[2])
 
-    marked = macos.pdf.watermark(document, "CONFIDENTIAL", tmp_path / "marked.pdf", color="#d00000")
+    marked = macos.pdf.watermark(document, tmp_path / "marked.pdf", "CONFIDENTIAL", color="#d00000")
 
     assert macos.pdf.page_count(marked) == 2
     assert macos.pdf.text(marked, pages=[1]).split("\n") == ["Page one says hello", "CONFIDENTIAL"]
@@ -264,11 +264,11 @@ def test_redact_removes_the_text(tmp_path):
     first.write_bytes(pdf_with_text([("Contrato de Ana", 72, 700), ("Souza, CPF 123.456.789-00", 72, 680)]))
     second.write_bytes(pdf_with_text([("Anexo sem dados", 72, 700)]))
     merged = macos.pdf.merge([first, second], tmp_path / "merged.pdf")
-    source = macos.pdf.set_bookmarks(merged, [("Contrato de Ana Souza", 1), ("Anexo", 2)], tmp_path / "in.pdf")
+    source = macos.pdf.set_bookmarks(merged, tmp_path / "in.pdf", [("Contrato de Ana Souza", 1), ("Anexo", 2)])
     before = macos.pdf.render(source, 2)
 
     cpf = re.compile(r"\d{3}\.\d{3}\.\d{3}-\d{2}")
-    done = macos.pdf.redact(source, ["ana souza", cpf], tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", ["ana souza", cpf])
     output = done.path
 
     assert done.matches == {"ana souza": 2, cpf.pattern: 1}  # the name: on the page, and in the bookmark
@@ -291,7 +291,7 @@ def test_redact_writes_nothing_when_a_target_is_missing(tmp_path):
     source = tmp_path / "in.pdf"
     source.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)]))
     with pytest.raises(ValueError, match="'Maria' isn't in the PDF, so nothing was written"):
-        macos.pdf.redact(source, ["Ana Souza", "Maria"], tmp_path / "out.pdf")
+        macos.pdf.redact(source, tmp_path / "out.pdf", ["Ana Souza", "Maria"])
     assert not (tmp_path / "out.pdf").exists()
 
 
@@ -300,14 +300,14 @@ def test_redact_a_rotated_page_and_a_form_field(tmp_path):
 
     rotated = tmp_path / "rotated.pdf"
     rotated.write_bytes(pdf_with_text([("CPF 123.456.789-00", 72, 700)], rotate=90))
-    output = macos.pdf.redact(rotated, "123.456.789-00", tmp_path / "rotated-out.pdf").path
+    output = macos.pdf.redact(rotated, tmp_path / "rotated-out.pdf", "123.456.789-00").path
     assert b"123.456" not in _raw_text(output)
     assert png_size(macos.pdf.render(output, 1, size=792)) == (792, 612)  # still turned as it was seen
 
     form = tmp_path / "form.pdf"
     pdf_form(form)
-    filled = macos.pdf.fill_form(form, {"Full name": "Ana Souza"}, tmp_path / "filled.pdf")
-    output = macos.pdf.redact(filled, "Ana Souza", tmp_path / "form-out.pdf").path
+    filled = macos.pdf.fill_form(form, tmp_path / "filled.pdf", {"Full name": "Ana Souza"})
+    output = macos.pdf.redact(filled, tmp_path / "form-out.pdf", "Ana Souza").path
     assert macos.pdf.form_fields(output) == [] and b"Souza" not in _raw_text(output)
 
 
@@ -324,7 +324,7 @@ def test_redact_keeps_the_crop_and_drops_what_it_hides(tmp_path):
 
     source = tmp_path / "cropped.pdf"
     source.write_bytes(pdf_with_text([("Ana Souza", 100, 500), ("Hidden margin note", 400, 50)], crop=(50, 300, 450, 700)))
-    output = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf").path
+    output = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza").path
     assert _crop(output) == _crop(source) == (400.0, 400.0)
     assert b"Hidden margin" not in _raw_text(output)
 
@@ -343,7 +343,7 @@ def test_redact_finds_a_target_only_in_the_metadata(tmp_path):
         _objc.send(document, "setDocumentAttributes:", attributes, argtypes=(_objc.id,), restype=None)
         pdf._save(document, source)
 
-    done = macos.pdf.redact(source, "Project Falcon", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Project Falcon")
 
     assert done.matches == {"Project Falcon": 1} and done.pages == {}  # no page to redraw
     assert macos.pdf.metadata(done.path).title == "\u2588" * 14 + " report"
@@ -355,9 +355,9 @@ def test_redact_keeps_the_other_annotations_in_the_picture(tmp_path):
 
     source = tmp_path / "in.pdf"
     source.write_bytes(pdf_with_text([("Signed by Ana Souza", 72, 700)]))
-    stamped = macos.pdf.add_text(source, "APPROVED", tmp_path / "stamped.pdf", page=1, position=(72, 400), size=36)
+    stamped = macos.pdf.add_text(source, tmp_path / "stamped.pdf", "APPROVED", page=1, position=(72, 400), size=36)
 
-    output = macos.pdf.redact(stamped, "Ana Souza", tmp_path / "out.pdf").path
+    output = macos.pdf.redact(stamped, tmp_path / "out.pdf", "Ana Souza").path
 
     seen = macos.vision.text(macos.pdf.render(output, 1, size=1600))
     assert "APPROVED" in seen and "Signed by" in seen and "Souza" not in seen
@@ -371,21 +371,21 @@ def test_redact_removes_hidden_text_and_counts_every_match(tmp_path, monkeypatch
     source = tmp_path / "hidden.pdf"
     source.write_bytes(pdf_with_text([("Visible line", 72, 700), ("Ana Souza", 72, 600)], invisible=[1]))
     assert "Ana Souza" in macos.pdf.text(source)
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
     assert done.pages == {1: 1} and b"Souza" not in _raw_text(done.path)
 
     # A match with no box to draw still has its page redrawn: that's what removes the text.
     found = pdf._redactions
     monkeypatch.setattr(pdf, "_redactions", lambda *args: (found(*args)[0], []))
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "boxless.pdf")
+    done = macos.pdf.redact(source, tmp_path / "boxless.pdf", "Ana Souza")
     assert done.pages == {1: 1} and b"Souza" not in _raw_text(done.path)
     monkeypatch.undo()
 
     # A comment holding a target twice counts twice.
     plain = tmp_path / "plain.pdf"
     plain.write_bytes(pdf_with_text([("Signed by Ana Souza", 72, 700)]))
-    noted = macos.pdf.add_text(plain, "Ana Souza, Ana Souza", tmp_path / "noted.pdf", page=1, position=(72, 400))
-    done = macos.pdf.redact(noted, "Ana Souza", tmp_path / "noted-out.pdf")
+    noted = macos.pdf.add_text(plain, tmp_path / "noted.pdf", "Ana Souza, Ana Souza", page=1, position=(72, 400))
+    done = macos.pdf.redact(noted, tmp_path / "noted-out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 3} and done.pages == {1: 3}
 
 
@@ -395,7 +395,7 @@ def test_redact_doesnt_join_an_annotations_properties(tmp_path):
 
     form = tmp_path / "form.pdf"
     pdf_form(form)
-    filled = macos.pdf.fill_form(form, {"Full name": "Souza"}, tmp_path / "filled.pdf")
+    filled = macos.pdf.fill_form(form, tmp_path / "filled.pdf", {"Full name": "Souza"})
     source = tmp_path / "noted.pdf"
     with pdf._open(filled) as document:
         for _, widget in pdf._widgets(document):
@@ -405,8 +405,8 @@ def test_redact_doesnt_join_an_annotations_properties(tmp_path):
 
     # "Ana" is the field's comment and "Souza" its value: "Ana Souza" is in neither.
     with pytest.raises(ValueError, match="'Ana Souza' isn't in the PDF"):
-        macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
-    assert macos.pdf.redact(source, "Souza", tmp_path / "out.pdf").matches == {"Souza": 1}
+        macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
+    assert macos.pdf.redact(source, tmp_path / "out.pdf", "Souza").matches == {"Souza": 1}
 
 
 def test_redact_searches_every_text_an_annotation_holds(tmp_path):
@@ -417,7 +417,7 @@ def test_redact_searches_every_text_an_annotation_holds(tmp_path):
     # A choice option and a radio state, nowhere in the page's text.
     form = tmp_path / "form.pdf"
     pdf_form(form)
-    done = macos.pdf.redact(form, "Large", tmp_path / "form-out.pdf")
+    done = macos.pdf.redact(form, tmp_path / "form-out.pdf", "Large")
     assert done.pages == {1: 1} and b"Large" not in _raw_text(done.path)
 
     # A comment whose author is the name, on a page that doesn't show it, while another page does.
@@ -441,7 +441,7 @@ def test_redact_searches_every_text_an_annotation_holds(tmp_path):
         _objc.send(pdf._page(document, 2), "addAnnotation:", note, argtypes=(_objc.id,), restype=None)
         pdf._save(document, source)
 
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
     assert done.pages == {1: 1, 2: 1} and b"Souza" not in _raw_text(done.path)
 
 
@@ -455,7 +455,7 @@ def test_redact_reads_the_whole_annotation_dictionary(tmp_path):
     )
     second.write_bytes(pdf_with_text([("Signed by Ana Souza", 72, 700)]))
     merged = macos.pdf.merge([first, second], tmp_path / "merged.pdf")
-    done = macos.pdf.redact(merged, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(merged, tmp_path / "out.pdf", "Ana Souza")
     assert done.pages == {1: 1, 2: 1} and b"Souza" not in _raw_text(done.path)
 
     # Rich-text contents (/RC), which PDFKit doesn't read: on a page left as it is, they must not stay behind.
@@ -470,7 +470,7 @@ def test_redact_reads_the_whole_annotation_dictionary(tmp_path):
         )
     )
     assert b"Ask Ana Souza" in rich.read_bytes() and macos.pdf.metadata(rich).title == "Ana Souza report"
-    done = macos.pdf.redact(rich, "Ana Souza", tmp_path / "rich-out.pdf")
+    done = macos.pdf.redact(rich, tmp_path / "rich-out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 1} and done.pages == {}
     assert b"Ask Ana" not in _raw_text(done.path) and b"Souza" not in _raw_text(done.path)
 
@@ -513,14 +513,14 @@ def _pdf_with_extras(page_text, xmp_creator=None, bookmark_link=None, xmp_date=N
 def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
     source = tmp_path / "in.pdf"
     source.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Ana Souza"))
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}  # the packet goes, but only the page counts
     assert b"Souza" not in _raw_text(done.path)
 
     # Named there alone (as PDF 2.0 would have it), a target is found, and the packet goes.
     alone = tmp_path / "alone.pdf"
     alone.write_bytes(_pdf_with_extras("Contract", xmp_creator="Ana Souza"))
-    done = macos.pdf.redact(alone, "Ana Souza", tmp_path / "alone-out.pdf")
+    done = macos.pdf.redact(alone, tmp_path / "alone-out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 1} and done.pages == {}
     assert b"Souza" not in _raw_text(done.path)
 
@@ -530,7 +530,7 @@ def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
     dated = tmp_path / "dated.pdf"
     dated.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_date="2026-10-13T09:00:00Z"))
     with pytest.raises(ValueError, match="isn't in the PDF"):
-        macos.pdf.redact(dated, re.compile(r"\d{4}-\d{2}-\d{2}"), tmp_path / "dated-out.pdf")
+        macos.pdf.redact(dated, tmp_path / "dated-out.pdf", re.compile(r"\d{4}-\d{2}-\d{2}"))
     assert not (tmp_path / "dated-out.pdf").exists()
     # Nor the toolkit's own date, or a step of the history, which tools write there too.
     for pattern in (r"\d{4}/\d{2}/\d{2}", r"application/\w+"):
@@ -538,26 +538,26 @@ def test_redact_drops_an_xmp_packet_that_holds_a_target(tmp_path):
             history = '<stEvt:parameters>from application/x-indesign to application/pdf</stEvt:parameters>'
             tooled = tmp_path / "tooled.pdf"
             tooled.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team", xmp_more=history))
-            macos.pdf.redact(tooled, re.compile(pattern), tmp_path / "tooled-out.pdf")
+            macos.pdf.redact(tooled, tmp_path / "tooled-out.pdf", re.compile(pattern))
 
     # What the document says is found, whatever its property is named: a custom ID, the creating tool.
     for said in ('<pdfx:PatientID>Ana Souza</pdfx:PatientID>', '<xmp:CreatorTool>Ana Souza</xmp:CreatorTool>'):
         custom = tmp_path / "custom.pdf"
         custom.write_bytes(_pdf_with_extras("Contract", xmp_more=said))
-        done = macos.pdf.redact(custom, "Ana Souza", tmp_path / "custom-out.pdf")
+        done = macos.pdf.redact(custom, tmp_path / "custom-out.pdf", "Ana Souza")
         assert done.matches == {"Ana Souza": 1} and b"Souza" not in _raw_text(done.path)
 
     # One that doesn't hold a target stays, as everything else that doesn't.
     kept = tmp_path / "kept.pdf"
     kept.write_bytes(_pdf_with_extras("Contract of Ana Souza", xmp_creator="Legal team"))
-    done = macos.pdf.redact(kept, "Ana Souza", tmp_path / "kept-out.pdf")
+    done = macos.pdf.redact(kept, tmp_path / "kept-out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 1} and b"Legal team" in _raw_text(done.path)
 
 
 def test_redact_drops_a_bookmark_link_that_holds_a_target(tmp_path):
     source = tmp_path / "in.pdf"
     source.write_bytes(_pdf_with_extras("Contract of Ana Souza", bookmark_link="https://example.com/?q=Ana Souza"))
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 2}  # the address, read as PDFKit gives it (Ana%20Souza), counts
     assert [mark.title for mark in macos.pdf.bookmarks(done.path)] == ["Profile"]  # the bookmark stays, without its link
     raw = _raw_text(done.path)
@@ -570,7 +570,7 @@ def test_redact_removes_a_target_only_in_the_cropped_away_part(tmp_path):
     source = tmp_path / "cropped.pdf"
     source.write_bytes(pdf_with_text([("Visible line", 72, 700), ("Ana Souza hidden", 72, 100)], crop=(0, 400, 612, 792)))
     assert macos.pdf.text(source) == "Visible line"  # the name isn't shown, but it's in the file
-    done = macos.pdf.redact(source, "Ana Souza", tmp_path / "out.pdf")
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "Ana Souza")
     assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
     assert b"Souza" not in _raw_text(done.path)
 
@@ -585,7 +585,7 @@ def test_redact_writes_nothing_when_a_target_would_get_through(tmp_path, monkeyp
     output.write_bytes(b"what was there")
     monkeypatch.setattr(pdf, "_flatten", lambda document, number, boxes: None)  # a redaction that missed
     with pytest.raises(macos.MacOSError, match=r"would still hold 'Ana Souza' \(in page 1\), so nothing was written"):
-        macos.pdf.redact(source, "Ana Souza", output)
+        macos.pdf.redact(source, output, "Ana Souza")
     assert output.read_bytes() == b"what was there"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["in.pdf", "out.pdf"]  # nothing left beside it
 
@@ -595,6 +595,6 @@ def test_redact_finds_a_name_typed_with_combining_accents(tmp_path):
 
     blank = tmp_path / "blank.pdf"
     blank.write_bytes(pdf_with_text([("Contract", 72, 700)]))
-    source = macos.pdf.watermark(blank, "Jos\xe9 Silva", tmp_path / "in.pdf")  # an é of its own
-    done = macos.pdf.redact(source, "José Silva", tmp_path / "out.pdf")  # e and a combining accent
+    source = macos.pdf.watermark(blank, tmp_path / "in.pdf", "Jos\xe9 Silva")  # an é of its own
+    done = macos.pdf.redact(source, tmp_path / "out.pdf", "José Silva")  # e and a combining accent
     assert done.matches == {"José Silva": 1} and done.pages == {1: 1}

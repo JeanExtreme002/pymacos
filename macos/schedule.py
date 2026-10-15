@@ -33,7 +33,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from ._files import write_atomically
 from ._system import LAUNCHCTL_TIMEOUT, add_note, launchd_disabled, launchd_user_domain, require_macos, run
@@ -215,63 +215,31 @@ def add(
     _check_name(name)
     if isinstance(args, (str, bytes)):
         raise TypeError("args must be a list of arguments, not a single string: use [{!r}]".format(args))
-    if isinstance(every, datetime.timedelta):
-        every = every.total_seconds()
     if every is not None and at is not None:
         raise ValueError("use either every or at, not both")
-    if every is not None:
-        if isinstance(every, bool) or not isinstance(every, (int, float)):
-            raise TypeError("every must be a number of seconds or a timedelta, not {!r}".format(every))
-        if not math.isfinite(every) or every < 1:
-            raise ValueError("every must be at least 1 second, not {}".format(every))
-        if every != int(every):
-            raise ValueError("every must be whole seconds (launchd counts seconds), not {}".format(every))
+    interval = _interval(every)
     if weekdays and at is None:
         raise ValueError("weekdays only apply with at")
     times, days = _times(at), _days(weekdays)
     watched = _watched(when_changed)
-    if every is None and not times and not at_login and not watched and not at_mount:
+    if interval is None and not times and not at_login and not watched and not at_mount:
         raise ValueError("say when to run it: every=, at=, at_login=True, when_changed= or at_mount=True")
     require_macos()
     source = Path(script).expanduser().absolute()
     if not source.is_file():
         raise FileNotFoundError(str(source))
-    if python is None:
-        interpreter = sys.executable
-    else:
-        chosen = Path(python).expanduser().absolute()
-        if not chosen.is_file():
-            raise FileNotFoundError(str(chosen))
-        interpreter = str(chosen)
-    for what, checked in (("script", source), ("Python", Path(interpreter) if python is not None else None)):
-        risk = _swappable(checked) if checked is not None else None
-        if risk:
-            warnings.warn(
-                "the job runs this {} as you, on every run: {}, so they could make it run their code".format(what, risk),
-                RuntimeWarning,
-                stacklevel=2,
-            )
+    interpreter = _interpreter(python)
+    _warn_if_swappable(source, Path(interpreter) if python is not None else None)
     log = _log(name)
     log.parent.mkdir(parents=True, exist_ok=True)
-    job = {
-        "Label": _PREFIX + name,
-        "ProgramArguments": [interpreter, str(source), *[str(arg) for arg in args]],
-        "WorkingDirectory": str(source.parent),
-        "StandardOutPath": str(log),
-        "StandardErrorPath": str(log),
-        # launchd's PATH is minimal: keep the caller's, so the script finds the same commands.
-        "EnvironmentVariables": {"PATH": _path(), "PYTHONUNBUFFERED": "1"},
-        "RunAtLoad": bool(at_login),
-    }
-    if every is not None:
-        job["StartInterval"] = int(every)
+    job = _agent(name, interpreter, source, args, log, at_login=at_login, at_mount=at_mount)
+    if interval is not None:
+        job["StartInterval"] = interval
     if times:
         moments = [{"Hour": hour, "Minute": minute} for hour, minute in times]
         job["StartCalendarInterval"] = [dict(moment, Weekday=day) for moment in moments for day in days] if days else moments
     if watched:
         job["WatchPaths"] = watched
-    if at_mount:
-        job["StartOnMount"] = True
     path = _plist(name)
     # Replacing a job: keep the old plist's bytes, so a failed bootstrap of
     # the new one can put the old job back rather than leave neither (and a
@@ -297,6 +265,62 @@ def add(
     if found is None:
         raise MacOSError("the job {!r} was added, but its file {} can't be read back".format(name, path))
     return found
+
+
+def _interval(every: Union[float, datetime.timedelta, None]) -> Optional[int]:
+    """``every`` as whole seconds, checked as launchd needs them; ``None`` when it wasn't given."""
+    if every is None:
+        return None
+    if isinstance(every, datetime.timedelta):
+        every = every.total_seconds()
+    if isinstance(every, bool) or not isinstance(every, (int, float)):
+        raise TypeError("every must be a number of seconds or a timedelta, not {!r}".format(every))
+    if not math.isfinite(every) or every < 1:
+        raise ValueError("every must be at least 1 second, not {}".format(every))
+    if every != int(every):
+        raise ValueError("every must be whole seconds (launchd counts seconds), not {}".format(every))
+    return int(every)
+
+
+def _interpreter(python: Optional[PathLike]) -> str:
+    """The Python the job runs with: ``python``, checked to exist, or this one."""
+    if python is None:
+        return sys.executable
+    chosen = Path(python).expanduser().absolute()
+    if not chosen.is_file():
+        raise FileNotFoundError(str(chosen))
+    return str(chosen)
+
+
+def _warn_if_swappable(source: Path, interpreter: Optional[Path]) -> None:
+    """Warn, at :func:`add`'s caller, when other users could change the script or the chosen Python it runs."""
+    for what, checked in (("script", source), ("Python", interpreter)):
+        risk = _swappable(checked) if checked is not None else None
+        if risk:
+            warnings.warn(
+                "the job runs this {} as you, on every run: {}, so they could make it run their code".format(what, risk),
+                RuntimeWarning,
+                stacklevel=3,  # past add(), at its caller
+            )
+
+
+def _agent(
+    name: str, interpreter: str, source: Path, args: Sequence[str], log: Path, *, at_login: bool, at_mount: bool
+) -> Dict[str, Any]:
+    """The launch agent for the job, as launchd reads it, without its schedule: :func:`add` adds that."""
+    job: Dict[str, Any] = {
+        "Label": _PREFIX + name,
+        "ProgramArguments": [interpreter, str(source), *[str(arg) for arg in args]],
+        "WorkingDirectory": str(source.parent),
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+        # launchd's PATH is minimal: keep the caller's, so the script finds the same commands.
+        "EnvironmentVariables": {"PATH": _path(), "PYTHONUNBUFFERED": "1"},
+        "RunAtLoad": bool(at_login),
+    }
+    if at_mount:
+        job["StartOnMount"] = True
+    return job
 
 
 _ADMIN_GROUP = 80  # the admin group's id on every Mac

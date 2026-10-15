@@ -9,9 +9,9 @@ Read, merge, split, rotate, encrypt and redact PDFs, or make them from images.
     macos.pdf.text("report.pdf")                    # all the text
     macos.pdf.text("report.pdf", pages=[1])         # just the first page
     macos.pdf.merge(["a.pdf", "b.pdf"], "both.pdf")
-    macos.pdf.extract("report.pdf", [1, 3], "summary.pdf")
+    macos.pdf.extract("report.pdf", "summary.pdf", [1, 3])
     macos.pdf.encrypt("report.pdf", "locked.pdf", password="1234")
-    macos.pdf.redact("contract.pdf", ["Jane Doe"], "public.pdf")
+    macos.pdf.redact("contract.pdf", "public.pdf", ["Jane Doe"])
 
 Uses PDFKit, the framework behind Preview. Page numbers start at 1, like in
 Preview.
@@ -317,11 +317,11 @@ def merge(inputs: Sequence[PathLike], output: PathLike, *, password: Optional[st
         return _save(merged, output)
 
 
-def extract(path: PathLike, pages: Iterable[int], output: PathLike, *, password: Optional[str] = None) -> Path:
+def extract(path: PathLike, output: PathLike, pages: Iterable[int], *, password: Optional[str] = None) -> Path:
     """
     Save the chosen ``pages`` (numbered from 1, in the order given) as a new PDF, and return its path.
 
-    Use it to split a PDF (``extract(path, [1], "first.pdf")``) or reorder its pages.
+    Use it to split a PDF (``extract(path, "first.pdf", [1])``) or reorder its pages.
     """
     numbers = list(pages)
     if not numbers:
@@ -335,8 +335,8 @@ def extract(path: PathLike, pages: Iterable[int], output: PathLike, *, password:
 
 def rotate(
     path: PathLike,
-    degrees: int,
     output: PathLike,
+    degrees: int,
     *,
     pages: Optional[Iterable[int]] = None,
     password: Optional[str] = None,
@@ -347,7 +347,7 @@ def rotate(
     Every page turns, or only ``pages`` (numbered from 1), each once even when
     listed twice. Handy for scans that came out sideways::
 
-        macos.pdf.rotate("scan.pdf", 90, "scan.pdf", pages=[2])
+        macos.pdf.rotate("scan.pdf", "scan.pdf", 90, pages=[2])
     """
     try:
         if isinstance(degrees, bool):
@@ -650,8 +650,8 @@ def _draw_invisible(
 
 def watermark(
     path: PathLike,
-    text: str,
     output: PathLike,
+    text: str,
     *,
     color: str = "#808080",
     opacity: float = 0.25,
@@ -664,8 +664,8 @@ def watermark(
     name... ``color`` is a hex color and ``opacity`` goes from 0.0
     (invisible) to 1.0. The text is sized to fit each page::
 
-        macos.pdf.watermark("contract.pdf", "DRAFT", "contract-draft.pdf")
-        macos.pdf.watermark("id.pdf", "Only for Acme Inc.", "id-acme.pdf", color="#d00000", opacity=0.3)
+        macos.pdf.watermark("contract.pdf", "contract-draft.pdf", "DRAFT")
+        macos.pdf.watermark("id.pdf", "id-acme.pdf", "Only for Acme Inc.", color="#d00000", opacity=0.3)
 
     The pages keep their look and their text; filled form fields, notes and
     stamps are redrawn as they appear, so they can't be edited any more, and
@@ -1008,8 +1008,8 @@ def _fields(document: int) -> List[FormField]:
 
 def fill_form(
     path: PathLike,
-    values: Mapping[str, Union[str, bool]],
     output: PathLike,
+    values: Mapping[str, Union[str, bool]],
     *,
     password: Optional[str] = None,
 ) -> Path:
@@ -1018,7 +1018,7 @@ def fill_form(
 
     ::
 
-        macos.pdf.fill_form("application.pdf", {"Full name": "Jane Doe", "Agree": True, "Plan": "Pro"}, "filled.pdf")
+        macos.pdf.fill_form("application.pdf", "filled.pdf", {"Full name": "Jane Doe", "Agree": True, "Plan": "Pro"})
 
     Text fields and choices take text; checkboxes ``True`` or ``False``; a
     group of radio buttons the option to choose. The names are those
@@ -1158,8 +1158,8 @@ def _origin(
 
 def sign(
     path: PathLike,
-    image: PathLike,
     output: PathLike,
+    image: PathLike,
     *,
     page: Optional[int] = None,
     position: Optional[Position] = None,
@@ -1175,9 +1175,9 @@ def sign(
 
     ::
 
-        macos.pdf.sign("contract.pdf", "signature.png", "signed.pdf")                   # last page, bottom right
-        macos.pdf.sign("form.pdf", "signature.png", "signed.pdf", page=1, position=(72, 120), width=180)
-        macos.pdf.sign("contract.pdf", "signature.png", "signed.pdf", near="Signature:")   # beside that text
+        macos.pdf.sign("contract.pdf", "signed.pdf", "signature.png")                   # last page, bottom right
+        macos.pdf.sign("form.pdf", "signed.pdf", "signature.png", page=1, position=(72, 120), width=180)
+        macos.pdf.sign("contract.pdf", "signed.pdf", "signature.png", near="Signature:")   # beside that text
 
     ``near`` puts it beside a text of the page, found as :func:`text`
     reads it (case doesn't matter): to its ``side``, ``"right"``, ``"left"``,
@@ -1249,8 +1249,8 @@ def sign(
 
 def add_text(
     path: PathLike,
-    text: str,
     output: PathLike,
+    text: str,
     *,
     page: Optional[int] = None,
     position: Optional[Position] = None,
@@ -1268,10 +1268,10 @@ def add_text(
 
     ::
 
-        macos.pdf.add_text("contract.pdf", "Received on 29/09/2026", "stamped.pdf")            # page 1, top left
-        macos.pdf.add_text("form.pdf", "Jane Doe", "filled.pdf", page=2, position=(120, 540), size=14)
-        macos.pdf.add_text("form.pdf", "Jane Doe", "filled.pdf", near="Name:")                  # right after that text
-        macos.pdf.add_text("draft.pdf", "Checked\\nby Ana", "notes.pdf", position="top_right", color="#c00000")
+        macos.pdf.add_text("contract.pdf", "stamped.pdf", "Received on 29/09/2026")            # page 1, top left
+        macos.pdf.add_text("form.pdf", "filled.pdf", "Jane Doe", page=2, position=(120, 540), size=14)
+        macos.pdf.add_text("form.pdf", "filled.pdf", "Jane Doe", near="Name:")                  # right after that text
+        macos.pdf.add_text("draft.pdf", "notes.pdf", "Checked\\nby Ana", position="top_right", color="#c00000")
 
     ``page`` is from 1; the first one by default. ``position``, ``near``,
     ``side`` and ``gap`` work as for :func:`sign`: a corner, ``margin`` points from
@@ -1412,8 +1412,8 @@ def bookmarks(path: PathLike, *, password: Optional[str] = None) -> List[Bookmar
 
 def set_bookmarks(
     path: PathLike,
-    marks: Sequence[Union[Bookmark, Tuple[str, int], Tuple[str, int, int]]],
     output: PathLike,
+    marks: Sequence[Union[Bookmark, Tuple[str, int], Tuple[str, int, int]]],
     *,
     password: Optional[str] = None,
 ) -> Path:
@@ -1422,12 +1422,12 @@ def set_bookmarks(
 
     ::
 
-        macos.pdf.set_bookmarks("book.pdf", [
+        macos.pdf.set_bookmarks("book.pdf", "book-with-contents.pdf", [
             ("Introduction", 1),
             ("Chapter 1", 3),
             ("1.1 Getting started", 4, 1),     # (title, page, level): a section of Chapter 1
             ("Chapter 2", 12),
-        ], "book-with-contents.pdf")
+        ])
 
     Each entry is ``(title, page)``, ``(title, page, level)`` or a
     :class:`Bookmark`; pages are from 1, and a level may go at most one
@@ -2338,8 +2338,8 @@ class Redaction:
 
 def redact(
     path: PathLike,
-    targets: Union[Target, Sequence[Target]],
     output: PathLike,
+    targets: Union[Target, Sequence[Target]],
     *,
     password: Optional[str] = None,
 ) -> Redaction:
@@ -2348,12 +2348,12 @@ def redact(
 
     ::
 
-        done = macos.pdf.redact("contract.pdf", ["Jane Doe", "123-45-6789"], "public.pdf")
+        done = macos.pdf.redact("contract.pdf", "public.pdf", ["Jane Doe", "123-45-6789"])
         done.matches   # {'Jane Doe': 3, '123-45-6789': 1}
         done.pages     # {1: 2, 4: 2}: the pages to look over
 
         ssn = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
-        macos.pdf.redact("list.pdf", [ssn], "public.pdf")      # every Social Security number
+        macos.pdf.redact("list.pdf", "public.pdf", [ssn])      # every Social Security number
 
     ``targets`` are texts, matched as whole words, ignoring case and any
     spacing or line break between them ("Ana" doesn't black out "Banana"),

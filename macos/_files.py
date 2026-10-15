@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Union
 
 from ._objc import NSUInteger
-from .errors import MacOSError
+from .errors import MacOSError, MainThreadError
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -126,7 +126,7 @@ def on_main_thread() -> bool:
 
 def require_main_thread(what: str) -> None:
     """
-    Raise :class:`~macos.MacOSError` unless this is the main thread.
+    Raise :class:`~macos.MainThreadError` unless this is the main thread.
 
     Some of Apple's frameworks work only there: AppKit's text views and
     printing, WebKit's HTML reader, and the callbacks sent to the main queue,
@@ -134,7 +134,7 @@ def require_main_thread(what: str) -> None:
     hang or crash the process, so this says so first.
     """
     if not on_main_thread():
-        raise MacOSError(
+        raise MainThreadError(
             "{} must run on the main thread: macOS only allows it there. Call it from the "
             "main thread of the program, not from a worker thread or an executor".format(what)
         )
