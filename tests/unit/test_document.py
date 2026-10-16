@@ -90,3 +90,38 @@ def test_the_utf8_check_reads_a_piece_at_a_time(monkeypatch, tmp_path):
     assert not document._is_utf8(text)
     text.write_bytes("caf\xe9".encode("latin-1"))
     assert not document._is_utf8(text)
+
+
+def test_the_gatekeeper_lets_through_the_page_alone(monkeypatch, tmp_path):
+    """With resources=False, WebKit asks before each load: only the page being read, as a file, is answered."""
+    from macos import document
+
+    page = tmp_path / "page.html"
+    page.write_text("<p>Hi</p>")
+    link = tmp_path / "link.html"
+    link.symlink_to(page)
+    urls = {
+        1: ("file", str(page)),
+        2: ("file", str(link)),  # the same file, by another name
+        3: ("file", str(tmp_path / "style.css")),
+        4: ("http", "/style.css"),
+        5: ("https", str(page)),  # the page's path, not as a file
+        6: (None, None),  # a request with no URL
+    }
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "URL":
+            return receiver if urls[receiver][0] else None
+        return (receiver, selector)
+
+    def pystring(answer):
+        receiver, selector = answer
+        return urls[receiver][0] if selector == "scheme" else urls[receiver][1]
+
+    monkeypatch.setattr(document._objc, "send", send)
+    monkeypatch.setattr(document._objc, "pystring", pystring)
+    monkeypatch.setitem(document._PAGES, 99, str(page.resolve()))
+
+    answered = {request: document._will_send(99, 0, 0, 0, request, 0, 0) for request in urls}
+    assert answered == {1: 1, 2: 2, 3: None, 4: None, 5: None, 6: None}
+    assert document._will_send(98, 0, 0, 0, 1, 0, 0) is None  # another load's gatekeeper: not its page

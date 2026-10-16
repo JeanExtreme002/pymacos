@@ -7,7 +7,7 @@ import zipfile
 import pytest
 
 import macos
-from tests.helpers import docx_with_table, png_size
+from tests.helpers import ON_GITHUB, docx_with_table, png_size
 
 
 @pytest.fixture
@@ -99,6 +99,11 @@ def web_server():
     thread.join()
 
 
+@pytest.mark.skipif(
+    ON_GITHUB,
+    reason="WebKit fetching from a local web server raises the Local Network prompt on GitHub's runners, which takes "
+    "the focus from the screen tests' window; the rule itself is unit-tested",
+)
 def test_html_resources_are_not_fetched_when_told_so(tmp_path, web_server):
     address, asked = web_server
     page = tmp_path / "page.html"
