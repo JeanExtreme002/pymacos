@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import re
+import signal
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -38,6 +39,7 @@ from ._system import (
     require_macos,
     restart_process,
     run as _run,
+    run_bytes,
 )
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
@@ -213,9 +215,8 @@ def idle_time() -> timedelta:
             run_heavy_job()
     """
     io = _iokit.lib()
-    # IOServiceGetMatchingService consumes the matching dictionary; 0 is the
-    # default main port.
-    service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOHIDSystem"))
+    # IOServiceGetMatchingService consumes the matching dictionary.
+    service = io.IOServiceGetMatchingService(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOHIDSystem"))
     if not service:
         raise MacOSError("the IOHIDSystem service is not available")
     try:
@@ -585,11 +586,15 @@ def mount_image(path: Union[str, "os.PathLike[str]"], *, timeout: float = 300.0)
         raise FileNotFoundError(str(image))
     # "Y" answers the license agreement some images show before mounting. -quiet would hide the
     # -plist answer too (it closes the output): the license's text before the plist is skipped instead.
-    output = _run(["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n", timeout=timeout)
+    # The answer as hdiutil wrote it (exact_newlines): the plist is parsed from its exact bytes, where the
+    # usual text mode would make U+FFFD of a byte that isn't UTF-8, and a LF of a CR, in a volume's name.
+    output = _run(
+        ["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n", timeout=timeout, exact_newlines=True
+    )
     start = output.find("<?xml")
     details: Any = None
     try:
-        details = plistlib.loads(output[start:].encode()) if start >= 0 else None
+        details = plistlib.loads(output[start:].encode("utf-8", "surrogateescape")) if start >= 0 else None
     except (plistlib.InvalidFileException, ValueError, ExpatError):  # cut short, or not a plist at all
         pass
     entities = details.get("system-entities") if isinstance(details, dict) else None
@@ -728,7 +733,7 @@ def lid_closed() -> bool:
     Raises :class:`~macos.errors.NotSupportedError` on a Mac without a lid.
     """
     io = _iokit.lib()
-    service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOPMrootDomain"))
+    service = io.IOServiceGetMatchingService(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOPMrootDomain"))
     if not service:
         raise MacOSError("the IOPMrootDomain service is not available")
     try:
@@ -1929,8 +1934,8 @@ def gpu_usage() -> List[GPUUsage]:
     require_macos()
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
-    # The graphics drivers register as IOAccelerator; 0 is kIOMainPortDefault.
-    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator))
+    # The graphics drivers register as IOAccelerator.
+    status = io.IOServiceGetMatchingServices(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator))
     if status != 0:  # a Mac without a GPU driver still answers, with an empty iterator: this is IOKit failing
         raise MacOSError("could not list the graphics processors (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []
@@ -2004,10 +2009,11 @@ def disk_health() -> List[DiskHealth]:
     import plistlib
 
     require_macos()
-    listed = plistlib.loads(_run(["diskutil", "list", "-plist", "physical"], timeout=_DISKUTIL_TIMEOUT).encode())
+    # The plists as diskutil wrote them: a disk's name may hold a CR, which text mode would turn into a LF.
+    listed = plistlib.loads(run_bytes(["diskutil", "list", "-plist", "physical"], timeout=_DISKUTIL_TIMEOUT))
     disks = []
     for device in listed.get("WholeDisks", []):
-        info = plistlib.loads(_run(["diskutil", "info", "-plist", device], timeout=_DISKUTIL_TIMEOUT).encode())
+        info = plistlib.loads(run_bytes(["diskutil", "info", "-plist", device], timeout=_DISKUTIL_TIMEOUT))
         status = str(info.get("SMARTStatus") or "").lower()
         disks.append(
             DiskHealth(
@@ -2261,9 +2267,15 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
         stopped = False  # by us, at the limit: not a failure
         read_all = False  # its output ended, so it's ending by itself: nothing to kill
         expired = threading.Event()
+        # The timer against the end of the loop: fired once the output had all been read, it would call
+        # the read out of time, and kill a command that had ended. read_all is set, and read here, under it.
+        ending = threading.Lock()
 
         def expire() -> None:
-            expired.set()
+            with ending:
+                if read_all:
+                    return
+                expired.set()
             reader.kill()  # its output ends, and so does the loop below
 
         timer = threading.Timer(timeout, expire) if timeout is not None else None
@@ -2278,7 +2290,8 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
                     if limit is not None and len(entries) >= limit:
                         stopped = True
                         break
-            read_all = not stopped
+            with ending:
+                read_all = not stopped
         finally:
             if timer is not None:
                 timer.cancel()
@@ -2291,7 +2304,9 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
             reader.stdout.close()
         errors_file.seek(0)
         errors = errors_file.read().decode("utf-8", "replace")
-    if expired.is_set() and not stopped:
+    # Out of time only if the kill is what ended the output: fired as log show ended by itself (its last
+    # line read, its exit not yet seen), the timer killed a process that was done, and all was read.
+    if expired.is_set() and not stopped and reader.returncode == -signal.SIGKILL:
         raise CommandTimeoutError(args, timeout or 0)
     if not stopped and reader.returncode != 0:
         raise CommandError(args, reader.returncode, errors)
@@ -2358,7 +2373,7 @@ def usb_devices() -> List[USBDevice]:
     require_macos()
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
-    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator))
+    status = io.IOServiceGetMatchingServices(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator))
     if status != 0:  # no USB device is an empty iterator, not an error: this is IOKit failing
         raise MacOSError("could not list the USB devices (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []

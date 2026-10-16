@@ -27,7 +27,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Callable, Deque, Dict, List, Optional, Union, cast
 
-from . import _cf, _objc
+from . import _cf, _files, _objc
 from ._objc import BOOL, NSInteger
 from ._system import framework, require_macos
 from .errors import MainThreadError
@@ -53,6 +53,7 @@ _clicks: Deque[int] = deque()  # tags of the menu items clicked, run by run() af
 _calls: "OrderedDict[object, Callable[[], None]]" = OrderedDict()
 _calls_lock = threading.Lock()
 _actions: Dict[int, "MenuItem"] = {}
+# Every Item alive: kept so their status items and targets stay, until the Item is removed.
 _items: List["Item"] = []
 _timers: List["Timer"] = []
 _next_tag = [1]
@@ -73,7 +74,7 @@ def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
     rest of the process. Queued, a change with a ``key`` replaces the one with
     that key still waiting: only for setters, whose last value is all that counts.
     """
-    if threading.current_thread() is threading.main_thread():
+    if _files.on_main_thread():  # the process's own, the one AppKit uses: not Python's idea of it in an embedder
         with _objc.autorelease_pool():
             change()
     else:
@@ -86,7 +87,7 @@ def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
 
 def _require_main_thread(what: str) -> None:
     require_macos()
-    if threading.current_thread() is not threading.main_thread():
+    if not _files.on_main_thread():
         raise MainThreadError("{} must run on the main thread, as AppKit requires".format(what))
 
 

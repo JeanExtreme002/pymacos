@@ -20,6 +20,7 @@ import ctypes
 import math
 import operator
 import os
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -140,9 +141,7 @@ def _io() -> ctypes.CDLL:
 
 def _source(path: PathLike) -> int:
     """An owned ``CGImageSource`` for ``path``."""
-    resolved = Path(path).expanduser().absolute()
-    if not resolved.exists():
-        raise FileNotFoundError(str(resolved))
+    resolved = _files.existing(path)
     with _cf.owned(_cf.file_url(str(resolved))) as url:
         source = _io().CGImageSourceCreateWithURL(url, None)
     if not source or not _io().CGImageSourceGetCount(source):
@@ -654,8 +653,17 @@ def rotate(source: PathLike, output: PathLike, degrees: int, *, quality: Optiona
     """
     Turn an image clockwise by ``degrees`` (90, 180 or 270; negative turns counter-clockwise).
 
-    The metadata is kept and ``output``'s extension sets the format.
+    The metadata is kept and ``output``'s extension sets the format. ``True``
+    or ``False`` as ``degrees`` isn't an angle: it's taken as 1 or 0 today, and
+    warns (``DeprecationWarning``); pymacos 2.0 will raise :class:`ValueError`.
     """
+    if isinstance(degrees, bool):
+        warnings.warn(
+            "macos.image.rotate() takes an int multiple of 90 as degrees, not {!r}: it's taken as {} today, "
+            "and pymacos 2.0 will raise ValueError".format(degrees, int(degrees)),
+            DeprecationWarning,
+            stacklevel=2,
+        )
     try:
         degrees = operator.index(degrees)  # an int, or an integer of numpy's: a float would fail later, unclearly
     except TypeError:
@@ -1003,9 +1011,7 @@ def replace_background(
 
         macos.image.replace_background("me.jpg", "beach.jpg", "me-at-the-beach.jpg")
     """
-    scenery_path = Path(background).expanduser().absolute()
-    if not scenery_path.exists():
-        raise FileNotFoundError(str(scenery_path))
+    scenery_path = _files.existing(background)
 
     def change(picture: int) -> int:
         picture = _to_origin(picture)
@@ -1165,10 +1171,7 @@ def contact_sheet(
         raise ValueError("columns and size must be positive, and gap not negative")
     target, kind = _output(output)
     red, green, blue = _hex_color(background)
-    sources = [Path(image).expanduser().absolute() for image in images]
-    for source in sources:
-        if not source.exists():
-            raise FileNotFoundError(str(source))
+    sources = [_files.existing(image) for image in images]
     rows = (len(sources) + columns - 1) // columns
     width = columns * size + (columns + 1) * gap
     height = rows * size + (rows + 1) * gap

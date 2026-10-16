@@ -20,6 +20,7 @@ Preview.
 import ctypes
 import html
 import math
+import mmap
 import operator
 import os
 import re
@@ -98,9 +99,7 @@ class Metadata:
 @contextmanager
 def _open(path: PathLike, password: Optional[str] = None) -> Iterator[int]:
     """Yield a ``PDFDocument`` for ``path``, inside an autorelease pool."""
-    resolved = Path(path).expanduser().absolute()
-    if not resolved.exists():
-        raise FileNotFoundError(str(resolved))
+    resolved = _files.existing(path)
     framework("PDFKit")
     with _objc.autorelease_pool():
         document = _objc.send(_objc.cls("PDFDocument"), "alloc")
@@ -141,7 +140,8 @@ def text(path: PathLike, pages: Optional[Iterable[int]] = None, *, password: Opt
     Return the text of a PDF, or only of ``pages`` (numbered from 1), one page after another.
 
     Scanned pages have no text layer and give ``""``: read those with
-    :func:`render` and :func:`macos.vision.text`.
+    :func:`render` and :func:`macos.vision.text`. An empty ``pages`` (``[]``)
+    is no page, and gives ``""``.
     """
     with _open(path, password) as document:
         numbers = list(pages) if pages is not None else range(1, _count(document) + 1)
@@ -266,16 +266,29 @@ def _rebuilt(document: int) -> int:
     return plain
 
 
-def _copy_outline(source: int, outline: int, target: int, copy: int) -> None:
-    """Rebuild the entries under ``outline`` (of ``source``) under ``copy``, pointing to ``target``'s pages."""
+def _copy_outline(source: int, outline: int, target: int, copy: int, indexes: Optional[Dict[int, int]] = None) -> None:
+    """
+    Rebuild the entries under ``outline`` (of ``source``) under ``copy``, pointing to ``target``'s pages.
+
+    ``indexes`` remembers what ``indexForPage:`` answered for each page object (the document hands out
+    the same one for a page each time): it walks the pages on every call, and many bookmarks point to
+    the same few pages.
+    """
     pages = _count(target)
+    if indexes is None:
+        indexes = {}
     for index in range(int(_objc.send(outline, "numberOfChildren", restype=NSUInteger))):
         child = _objc.send(outline, "childAtIndex:", index, argtypes=(NSUInteger,))
         entry = _objc.new("PDFOutline")
         _objc.send(entry, "setLabel:", _objc.send(child, "label"), argtypes=(_objc.id,), restype=None)
         destination = _objc.send(child, "destination")
         page = _objc.send(destination, "page") if destination else None
-        at = int(_objc.send(source, "indexForPage:", page, argtypes=(_objc.id,), restype=NSUInteger)) if page else pages
+        if not page:
+            at = pages
+        elif page in indexes:
+            at = indexes[page]
+        else:  # NSNotFound (past `pages`) for a page of another document
+            at = indexes[page] = int(_objc.send(source, "indexForPage:", page, argtypes=(_objc.id,), restype=NSUInteger))
         if at < pages:
             # The same spot, on the copy of its page: the old destination points into the encrypted document.
             point = _objc.send(destination, "point", restype=_objc.CGPoint)
@@ -295,7 +308,7 @@ def _copy_outline(source: int, outline: int, target: int, copy: int) -> None:
         _objc.send(entry, "setIsOpen:", _objc.send(child, "isOpen", restype=BOOL), argtypes=(BOOL,), restype=None)
         count = int(_objc.send(copy, "numberOfChildren", restype=NSUInteger))
         _objc.send(copy, "insertChild:atIndex:", entry, count, argtypes=(_objc.id, NSUInteger), restype=None)
-        _copy_outline(source, child, target, entry)
+        _copy_outline(source, child, target, entry, indexes)
 
 
 def merge(inputs: Sequence[PathLike], output: PathLike, *, password: Optional[str] = None) -> Path:
@@ -345,7 +358,8 @@ def rotate(
     Turn pages clockwise by ``degrees`` (90, 180 or 270; negative turns counter-clockwise) and save to ``output``.
 
     Every page turns, or only ``pages`` (numbered from 1), each once even when
-    listed twice. Handy for scans that came out sideways::
+    listed twice; an empty ``pages`` (``[]``) turns none, and saves the PDF as
+    it is. Handy for scans that came out sideways::
 
         macos.pdf.rotate("scan.pdf", "scan.pdf", 90, pages=[2])
     """
@@ -1655,12 +1669,11 @@ def images(
     compressing them again; the others become PNG (or TIFF, for CMYK). A
     picture used on several pages is saved once. Pictures in rare
     encodings (indexed colors, 1-bit masks...) are skipped. ``pages``
-    (numbered from 1) keeps only those pages' pictures. To save whole
-    pages as images, see :func:`render`.
+    (numbered from 1) keeps only those pages' pictures; an empty ``pages``
+    (``[]``) saves none, and returns ``[]``. To save whole pages as images,
+    see :func:`render`.
     """
-    source = Path(path).expanduser().absolute()
-    if not source.exists():
-        raise FileNotFoundError(str(source))
+    source = _files.existing(path)
     target = Path(folder).expanduser().absolute()
     graphics = _pdf_objects()
     document = _open_for_drawing(source, password)
@@ -2239,10 +2252,12 @@ def _strings(data: bytes) -> Iterator[str]:
         yield text
 
 
-def _file_strings(data: bytes) -> Iterator[str]:
+def _file_strings(data: Union[bytes, mmap.mmap]) -> Iterator[str]:
     """
     Every string a PDF file's objects hold, as written: in its body, and in its streams of objects
     (inflated when compressed). Not those of the pages' drawing: their text is read through PDFKit.
+
+    ``data`` may be the file mapped into memory: only the parts between its streams are copied.
     """
     outside = []
     position = 0
@@ -2316,7 +2331,12 @@ def _leftovers(path: Path, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]) ->
         if root:
             walk(root)
         look("the bookmarks", marks)
-    look("the file's objects", list(_file_strings(path.read_bytes())))
+    # Mapped, not read: the whole file would otherwise be held in memory, on top of PDFKit's own copy.
+    with open(str(path), "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size:
+            with mmap.mmap(handle.fileno(), size, access=mmap.ACCESS_READ) as data:
+                look("the file's objects", list(_file_strings(data)))
     return left
 
 

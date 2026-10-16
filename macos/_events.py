@@ -393,4 +393,9 @@ class _Listening:
                 pass
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Collected at interpreter shutdown, with CoreFoundation or the modules it needs already
+            # torn down: nothing left to close, and "Exception ignored in __del__" would only be noise.
+            pass

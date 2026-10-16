@@ -72,7 +72,8 @@ def replacing(target: Path) -> Iterator[Path]:
     The file gets the permissions ``target`` had, when it exists, or those of
     any new file (0o666 less the umask): not the private 0o600 of a
     temporary file. On an error, or when nothing was written, ``target`` is
-    left as it was and the temporary folder goes.
+    left as it was and the temporary folder goes; the folders made for a
+    ``target`` in a folder that didn't exist stay.
 
     A symbolic link at ``target`` stays one: the file it points to is the one
     replaced. The temporary file keeps ``target``'s own name all the same, so

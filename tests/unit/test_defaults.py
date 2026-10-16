@@ -198,3 +198,55 @@ def test_defaults_restored_puts_back_a_value_that_only_changed_type(monkeypatch)
     with macos.defaults.restored("com.example.app"):
         pass
     assert written == []  # nothing changed: nothing written
+
+
+@pytest.mark.parametrize("domain", ["/tmp/x", "../x", "evil/sub", "~/x", "/"])
+def test_defaults_refuse_a_domain_that_is_a_path(monkeypatch, domain):
+    # CFPreferences takes "/tmp/x" for /tmp/x.plist and "evil/sub" for ~/Library/Preferences/evil/sub.plist:
+    # a domain from user input would write any file. Refused before CoreFoundation is asked anything.
+    from macos import defaults
+
+    monkeypatch.setattr(defaults, "_preferences", lambda: pytest.fail("CoreFoundation asked about a path"))
+    calls = [
+        lambda: macos.defaults.read(domain, "key"),
+        lambda: macos.defaults.read(domain),
+        lambda: macos.defaults.write(domain, "key", 1),
+        lambda: macos.defaults.delete(domain, "key"),
+        lambda: macos.defaults.keys(domain),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="not a path"):
+            call()
+    with pytest.raises(ValueError, match="not a path"):
+        with macos.defaults.restored(domain):
+            pass
+    with pytest.raises(ValueError, match="not a path"):
+        with macos.defaults.restored((domain, "key")):
+            pass
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "com.apple.dock",
+        "NSGlobalDomain",
+        "-g",
+        "-globalDomain",
+        ".GlobalPreferences",
+        "com.apple.driver.AppleBluetoothMultitouch.trackpad",
+        "com.apple.print.custompresets.forprinter.Brother_HL",
+        "com.github.pymacos.test-123",
+    ],
+)
+def test_defaults_take_the_global_names_and_bundle_ids(monkeypatch, domain):
+    from macos import defaults
+
+    class Accepted(Exception):
+        """The check let the domain through: CoreFoundation is asked next."""
+
+    monkeypatch.setattr(defaults, "_preferences", lambda: (_ for _ in ()).throw(Accepted()))
+    monkeypatch.setattr(defaults._cf, "from_python", lambda value: 0)  # write() converts the value first: not on Linux
+    with pytest.raises(Accepted):
+        macos.defaults.read(domain, "key")
+    with pytest.raises(Accepted):
+        macos.defaults.write(domain, "key", 1, current_host=True)

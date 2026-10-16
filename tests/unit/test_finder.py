@@ -460,3 +460,74 @@ def test_a_rescan_finds_a_copy_by_its_birth_though_it_keeps_the_original_s_mtime
 
     monkeypatch.setattr(finder.os, "lstat", lstat)
     assert finder._changed_since(tmp_path, since, "*.pdf", True, None) == finder.Event(tmp_path / "report.pdf", "created", False)
+
+
+def test_file_urls_round_trip_through_the_preferences():
+    from macos import finder
+
+    url = finder._file_url("/Users/me/My Projects/ação")
+    assert url == "file:///Users/me/My%20Projects/a%C3%A7%C3%A3o/"
+    assert finder._url_path(url) == "/Users/me/My Projects/ação/"
+
+
+def test_trash_says_when_macos_does_not_say_where(monkeypatch, tmp_path):
+    from macos import finder
+
+    file = tmp_path / "old.log"
+    file.write_text("old")
+    answers = {"where": None}
+
+    class ObjC:
+        id = object
+
+        def cls(self, name):
+            return 1
+
+        def file_url(self, path):
+            return 2
+
+        def pystring(self, obj):
+            return obj
+
+        def autorelease_pool(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def send(self, receiver, selector, *args, **kwargs):
+            if selector == "trashItemAtURL:resultingItemURL:error:":
+                args[1]._obj.value = 5 if answers["where"] else None  # the resulting URL, or none
+                return True
+            return {"path": answers["where"]}.get(selector, 1)
+
+    monkeypatch.setattr(finder, "_objc", ObjC())
+    with pytest.raises(macos.MacOSError, match="moved to the Trash, but macOS didn't say where"):
+        finder.trash(file)
+    answers["where"] = "/Users/me/.Trash/old.log"
+    assert finder.trash(file) == Path("/Users/me/.Trash/old.log")
+
+
+def test_set_desktop_view_leaves_the_sort_alone_unless_asked(monkeypatch):
+    from macos import defaults, finder
+
+    store, restarts = {}, []
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, default=None: store.get(key, default))
+    monkeypatch.setattr(defaults, "write", lambda domain, key, value: store.__setitem__(key, value))
+    monkeypatch.setattr(finder, "restart", lambda: restarts.append(1))
+
+    def icons():
+        return store["DesktopViewSettings"]["IconViewSettings"]
+
+    finder.set_desktop_view(icon_size=48)
+    assert icons() == {"iconSize": 48.0}  # None is a value of sort (placed freely): it can't mean "as it is"
+    finder.set_desktop_view(sort=None)
+    assert icons()["arrangeBy"] == "none"
+    finder.set_desktop_view(sort="kind")
+    assert icons()["arrangeBy"] == "kind"
+    finder.set_desktop_view(text_size=12, sort=False)  # what the default was: still leaves it alone
+    assert icons()["arrangeBy"] == "kind" and icons()["textSize"] == 12.0
+    with pytest.raises(ValueError, match="sort must be one of"):
+        finder.set_desktop_view(sort=True)
+    with pytest.raises(ValueError, match="say what to change"):
+        finder.set_desktop_view(sort=False)
+    assert repr(finder._UNCHANGED) == "<unchanged>" and len(restarts) == 4

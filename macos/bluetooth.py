@@ -202,6 +202,14 @@ def _connection(target: Union[str, Device], selector: str, verb: str, connected:
     device = _find(target)
     if not power():
         raise MacOSError("Bluetooth is off; turn it on with macos.bluetooth.set_power(True)")
+    if not device.address:
+        # devices() lists a few accessories without an address (see there): IOBluetoothDevice would take "" and
+        # answer nothing, which read as macOS not knowing a device it had just listed.
+        raise MacOSError(
+            "macOS lists {!r} without a Bluetooth address, so it can't be {} from here: use the Bluetooth menu".format(
+                device.name, "connected" if connected else "disconnected"
+            )
+        )
     with _objc.autorelease_pool():
         handle = _objc.send(
             _objc.cls("IOBluetoothDevice"),

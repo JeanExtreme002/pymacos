@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.keyboard`. They run on any platform."""
 
+import warnings
+
 import pytest
 
 import macos
@@ -361,6 +363,92 @@ def test_keys_held_on_one_thread_do_not_reach_another(fake_events):
     assert clicked.is_set()
     clicks = [event for event in fake_events.posted if event["kind"] != "key"]
     assert clicks and all(event["flags"] == 0 for event in clicks)
+
+
+def _watching(monkeypatch, layout, text=""):
+    """watch()'s converter, with Core Graphics answering ``text`` for every key, and ``layout`` as the layout read."""
+    import ctypes
+
+    from macos import _events
+
+    class Graphics:
+        def CGEventGetIntegerValueField(self, event, field):
+            return event[0] if field == macos.keyboard._KEYCODE else 0
+
+        def CGEventGetFlags(self, event):
+            return event[1]
+
+        def CGEventKeyboardGetUnicodeString(self, event, size, length, chars):
+            units = text.encode("utf-16-le")
+            ctypes.memmove(chars, units, len(units))
+            length._obj.value = len(units) // 2
+
+    monkeypatch.setattr(_events, "graphics", lambda: Graphics())
+    monkeypatch.setattr(macos.keyboard, "_layout", layout)
+    monkeypatch.setattr(_events, "listen", lambda kinds, convert, timeout, denied: convert)
+    return macos.keyboard.watch()
+
+
+def test_watch_reports_fn_but_not_on_the_keys_macos_flags_with_it_by_itself(monkeypatch):
+    fn, cmd = 1 << 23, 1 << 20
+    convert = _watching(monkeypatch, lambda: {"k": (40, False)}, text="k")
+
+    assert convert(10, (40, fn | cmd)).shortcut == "fn+cmd+k"  # Fn really held: press() needs it too
+    assert convert(10, (96, fn)).shortcut == "f5"  # macOS adds Fn to F5 on its own: "f5" is how press() spells it
+    assert convert(10, (123, fn | cmd)).shortcut == "cmd+left"
+
+
+def test_watch_off_the_main_thread_warns_and_names_the_keys_by_what_they_type(monkeypatch):
+    def unread():
+        raise macos.MainThreadError("the keyboard layout in use (French) can only be read on the main thread")
+
+    with pytest.warns(RuntimeWarning, match="can only be read on the main thread.*names the keys by what they type"):
+        convert = _watching(monkeypatch, unread, text="\x0b")  # what Ctrl+K types: a control character
+    ctrl = 1 << 18
+    key = convert(10, (40, ctrl))
+    assert (key.key, key.text, key.shortcut) == ("k", "", "ctrl+k")  # the letter, as press() spells it, not "key40"
+
+    with pytest.warns(RuntimeWarning):
+        convert = _watching(monkeypatch, unread, text="\x1f")  # Ctrl+-: no letter stands for it
+    assert convert(10, (27, ctrl)).key == "key27"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the layout known: nothing to warn about
+        assert _watching(monkeypatch, lambda: {"k": (40, False)}, text="\x0b")(10, (40, ctrl)).key == "k"
+
+
+def test_key_name_tables_agree_where_they_overlap():
+    kb = macos.keyboard
+    # Each of the three tables spells the keys and the modifiers it has in common with press() the same way.
+    for alias, name in kb._HID_ALIASES.items():
+        if alias in kb._KEYS or alias in kb._MODIFIERS:
+            assert (kb._KEYS.get(alias), kb._MODIFIERS.get(alias)) == (kb._KEYS.get(name), kb._MODIFIERS.get(name)), alias
+    for alias, name in kb._SHORTCUT_MODIFIER_ALIASES.items():
+        assert kb._MODIFIERS[alias] == kb._MODIFIERS[name]
+    assert {name for name, _ in kb._SHORTCUT_MODIFIERS} | set(kb._SHORTCUT_MODIFIER_ALIASES) == set(kb._MODIFIERS) - {"fn"}
+    for name, code in kb._KEYS.items():
+        for other, other_code in kb._KEYS.items():
+            if other_code == code:  # the same key under two names ("esc", "escape"): the same everywhere
+                assert kb._SHORTCUT_KEYS.get(name) == kb._SHORTCUT_KEYS.get(other), (name, other)
+                assert kb._hid_code(name) == kb._hid_code(other), (name, other)
+    # Every key press() names can be remapped and be a menu shortcut, but Caps Lock, which no menu takes.
+    assert set(kb._KEYS) <= set(kb._HID_CODES) | set(kb._HID_ALIASES)
+    assert set(kb._MODIFIERS) <= set(kb._HID_CODES) | set(kb._HID_ALIASES)
+    assert set(kb._KEYS) - {"caps_lock"} <= set(kb._SHORTCUT_KEYS)
+    assert set(kb._ALIASES) <= set(kb._SHORTCUT_KEYS)
+    assert kb._decode_shortcut(kb._encode_shortcut("cmd+minus")) == "cmd+-"  # as press() takes it too
+    assert kb._decode_shortcut(kb._encode_shortcut("cmd+help")) == "cmd+help"
+    assert kb._hid_code("help") == kb._HID_PAGE | 0x75
+
+
+def test_the_main_thread_is_the_process_s_own(monkeypatch):
+    # In an embedder, Python's "main" thread may not be the process's: pthread's answer is the one that counts.
+    monkeypatch.setattr(macos.keyboard._files, "on_main_thread", lambda: False)
+    with pytest.raises(macos.MainThreadError, match="only works on the main thread"):
+        macos.keyboard.layout()
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {})
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.French")
+    with pytest.raises(macos.MainThreadError, match="main thread"):
+        macos.keyboard._layout()  # the other threads' path, though threading would call this one the main thread
 
 
 def test_layouts_only_on_the_main_thread():

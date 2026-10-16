@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import _capture, _files, _objc
-from ._system import framework
+from ._system import framework, UnfinishedInterrupt
 from .errors import MacOSError
 
 __all__ = ["Camera", "devices", "photo", "record", "has_permission", "request_permission"]
@@ -275,8 +275,10 @@ def photo(path: Optional[PathLike] = None, *, camera: Union[str, Camera, None] =
 
     ``path``'s extension sets the format (``.jpg``, ``.png``, ``.heic``,
     ``.tiff``); without ``path``, a temporary ``.jpg`` is made, and deleting
-    it is up to you. ``camera`` is a :class:`Camera`, its id, or its name
-    (or part of it); by default, the default camera.
+    it is up to you. The camera takes the photo as a JPEG, which the other
+    formats are converted from: a ``.png`` or ``.tiff`` is no sharper than
+    the ``.jpg``, only bigger. ``camera`` is a :class:`Camera`, its id, or its
+    name (or part of it); by default, the default camera.
 
     The camera turns on for about a second first, so the exposure settles.
     Needs the Camera permission, which macOS asks for the first time::
@@ -346,8 +348,11 @@ def record(
         macos.camera.record("hello.mov", 5)
         macos.video.convert("hello.mov", "hello.mp4", quality="medium")
 
-    Ctrl-C stops the recording early and keeps what was recorded until then.
-    If the recording fails, a file already at ``path`` stays as it was.
+    Ctrl-C stops the recording early and keeps what was recorded until then:
+    the movie is finished first, then the ``KeyboardInterrupt`` goes on. When
+    the camera then fails to finish it, the ``KeyboardInterrupt`` still goes
+    on (one that says the recording is unfinished) and nothing is saved. If
+    the recording fails, a file already at ``path`` stays as it was.
     """
     if seconds <= 0:
         raise ValueError("seconds must be positive, not {}".format(seconds))
@@ -413,7 +418,14 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
                 _objc.send(output, "stopRecording", restype=None)
             # Waited for even after Ctrl-C: the movie is only written out once the recorder reports it done.
             # A long recording takes longer to close (its last samples, its index): allow for it.
-            _wait(delegate, "video", _TIMEOUT + seconds / 10)
+            try:
+                _wait(delegate, "video", _TIMEOUT + seconds / 10)
+            except MacOSError as failure:
+                if interrupted is not None:
+                    # The Ctrl-C goes on, not a camera failure: a loop that retries on MacOSError must still
+                    # stop. As a KeyboardInterrupt that says the movie wasn't finished, like screen.record().
+                    raise UnfinishedInterrupt(*interrupted.args) from failure
+                raise
         finally:
             _forget(delegate)
             _objc.send(session, "stopRunning", restype=None)

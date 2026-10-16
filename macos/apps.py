@@ -87,6 +87,20 @@ def _handle(pid: int) -> Optional[int]:
     )
 
 
+def _handles_with_bundle_id(bundle_id: str) -> List[int]:
+    """The ``NSRunningApplication`` of each live app with ``bundle_id``: one question to LaunchServices, not a scan."""
+    handles = _objc.nsarray(
+        _objc.send(
+            _running_application_class(),
+            "runningApplicationsWithBundleIdentifier:",
+            _objc.nsstring(bundle_id),
+            argtypes=(_objc.id,),
+        )
+    )
+    # One that has quit may still be listed for a moment: it can't be asked anything.
+    return [handle for handle in handles if not _objc.send(handle, "isTerminated", restype=BOOL)]
+
+
 def _handles(include_background: bool) -> Iterator[int]:
     """
     Yield an ``NSRunningApplication`` for every running app.
@@ -291,30 +305,47 @@ def _bundle_path(handle: int) -> Optional[str]:
     return os.path.realpath(path) if path else None
 
 
-def _find_launched(path: str, bundle_id: Optional[str]) -> Optional[App]:
-    """The running instance of the bundle at ``path``, if it is up yet."""
+def _running_pids(bundle_id: Optional[str]) -> Sequence[int]:
+    """The pids of the live apps with ``bundle_id``; none for an app without one."""
+    if bundle_id is None:
+        return ()
+    with _objc.autorelease_pool():
+        return [
+            _objc.send(handle, "processIdentifier", restype=ctypes.c_int) for handle in _handles_with_bundle_id(bundle_id)
+        ]
+
+
+def _find_launched(path: str, bundle_id: Optional[str], *, running_before: Sequence[int] = ()) -> Optional[App]:
+    """
+    The running instance of the bundle at ``path``, if it is up yet.
+
+    Failing that, a copy of the app (the same bundle id, another path) whose pid is in ``running_before``, once
+    it's the active app: LaunchServices brings a copy that's already running to the front rather than launch
+    the one asked for. Until it's in front, the one at ``path`` may still be coming up, so the poll goes on.
+    """
     with _objc.autorelease_pool():
         if bundle_id is not None:
-            # Only asks about this one bundle id, instead of listing every
-            # process on each poll.
-            candidates = _objc.nsarray(
-                _objc.send(
-                    _running_application_class(),
-                    "runningApplicationsWithBundleIdentifier:",
-                    _objc.nsstring(bundle_id),
-                    argtypes=(_objc.id,),
-                )
-            )
+            # Only asks about this one bundle id, instead of listing every process on each poll.
+            candidates = _handles_with_bundle_id(bundle_id)  # the live ones
         else:
-            candidates = _handles(include_background=True)
+            candidates = [
+                handle for handle in _handles(include_background=True) if not _objc.send(handle, "isTerminated", restype=BOOL)
+            ]
 
+        copy = None
         for handle in candidates:
             # Two copies of an app share a bundle id; only the one at `path`
             # is the one that was asked for. Comparing the path on the handle
             # also avoids building an App for every other process.
-            if _bundle_path(handle) == path and not _objc.send(handle, "isTerminated", restype=BOOL):
+            if _bundle_path(handle) == path:
                 return _app(handle)
-    return None
+            if (
+                copy is None
+                and _objc.send(handle, "processIdentifier", restype=ctypes.c_int) in running_before
+                and _objc.send(handle, "isActive", restype=BOOL)
+            ):
+                copy = handle
+        return _app(copy) if copy is not None else None
 
 
 # What `open` says when the app itself can't be found (kLSApplicationNotFoundErr is -10814), as
@@ -338,9 +369,16 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     Raises :class:`~macos.errors.AppNotFoundError` when there's no such
     app, and :class:`~macos.errors.CommandError`, with macOS's reason, when
     it's there but won't open (damaged, blocked by Gatekeeper...).
+
+    When a copy of the app is already running from another path (an older
+    version in another folder, say), macOS brings that one to the front
+    rather than open the one asked for, and that running copy is returned:
+    check its ``path``.
     """
     path = _locate(name)
     bundle_id = _bundle_id(path)
+    # Noted before the launch: a copy running already is what LaunchServices will activate, see _find_launched.
+    running_before = _running_pids(bundle_id)
 
     try:
         _run(["open", *(["-g"] if background else []), "-a", path])
@@ -351,7 +389,7 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
 
     deadline = time.monotonic() + timeout
     while True:
-        app = _find_launched(path, bundle_id)
+        app = _find_launched(path, bundle_id, running_before=running_before)
         if app is not None:
             return app
         if time.monotonic() >= deadline:
@@ -589,7 +627,8 @@ def install_from_dmg(
     ``destination``, and the image is unmounted. An app already there raises
     :class:`FileExistsError`, unless ``replace=True``; replacing an app that's
     running raises :class:`~macos.MacOSError` (quit it first). Installers
-    (``.pkg``) aren't run.
+    (``.pkg``) aren't run, and a symbolic link named like an app isn't
+    followed: only an app the image itself holds is installed.
 
     An image that holds several apps installs the first by name, with a
     :class:`RuntimeWarning` naming the others; ``app`` picks one instead
@@ -602,7 +641,10 @@ def install_from_dmg(
     mounted = system.mount_image(image)
     succeeded = False
     try:
-        found = sorted(entry for entry in mounted.iterdir() if entry.suffix == ".app" and entry.is_dir())
+        # A link named like an app isn't one: ditto would copy whatever it points to, anywhere on the disk.
+        found = sorted(
+            entry for entry in mounted.iterdir() if entry.suffix == ".app" and entry.is_dir() and not entry.is_symlink()
+        )
         if not found:
             raise AppNotFoundError("{} has no app at its top".format(Path(image).name))
         source = _chosen_app(found, app, Path(image).name)
@@ -901,8 +943,9 @@ def installed() -> List[InstalledApp]:
 
     It lists the Applications folders (yours, the Mac's and the system's),
     their subfolders included, and the apps Spotlight knows elsewhere. When
-    Spotlight is off, or doesn't answer within a minute, only the folders
-    are listed.
+    Spotlight is off, doesn't answer within a minute, or can't be asked
+    (a permission it lacks), only the folders are listed, with a
+    :class:`RuntimeWarning` saying why.
     """
     require_macos()
     paths = set()
@@ -917,8 +960,16 @@ def installed() -> List[InstalledApp]:
         # Apps installed elsewhere, as Spotlight knows them; nothing is lost if it's off or stuck.
         found = spotlight.search('kMDItemContentType == "com.apple.application-bundle"', timeout=_SPOTLIGHT_TIMEOUT)
         paths.update(os.path.realpath(str(path)) for path in found if "/Contents/" not in str(path))
-    except MacOSError:
-        pass
+    except MacOSError as error:
+        # Said, not hidden: a missing permission is as silent as Spotlight being off, and the listing
+        # that lacks an app installed outside the Applications folders would look complete.
+        warnings.warn(
+            "Spotlight couldn't be asked about apps outside the Applications folders, so only those are listed: {}".format(
+                error
+            ),
+            RuntimeWarning,
+            stacklevel=2,
+        )
     apps = [app for app in (_installed_app(path) for path in paths) if app]
     return sorted(apps, key=lambda app: (app.name.lower(), str(app.path)))
 
@@ -1062,6 +1113,9 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     one that isn't found; one whose ``Info.plist`` can't be read (another
     user's) raises that ``PermissionError``. An app installed for every user may need an
     administrator to be moved: then nothing is moved, and the error says so.
+    The other installed apps are listed first (:func:`installed`), to tell
+    a shared name from the app's own: its warning, when Spotlight can't be
+    asked, comes from here too.
     Some Library folders (Cookies, HTTPStorages) can only be looked in with
     Full Disk Access: without it, a :class:`RuntimeWarning` names them, as
     the app's files there, if any, stay.

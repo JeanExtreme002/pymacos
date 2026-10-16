@@ -399,6 +399,45 @@ def _call_id(call):
         lambda: macos.finder.set_icon(__file__, __file__),
         lambda: macos.finder.remove_icon(__file__),
         lambda: macos.finder.has_custom_icon(__file__),
+        lambda: macos.apps.add_login_item("Safari"),
+        lambda: macos.apps.remove_login_item("Safari"),
+        lambda: macos.audio.set_input("Built-in"),
+        lambda: macos.browser.run_js("1 + 1"),
+        lambda: macos.defaults.delete("com.apple.dock", "autohide"),
+        lambda: macos.defaults.keys("com.apple.dock"),
+        lambda: macos.dock.add_app("Safari"),
+        lambda: macos.dock.remove_app("Safari"),
+        lambda: macos.dock.set_autohide_delay(0.5),
+        lambda: macos.dock.set_autohide_duration(None),
+        lambda: macos.dock.remove_folder(Path(__file__).parent),
+        lambda: macos.hotkeys.register("ctrl+option+s", lambda: None),
+        lambda: macos.hotkeys.unregister("ctrl+option+s"),
+        lambda: macos.keyboard.set_app_shortcut("Safari", "Reload Page", "cmd+shift+r"),
+        lambda: macos.keyboard.set_backlight_timeout(None),
+        lambda: macos.keychain.delete("service", "account"),
+        lambda: macos.language.guess("hello"),
+        lambda: macos.mouse.set_scroll_speed(0.5),
+        lambda: macos.pdf.merge([__file__], "out.pdf"),
+        lambda: macos.pdf.render(__file__),
+        lambda: macos.printer.set_default("Office"),
+        lambda: macos.printer.cancel(1),
+        lambda: macos.schedule.get("backup"),
+        lambda: macos.schedule.run_now("backup"),
+        lambda: macos.schedule.pause("backup"),
+        lambda: macos.schedule.resume("backup"),
+        lambda: macos.screen.wait_for_text("x", timeout=0),
+        lambda: macos.screen.set_screensaver_delay(None),
+        lambda: macos.screen.set_screenshot_name(None),
+        lambda: macos.screen.set_night_shift_schedule(None),
+        lambda: macos.screen.set_night_shift_strength(0.5),
+        lambda: macos.screen.set_display_mode(1920, 1080),
+        lambda: macos.screen.mirror(1),
+        lambda: macos.sound.set_alert_volume(0.5),
+        lambda: macos.system.unmount_image(Path(__file__).parent),
+        lambda: macos.system.set_menu_bar_spacing(None),
+        lambda: macos.trackpad.set_tracking_speed(0.5),
+        lambda: macos.vision.lines(__file__),
+        lambda: macos.windows.tile([]),
     ],
     ids=_call_id,
 )
@@ -425,3 +464,111 @@ def test_missing_private_classes_are_not_supported(monkeypatch):
         macos.screen.night_shift()
     with pytest.raises(macos.NotSupportedError, match="True Tone"):
         macos.screen.true_tone()
+
+
+# The public functions the list above doesn't call. Those that take no required argument are called
+# below, outside macOS, and must raise all the same. The others need an argument the test can't make
+# up, and check it before the platform: a valid one reaches the guard, which the live tests show.
+_PURE_PYTHON = {
+    "events.stop",  # a flag, read by run()
+    "hotkeys.stop",
+    "menubar.every",  # a Timer, read by run()
+    "menubar.quit",
+    "settings.batch",  # a context manager, around calls that are guarded themselves
+    "settings.names",  # a table
+}
+_ARGUMENTS_CHECKED_FIRST = {
+    "appearance.set_scroll_bars",
+    "apps.install_from_dmg",
+    "apps.open_with",
+    "apps.unquarantine",
+    "dock.add_folder",
+    "dock.set_magnification",
+    "dock.set_minimize_effect",
+    "dock.set_position",
+    "dock.set_size",
+    "events.off",
+    "events.on",
+    "events.run",
+    "finder.add_tags",
+    "finder.extract",
+    "finder.remove_tags",
+    "finder.set_desktop_view",
+    "finder.set_new_window_folder",
+    "finder.set_search_scope",
+    "finder.set_show_drives_on_desktop",
+    "finder.set_tags",
+    "image.resize",
+    "pdf.extract",
+    "screen.set_screenshot_folder",
+    "screen.set_screenshot_format",
+    "screen.set_screenshot_target",
+    "system.set_clock_format",
+    "system.set_measurement_units",
+    "system.set_menu_bar_items",
+    "system.set_temperature_unit",
+    "trackpad.set_gesture",
+    "windows.set_double_click_title_bar",
+}
+
+
+def _listed_calls():
+    """The ``module.function`` names the parametrized test above calls."""
+    import re
+
+    source = Path(__file__).read_text()
+    return set(re.findall(r"macos\.([a-z_]+\.[A-Za-z_]+)\(", source)) | {
+        "{}.{}".format(macos._SHORTCUTS[name], name) for name in re.findall(r"lambda: macos\.([a-z_]+)\(", source)
+    }
+
+
+def _public_functions():
+    """Every ``(module.function, function)`` in a submodule's ``__all__``."""
+    import importlib
+
+    found = []
+    for module in sorted(macos._SUBMODULES):
+        loaded = importlib.import_module("macos." + module)
+        for name in loaded.__all__:
+            function = getattr(loaded, name)
+            if inspect.isfunction(function):
+                found.append(("{}.{}".format(module, name), function))
+    return found
+
+
+def _required_arguments(function):
+    return [
+        parameter.name
+        for parameter in inspect.signature(function).parameters.values()
+        if parameter.default is inspect.Parameter.empty and parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+    ]
+
+
+def test_every_public_function_is_accounted_for():
+    """A new public function is either called above, or named here with why it can't be."""
+    listed = _listed_calls() | _PURE_PYTHON | _ARGUMENTS_CHECKED_FIRST
+    unaccounted = [name for name, function in _public_functions() if name not in listed and _required_arguments(function)]
+    assert not unaccounted, "add a call to the list above, or the name to _ARGUMENTS_CHECKED_FIRST: {}".format(unaccounted)
+    stale = sorted((_PURE_PYTHON | _ARGUMENTS_CHECKED_FIRST) - {name for name, _ in _public_functions()})
+    assert not stale, "no longer public: {}".format(stale)
+    listed_too = sorted(_ARGUMENTS_CHECKED_FIRST & _listed_calls())
+    assert not listed_too, "called above already: {}".format(listed_too)
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="checks behaviour outside macOS")
+@pytest.mark.parametrize(
+    "name, function",
+    [
+        (name, function)
+        for name, function in _public_functions()
+        if not _required_arguments(function) and name not in _PURE_PYTHON
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_every_other_feature_raises_not_supported_outside_macos(name, function):
+    if name in _listed_calls() or name in _ARGUMENTS_CHECKED_FIRST:
+        pytest.skip("called in the list above, or checks its arguments first")
+    with pytest.raises(macos.NotSupportedError):
+        result = function()
+        if inspect.isgenerator(result):
+            next(result)

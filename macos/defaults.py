@@ -100,6 +100,13 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
 def _check(domain: str, key: Optional[str] = None) -> None:
     if not domain or not domain.strip():
         raise ValueError("domain must not be empty")
+    if "/" in domain:
+        # CFPreferences takes a domain with a slash for a file, as the defaults command does: an absolute
+        # one is that file, a relative one is under ~/Library/Preferences (".." included). write() would
+        # create any .plist a domain taken from input names; a domain is a name, which never has one.
+        raise ValueError(
+            "domain must be a name such as 'com.apple.dock' or NSGlobalDomain, not a path: {!r}".format(domain)
+        )
     if key is not None and (not isinstance(key, str) or not key.strip()):
         raise ValueError("key must not be empty")
 
@@ -126,6 +133,8 @@ def read(domain: str, key: Optional[str] = None, *, default: Any = None, current
     """
     The value of ``key`` in ``domain`` (an app's bundle ID, or :data:`GLOBAL`), or ``default`` when it isn't set.
 
+    A domain is a name: one with a slash in it, which the ``defaults``
+    command would take for a file's path, raises :class:`ValueError`.
     As apps see it, a key an app's domain doesn't set falls back to the
     global domain's value (``defaults read`` doesn't). Without ``key``,
     returns all the domain's own values, as a ``dict``.
@@ -166,6 +175,8 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
     ``True`` is written as a boolean, ``3`` as an integer, lists as arrays and
     dicts as dictionaries: no ``-bool`` or ``-int`` flags to get right.
     ``current_host=True`` writes it for this Mac only, like ``defaults -currentHost``.
+    A domain with a slash in it (a file's path, to the ``defaults`` command)
+    raises :class:`ValueError`: see :func:`read`.
     A domain this process can't write (managed by a configuration profile,
     another user's, the system's, a sandboxed app's container) raises
     :class:`~macos.errors.PermissionDeniedError`.

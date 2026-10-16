@@ -1,6 +1,5 @@
 """Unit tests for :mod:`macos.notifications`. They run on any platform."""
 
-import subprocess
 
 import pytest
 
@@ -63,38 +62,38 @@ def test_notify_can_skip_the_check(fake_run, monkeypatch):
         ([{"bundle-id": "com.apple.ScriptEditor2", "flags": 8206}], False),
         ([{"bundle-id": "com.other.app", "flags": 41951246}], None),
         ([], None),
+        ("not a list", None),
+        ([{"bundle-id": "com.apple.ScriptEditor2", "flags": "many"}], None),
     ],
 )
 def test_is_allowed_reads_the_notification_settings(monkeypatch, apps, expected):
-    import plistlib
-
     monkeypatch.setattr(_system.sys, "platform", "darwin")
+    asked = []
 
-    def fake(args, **kwargs):
-        return subprocess.CompletedProcess(args, 0, plistlib.dumps({"apps": apps}), b"")
+    def read(domain, key=None, **kwargs):
+        asked.append((domain, key))
+        return apps
 
-    monkeypatch.setattr(_system.subprocess, "run", fake)
+    monkeypatch.setattr(macos.defaults, "read", read)
+    # In this process, through CFPreferences: no ``defaults export`` started for every notification.
+    monkeypatch.setattr(_system.subprocess, "run", lambda *args, **kwargs: pytest.fail("a command was run"))
 
     assert macos.notifications.is_allowed() is expected
+    assert asked == [("com.apple.ncprefs", "apps")]
 
 
-def test_is_allowed_is_unknown_when_the_settings_are_unreadable(monkeypatch):
+@pytest.mark.parametrize("failure", [macos.MacOSError("cfprefsd didn't answer"), ValueError("not a property list"), OSError()])
+def test_is_allowed_is_unknown_when_the_settings_cant_be_read(monkeypatch, failure):
     monkeypatch.setattr(_system.sys, "platform", "darwin")
 
-    def fake(args, **kwargs):
-        return subprocess.CompletedProcess(args, 0, b"not a plist", b"")
+    def read(domain, key=None, **kwargs):
+        raise failure
 
-    monkeypatch.setattr(_system.subprocess, "run", fake)
-
+    monkeypatch.setattr(macos.defaults, "read", read)
     assert macos.notifications.is_allowed() is None
 
 
-def test_is_allowed_gives_up_on_a_wedged_defaults(monkeypatch):
-    monkeypatch.setattr(_system.sys, "platform", "darwin")
-
-    def hung(args, **kwargs):
-        assert kwargs["timeout"]
-        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
-
-    monkeypatch.setattr(_system.subprocess, "run", hung)
-    assert macos.notifications.is_allowed() is None
+def test_is_allowed_needs_macos(monkeypatch):
+    monkeypatch.setattr(_system.sys, "platform", "linux")
+    with pytest.raises(macos.NotSupportedError):
+        macos.notifications.is_allowed()

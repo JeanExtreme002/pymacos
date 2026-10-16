@@ -32,11 +32,11 @@ def test_html_reading_options(tmp_path):
     page = tmp_path / "page.html"
     page.write_text("<p>hi</p>")
     with _objc.autorelease_pool():
-        options = macos.document._options(page)
+        options, _ = macos.document._options(page)
         assert _objc.send(options, "objectForKey:", _objc.nsstring("CharacterEncoding"), argtypes=(_objc.id,))
         notes = tmp_path / "notes.rtf"
         notes.write_text("{\\rtf1 hi}")
-        assert macos.document._options(notes) is None  # RTF says its own encoding and WebKit doesn't read it
+        assert macos.document._options(notes) == (None, None)  # RTF says its own encoding and WebKit doesn't read it
 
 
 def _in_a_thread(work):

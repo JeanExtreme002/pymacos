@@ -1,6 +1,7 @@
 """Unit tests for :mod:`macos.music`. They run on any platform."""
 
 import subprocess
+import warnings
 
 import pytest
 
@@ -114,6 +115,20 @@ def test_player_volume_and_seek(players):
     macos.music.seek(62.5, app="Music")
 
     assert players.commands == [("Spotify", "set sound volume to 30"), ("Music", "set player position to 62.5")]
+
+
+def test_player_volume_warns_about_a_level_that_isnt_an_int(players):
+    players.volumes = {"Music": 40, "Spotify": 75}
+
+    with pytest.warns(DeprecationWarning, match="2.0 will raise TypeError"):
+        macos.music.set_volume(30.9)
+    with pytest.warns(DeprecationWarning):
+        macos.music.set_volume(True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.music.set_volume(30)  # an int: no warning
+
+    assert players.commands == [("Spotify", "set sound volume to {}".format(level)) for level in (30, 1, 30)]
 
 
 def test_player_controls_never_open_a_player(players):

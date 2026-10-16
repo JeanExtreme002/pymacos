@@ -97,7 +97,8 @@ macos.menubar.every(1, tick)
 macos.menubar.run()
 ```
 
-Timers pause while a menu is open. Work that takes long belongs in a thread, so
+{func}`~macos.menubar.every` returns a {class}`~macos.menubar.Timer`, whose
+`cancel()` stops it. Timers pause while a menu is open. Work that takes long belongs in a thread, so
 the menu stays responsive: titles and entries can be changed from any thread,
 and the change shows when {func}`~macos.menubar.run` next turns, within a
 tenth of a second.

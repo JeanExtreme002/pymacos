@@ -217,3 +217,110 @@ def test_system_configuration_is_declared_once_for_network_and_events():
     macos.network.dns_servers()  # network used to declare the callback as a plain pointer, events as a CFUNCTYPE
     assert macos.events._sc.lib() is sc
     assert sc.SCDynamicStoreCreate.argtypes is declared
+
+
+# --- Kernel buffers, built by hand -------------------------------------------------------
+
+
+def _ifmibdata(name, flags, received, sent):
+    """A ``struct ifmibdata`` as ``sysctl`` fills it: the name, five counters (the flags second), filler, an ``if_data64``."""
+    import struct
+
+    header = struct.pack("=16sIIIII16x", name, 0, flags, 0, 0, 0)
+    if_data64 = struct.pack("=8BIIQQQQQQQQ", *([0] * 8), 1500, 0, 0, 10, 0, 20, 0, 0, received, sent)
+    return header + if_data64
+
+
+def test_interface_counters_are_read_where_the_kernel_puts_them(monkeypatch):
+    import ctypes
+
+    from macos import _libc, network
+
+    answers = {1: _ifmibdata(b"en0", 0x18863, 5 * 2 ** 32 + 7, 2 ** 40), 2: _ifmibdata(b"lo0", 0x8049, 123, 456)}
+
+    class Libc:
+        def sysctl(self, mib, count, data, size, new, new_size):
+            assert count == 6 and list(mib[:4]) == list(network._IFMIB_IFDATA) and mib[5] == network._IFDATA_GENERAL
+            answer = answers.get(mib[4])
+            if answer is None:
+                return -1  # the interface went away since it was listed
+            ctypes.memmove(data, answer, len(answer))
+            size._obj.value = len(answer)
+            return 0
+
+    monkeypatch.setattr(_libc, "lib", lambda: Libc())
+    monkeypatch.setattr(network.socket, "if_nameindex", lambda: [(1, "en0"), (2, "lo0"), (3, "utun9")])
+
+    assert network._interface_counters() == {
+        "en0": (0x8863, 5 * 2 ** 32 + 7, 2 ** 40),  # the flags are a short, widened; 64-bit byte counters
+        "lo0": (0x8049, 123, 456),
+    }
+    assert struct_offsets() == (network._IFMD_FLAGS, network._IFMD_RECEIVED, network._IFMD_SENT)
+
+
+def struct_offsets():
+    """Where the buffer above puts the flags, ``ifi_ibytes`` and ``ifi_obytes``, by the C layout."""
+    import struct
+
+    header = struct.calcsize("=16sIIIII16x")
+    return struct.calcsize("=16sI"), header + struct.calcsize("=8BIIQQQQQQ"), header + struct.calcsize("=8BIIQQQQQQQ")
+
+
+def test_interfaces_read_each_sockaddr_by_its_family(monkeypatch):
+    import ctypes
+    import socket
+    import struct
+
+    from macos import _libc, network
+
+    def sockaddr(packed):
+        buffer = ctypes.create_string_buffer(packed, len(packed))
+        return buffer, ctypes.cast(buffer, ctypes.POINTER(_libc.SockAddr))
+
+    def link(name, mac):
+        # sockaddr_dl: len, family, index, type, nlen, alen, slen, then the name and the address.
+        data = name + mac
+        return sockaddr(struct.pack("=BBHBBBB", 8 + len(data), network._AF_LINK, 4, 6, len(name), len(mac), 0) + data)
+
+    def inet(address, port=0):
+        return sockaddr(struct.pack("=BBH4s8x", 16, network._AF_INET, port, socket.inet_pton(socket.AF_INET, address)))
+
+    def inet6(address):
+        packed = socket.inet_pton(socket.AF_INET6, address)
+        return sockaddr(struct.pack("=BBHI16sI", 28, network._AF_INET6, 0, 0, packed, 0))
+
+    longest = b"thunderbolt1234"  # IFNAMSIZ - 1: the longest name an interface can have
+    addresses = [
+        (longest, 0x8863, link(longest, bytes.fromhex("a483e7123456"))),
+        (longest, 0x8863, inet("192.168.0.8")),
+        (longest, 0x8863, inet6("fe80::1")),
+        (longest, 0x8863, inet6("2001:db8::8")),
+        (b"en1", 0x8822, link(b"en1", b"\x00" * 6)),  # a hardware address of zeros: none
+        (b"utun3", 0x8051, link(b"utun3", b"")),  # a tunnel: no hardware address
+        (b"utun3", 0x8051, inet6("fe80::2")),
+        (b"lo0", 0x8049, inet("127.0.0.1")),
+    ]
+    nodes = [_libc.IfAddrs(name=name, flags=flags, address=pointer) for name, flags, (_, pointer) in addresses]
+    for node, following in zip(nodes, nodes[1:]):
+        node.next = ctypes.pointer(following)
+    head = ctypes.pointer(nodes[0])
+
+    class Libc:
+        def getifaddrs(self, reference):
+            reference._obj.contents = head.contents
+            return 0
+
+        def freeifaddrs(self, head):
+            pass
+
+    monkeypatch.setattr(_libc, "lib", lambda: Libc())
+    monkeypatch.setattr(network, "require_macos", lambda: None)
+    monkeypatch.setattr(network, "_display_names", lambda: {"thunderbolt1234": "Thunderbolt"})
+
+    found = {interface.name: interface for interface in network.interfaces()}
+    assert set(found) == {"thunderbolt1234", "en1", "utun3"}  # the loopback is left out
+    assert found["thunderbolt1234"] == network.NetworkInterface(
+        "thunderbolt1234", "Thunderbolt", "a4:83:e7:12:34:56", ("192.168.0.8",), ("fe80::1", "2001:db8::8"), True, True
+    )
+    assert (found["en1"].mac, found["en1"].ipv4, found["en1"].active) == (None, (), False)
+    assert (found["utun3"].mac, found["utun3"].ipv6, found["utun3"].active) == (None, ("fe80::2",), False)

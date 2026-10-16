@@ -93,3 +93,12 @@ def test_a_class_or_constant_this_macos_lacks_is_not_supported_and_still_a_looku
         _cf.constant(_cf.lib(), "kPymacosNoSuchKey")
     assert isinstance(missing.value, LookupError)
     assert _cf.constant(_cf.lib(), "kCFBooleanTrue")  # one that's there still reads
+
+
+def test_to_python_raises_the_packages_error_for_what_isnt_a_property_list(fake_cf):
+    # CFPropertyListCreateData answers NULL (the fake answers None to it) for a third-party driver's odd
+    # property: the callers promise a MacOSError for what macOS gives them, and it stays a ValueError too.
+    with pytest.raises(_cf.NotPropertyListError, match="not a property list") as caught:
+        _cf.to_python(7)
+    assert isinstance(caught.value, macos.MacOSError) and isinstance(caught.value, ValueError)
+    assert ("CFPropertyListCreateData", None, 7, _cf._BINARY_PLIST, 0, None) in fake_cf.calls

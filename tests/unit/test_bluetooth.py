@@ -203,3 +203,16 @@ def test_bluetooth_set_power_times_out_with_a_timeout_error(monkeypatch):
     with pytest.raises(macos.WaitTimeoutError, match="didn't turn off within 1.0 seconds"):
         macos.bluetooth.set_power(False, timeout=1.0)
     assert switched == [0]
+
+
+def test_bluetooth_refuses_to_connect_a_device_listed_without_an_address(fake_bluetooth, monkeypatch):
+    from macos import bluetooth
+
+    pencil = bluetooth.Device("Pencil", "", False, "pen")  # listed without an address: see devices()
+    monkeypatch.setattr(bluetooth, "_find", lambda target: pencil)
+
+    with pytest.raises(macos.MacOSError, match="lists 'Pencil' without a Bluetooth address, so it can't be connected"):
+        macos.bluetooth.connect("Pencil")
+    with pytest.raises(macos.MacOSError, match="can't be disconnected from here"):
+        macos.bluetooth.disconnect("Pencil")
+    assert fake_bluetooth.requests == []  # IOBluetoothDevice was never asked about ""

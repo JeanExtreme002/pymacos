@@ -147,6 +147,36 @@ def test_install_from_dmg_keeps_the_first_error_when_unmounting_fails_too(monkey
     assert (tmp_path / "Applications" / "Tool.app").is_dir()
 
 
+def test_install_from_dmg_never_follows_a_link_named_like_an_app(monkeypatch, tmp_path):
+    from macos import apps, system
+
+    volume = tmp_path / "Volume"
+    volume.mkdir()
+    elsewhere = tmp_path / "Private"
+    (elsewhere / "Contents").mkdir(parents=True)
+    (volume / "Tool.app").symlink_to(elsewhere)  # ditto would copy the folder it points to
+    (tmp_path / "Applications").mkdir()
+    copied = []
+    monkeypatch.setattr(system, "mount_image", lambda image: volume)
+    monkeypatch.setattr(system, "unmount_image", lambda mounted, force=False: None)
+    monkeypatch.setattr(apps, "_run", copied.append)
+
+    with pytest.raises(macos.AppNotFoundError, match="has no app at its top"):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications")
+    assert copied == []
+
+    # Beside a real app, the link is left out: no warning about several apps, and app= can't pick it.
+    (volume / "Real.app" / "Contents").mkdir(parents=True)
+    with pytest.raises(macos.AppNotFoundError):
+        apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", app="Tool")
+    monkeypatch.setattr(apps, "_run", lambda args: (copied.append(args), Path(args[-1]).mkdir()))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        installed = apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications")
+    assert installed.endswith("Real.app")
+    assert [Path(args[1]).name for args in copied] == ["Real.app"]
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="extended attributes as macOS keeps them")
 def test_unquarantine(tmp_path):
     import subprocess
@@ -515,7 +545,8 @@ def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):
         b'<plist version="1.0"><dict><key>CFBundleName</key><string>Tool</string></dict></plist>'
     )
 
-    assert [app.name for app in apps.installed()] == ["Tool"]
+    with pytest.warns(RuntimeWarning, match="Spotlight couldn't be asked"):
+        assert [app.name for app in apps.installed()] == ["Tool"]
     assert queries and queries[0]["timeout"] == apps._SPOTLIGHT_TIMEOUT > 0
 
 
@@ -597,3 +628,93 @@ def test_uninstall_says_when_the_app_itself_cannot_be_read(tmp_path, monkeypatch
         with pytest.raises(macos.AppNotFoundError, match="isn't an app"):
             apps.uninstall("Chat", dry_run=True)
         assert apps.installed() == []
+
+
+def test_installed_says_why_spotlight_was_not_asked(tmp_path, monkeypatch):
+    """A permission Spotlight lacks is as silent as Spotlight being off: the listing still comes, and says why."""
+    from macos import apps
+
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_APP_FOLDERS", (str(tmp_path),))
+    bundle = tmp_path / "Tool.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        b'<plist version="1.0"><dict><key>CFBundleName</key><string>Tool</string></dict></plist>'
+    )
+    for problem in (macos.PermissionDeniedError("Full Disk Access is missing"), macos.NotSupportedError("no Spotlight")):
+
+        def search(query, **options):
+            raise problem
+
+        monkeypatch.setattr(apps.spotlight, "search", search)
+        with pytest.warns(RuntimeWarning, match="only those are listed: {}".format(problem)):
+            assert [app.name for app in apps.installed()] == ["Tool"]
+    monkeypatch.setattr(apps.spotlight, "search", lambda query, **options: [])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert [app.name for app in apps.installed()] == ["Tool"]  # Spotlight answered: nothing to say
+
+
+class _FakeObjC:
+    """Enough of the Objective-C bridge for the questions about running apps."""
+
+    def __init__(self, handles, terminated=()):
+        self.handles, self.terminated, self.sent = handles, set(terminated), []
+        self.id = object
+
+    def send(self, receiver, selector, *args, **kwargs):
+        self.sent.append(selector)
+        if selector == "isTerminated":
+            return receiver in self.terminated
+        if selector == "processIdentifier":
+            return receiver
+        return 1
+
+    def nsarray(self, obj):
+        return list(self.handles)
+
+    def nsstring(self, text):
+        return text
+
+    def autorelease_pool(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+
+def test_handles_with_bundle_id_asks_about_that_app_alone(monkeypatch):
+    from macos import apps
+
+    objc = _FakeObjC([11, 12], terminated=[12])
+    monkeypatch.setattr(apps, "_objc", objc)
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+
+    assert apps._handles_with_bundle_id("com.apple.dock") == [11]  # the one that has quit is left out
+    assert objc.sent[0] == "runningApplicationsWithBundleIdentifier:"  # one question, not a scan of every process
+    assert apps._running_pids("com.apple.dock") == [11] and apps._running_pids(None) == ()
+
+
+def test_open_returns_a_copy_of_the_app_running_from_elsewhere(fake_run, monkeypatch):
+    """macOS brings a running copy (the same bundle ID, another path) to the front rather than open the one asked for."""
+    from macos import apps
+
+    asked = "/Volumes/Disk/Tool.app"
+    running = apps.App("Tool", "com.example.tool", 7, "/Applications/Tool.app")
+    monkeypatch.setattr(apps, "_locate", lambda name: asked)
+    monkeypatch.setattr(apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(apps, "_objc", _FakeObjC([7]))
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: running.path)
+    monkeypatch.setattr(apps, "_app", lambda handle: running if handle == 7 else None)
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+
+    assert apps.open("Tool") == running  # the copy that was running before the launch, which macOS activated
+    assert fake_run.args == ["open", "-a", asked]
+    # The one asked for, when it comes up, is still the one returned: the copy is only a fallback.
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: asked)
+    assert apps.open("Tool") == running and apps._find_launched(asked, "com.example.tool") == running
+    # A copy that shows up at another path only after the launch isn't what was asked for.
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: "/Applications/Tool.app")
+    monkeypatch.setattr(apps, "_running_pids", lambda bundle_id: [])
+    with pytest.raises(macos.AppNotFoundError, match="did not show up"):
+        apps.open("Tool", timeout=0)

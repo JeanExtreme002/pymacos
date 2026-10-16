@@ -38,7 +38,9 @@ exception in a callback stops it and propagates. Holding the keys down doesn't
 repeat the call, and registering a shortcut again replaces its callback.
 {func}`~macos.hotkeys.unregister` removes a shortcut. The keyboard is watched
 on a thread of its own, so a slow callback doesn't hold up typing in other
-apps.
+apps. With no shortcut registered, {func}`~macos.hotkeys.run` warns
+(`RuntimeWarning`) and waits all the same: shortcuts registered meanwhile,
+from another thread, are caught from then on.
 
 The keys a callback presses with {mod}`macos.keyboard` go to the app in front
 as they are, even its own shortcut: a callback can do some work, then pass the
@@ -49,7 +51,10 @@ layout, see [Keyboard layouts](keyboard.md#keyboard-layouts).
 
 Function keys, arrows, Home, End, Page Up and Down and Forward Delete match
 whether or not macOS flags them with Fn, as it does on its own: `"f5"` is
-F5 however it's pressed.
+F5 whenever the apps get an F5. On a Mac's keyboard, whose F-keys adjust the
+brightness and the volume unless *Use F1, F2... as standard function keys*
+is on ({func}`~macos.keyboard.set_standard_function_keys`), that means Fn+F5:
+F5 alone is a media key, not a key press, and no shortcut sees it.
 
 macOS flags these keys with Fn whether or not the Fn key is held, so a
 shortcut can't tell a press with the physical Fn key from one without it.
@@ -66,7 +71,8 @@ error comes out of {func}`~macos.hotkeys.run`.
 ## Waiting for a shortcut
 
 {func}`~macos.hotkeys.wait` blocks until a shortcut is pressed, to start or
-pause a script from anywhere:
+pause a script from anywhere. It returns `True` once the shortcut is pressed,
+and `False` when `timeout` seconds pass first:
 
 ```python
 print("Press Ctrl-Option-S to start")

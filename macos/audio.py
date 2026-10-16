@@ -512,7 +512,7 @@ def input_level(seconds: float = 0.3) -> float:
 # Audio files: read with AVFoundation, converted with afconvert (which ships
 # with macOS), and edited as 16-bit samples in Python.
 
-PathLike = Union[str, "os.PathLike[str]"]
+PathLike = _files.PathLike
 
 _CODECS = {"aac ": "aac", "alac": "alac", "lpcm": "pcm", ".mp3": "mp3", "opus": "opus", "flac": "flac", "ac-3": "ac3"}
 _QUALITY = {"high": 127, "medium": 90, "low": 50}  # AAC variable-bit-rate quality, 0 to 127
@@ -1013,9 +1013,7 @@ def _read_samples(
     _objc.send(reader, "addOutput:", output, argtypes=(_objc.id,), restype=None)
     _objc.send(reader, "setTimeRange:", _media.time_range(0, length), argtypes=(_media.CMTimeRange,), restype=None)
     if not _objc.send(reader, "startReading", restype=_objc.BOOL):
-        failure = _objc.send(reader, "error")
-        message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
-        raise MacOSError("could not read the sound: {}".format(message or "unknown error"))
+        raise MacOSError("could not read the sound: {}".format(_objc.error_message(ctypes.c_void_p(_objc.send(reader, "error")))))
     media_library = _core_media()
     remaining = int(round(length * rate))  # frames
     frame_size = 2 * channels
@@ -1036,9 +1034,7 @@ def _read_samples(
         write(samples)
         remaining -= frames
     if _objc.send(reader, "status", restype=_objc.NSInteger) == _READ_FAILED:
-        failure = _objc.send(reader, "error")
-        message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
-        raise MacOSError("could not read the sound: {}".format(message or "unknown error"))
+        raise MacOSError("could not read the sound: {}".format(_objc.error_message(ctypes.c_void_p(_objc.send(reader, "error")))))
 
 
 # Sound classification, through SoundAnalysis.
@@ -1096,7 +1092,8 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
         if dict(macos.audio.classify("clip.m4a")).get("dog_bark", 0) > 0.5:
             print("a dog!")
 
-    ``limit`` and ``min_confidence`` work as in :func:`macos.vision.classify`.
+    ``limit`` works as in :func:`macos.vision.classify`; only the sounds at
+    least ``min_confidence`` sure (from 0.0 to 1.0) are given.
     """
     if limit < 1:
         raise ValueError("limit must be at least 1, not {}".format(limit))

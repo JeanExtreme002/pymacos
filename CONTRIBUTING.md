@@ -29,7 +29,8 @@ pytest tests/unit/test_audio.py tests/live/test_audio.py   # one module
 The tests are in two folders, with one file per module (`test_audio.py`
 tests `macos.audio`):
 
-- `tests/unit`: fake the system commands and frameworks, and run anywhere.
+- `tests/unit`: fake the system commands and frameworks, and run anywhere;
+  the few that use a framework for real (PDFKit, CoreFoundation) skip outside macOS.
 - `tests/live`: talk to the real system, and are skipped outside macOS.
 
 Helpers shared by several files are in `tests/helpers.py`, and each folder's
@@ -57,6 +58,9 @@ Recording, Input Monitoring) skip themselves: `pytest -rs` lists them, so you
 can tell a green run with gaps from a full one.
 `PYMACOS_REQUIRE_PERMISSIONS=1` turns those skips into failures: CI sets it on
 the runners that have the permissions, so losing them can't go unnoticed.
+The unit tests must keep 70% of the package covered, and each module its own
+floor (`.github/workflows/test.yml` lists the modules under 70%, with theirs):
+a module that gains tests should have its floor raised there.
 
 ## Lint and type check
 
