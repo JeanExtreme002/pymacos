@@ -262,3 +262,16 @@ def test_defaults_still_read_a_plist_by_its_path_and_warn(monkeypatch, domain):
         with pytest.warns(DeprecationWarning, match="not a path") as reported, pytest.raises(Asked):
             call()
         assert len(reported) == 1 and reported[0].filename == __file__  # once, at the caller's line
+
+
+def test_defaults_restored_takes_each_pair_once(monkeypatch):
+    # Every domain is checked before any is read, without going over a pair twice: one that can be gone over
+    # only once (an iterator) still restores.
+    from macos import defaults
+
+    own = {"key": 1}
+    monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: own.get(key, default))
+    monkeypatch.setattr(defaults, "write", lambda domain, key, value, **kwargs: own.update({key: value}))
+    with macos.defaults.restored(iter(("com.example.app", "key"))):
+        own["key"] = 2
+    assert own == {"key": 1}
