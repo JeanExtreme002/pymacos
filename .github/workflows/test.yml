@@ -52,6 +52,36 @@ jobs:
       # The XML is for Codecov even when this step fails and the live tests are
       # skipped; when they run, they rewrite it with both suites' coverage.
       run: pytest tests/unit -v --cov=macos --cov-report=term --cov-report=xml --cov-fail-under=70
+    - name: Check each module's coverage
+      # The total above can hold while one module loses its tests: each module has a floor of its own,
+      # 70% or, for the ones that rely on the live tests, a few points under where they are. Raise a
+      # floor when its module gains tests, so it can't lose them again.
+      run: |
+        python - coverage.xml <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        # The unit tests' coverage each module must keep. Most reach 70%; the ones below are listed with a floor
+        # a few points under where they are, so a module can't quietly lose its tests while the total stays put.
+        # When a listed module rises well above its floor, raise the floor (or drop it from the list) with the change.
+        FLOOR = 70
+        FLOORS = {  # 8 to 10 points under what GitHub's runners and a Mac with a battery reach
+            "language.py": 15, "video.py": 30, "menubar.py": 35, "vision.py": 40, "document.py": 40, "screen.py": 45,
+            "power.py": 50, "_media.py": 50, "audio.py": 55, "clipboard.py": 55, "image.py": 55,
+            "apps.py": 60, "camera.py": 60, "events.py": 60, "sound.py": 60,
+        }
+        covered = {}
+        for node in ET.parse(sys.argv[1]).getroot().iter("class"):
+            name = node.get("filename").rsplit("/", 1)[-1]
+            covered[name] = round(100 * float(node.get("line-rate")))
+        short = {name: (covered[name], FLOORS.get(name, FLOOR)) for name in sorted(covered) if covered[name] < FLOORS.get(name, FLOOR)}
+        for name, (rate, floor) in short.items():
+            problem = "{} is {}% covered by the unit tests, under its floor of {}%".format(name, rate, floor)
+            print(problem)  # in the log; the line below is the annotation, which GitHub takes out of the log
+            print("::error::" + problem)
+        print("{} modules; lowest: {}".format(len(covered), ", ".join("{} {}%".format(n, covered[n]) for n in sorted(covered, key=covered.get)[:6])))
+        sys.exit(1 if short else 0)
+        EOF
     - name: Live tests
       # They talk to a real, shared runner, where speech, launchd and the
       # network are sometimes slow: a failure is retried before it counts,
