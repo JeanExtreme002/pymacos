@@ -23,6 +23,7 @@ most apps only read them when they start, so restart them to see a change.
 import ctypes
 import functools
 import math
+import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
 
@@ -97,9 +98,24 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
         )
 
 
-def _check(domain: str, key: Optional[str] = None) -> None:
+def _check(domain: str, key: Optional[str] = None, *, reading: bool = False) -> None:
     if not domain or not domain.strip():
         raise ValueError("domain must not be empty")
+    if "/" in domain:
+        # CFPreferences takes a domain with a slash for a file, as the defaults command does: an absolute
+        # one is that file, a relative one is under ~/Library/Preferences (".." included). Written to, it
+        # creates any .plist a domain taken from input names: refused. Read, it's a .plist read by its
+        # path, which worked: it warns, and 2.0 refuses it too.
+        if not reading:
+            raise ValueError(
+                "domain must be a name such as 'com.apple.dock' or NSGlobalDomain, not a path: {!r}".format(domain)
+            )
+        warnings.warn(
+            "a domain is a name such as 'com.apple.dock', not a path ({!r}): reading a .plist by its path "
+            "works today, and pymacos 2.0 will raise ValueError".format(domain),
+            DeprecationWarning,
+            stacklevel=3,
+        )
     if key is not None and (not isinstance(key, str) or not key.strip()):
         raise ValueError("key must not be empty")
 
@@ -114,7 +130,11 @@ def _domain(domain: str) -> int:
 
 def keys(domain: str, *, current_host: bool = False) -> List[str]:
     """The keys the domain has, sorted, such as ``["autohide", "orientation", ...]`` for ``"com.apple.dock"``."""
-    _check(domain)
+    _check(domain, reading=True)
+    return _keys(domain, current_host)
+
+
+def _keys(domain: str, current_host: bool) -> List[str]:
     cf = _preferences()
     with _cf.owned(_domain(domain)) as name, _cf.owned(
         cf.CFPreferencesCopyKeyList(name, _user(), _host(current_host))
@@ -122,19 +142,34 @@ def keys(domain: str, *, current_host: bool = False) -> List[str]:
         return sorted(_cf.to_python(found) or [])
 
 
+def _synchronize(domain: str) -> None:
+    """Drop this process's copy of ``domain``'s values, so the next read sees what other processes wrote since."""
+    _check(domain)
+    with _cf.owned(_domain(domain)) as name:
+        _preferences().CFPreferencesAppSynchronize(name)
+
+
 def read(domain: str, key: Optional[str] = None, *, default: Any = None, current_host: bool = False) -> Any:
     """
     The value of ``key`` in ``domain`` (an app's bundle ID, or :data:`GLOBAL`), or ``default`` when it isn't set.
 
+    A domain is a name: one with a slash in it, which the ``defaults``
+    command takes for a file's path, still reads that ``.plist`` but warns
+    (``DeprecationWarning``); pymacos 2.0 will raise :class:`ValueError`, as
+    :func:`write` already does.
     As apps see it, a key an app's domain doesn't set falls back to the
     global domain's value (``defaults read`` doesn't). Without ``key``,
     returns all the domain's own values, as a ``dict``.
     ``current_host=True`` reads the settings kept for this Mac only, like
     ``defaults -currentHost``.
     """
-    _check(domain)
+    _check(domain, reading=True)
     if key is None:
-        return {name: read(domain, name, current_host=current_host) for name in keys(domain, current_host=current_host)}
+        return {name: _value(domain, name, None, current_host) for name in _keys(domain, current_host)}
+    return _value(domain, key, default, current_host)
+
+
+def _value(domain: str, key: str, default: Any, current_host: bool) -> Any:
     cf = _preferences()
     with _cf.owned(_domain(domain)) as name, _cf.owned(_cf.string(key)) as wanted:
         if current_host:
@@ -166,6 +201,8 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
     ``True`` is written as a boolean, ``3`` as an integer, lists as arrays and
     dicts as dictionaries: no ``-bool`` or ``-int`` flags to get right.
     ``current_host=True`` writes it for this Mac only, like ``defaults -currentHost``.
+    A domain with a slash in it (a file's path, to the ``defaults`` command)
+    raises :class:`ValueError`: see :func:`read`.
     A domain this process can't write (managed by a configuration profile,
     another user's, the system's, a sandboxed app's container) raises
     :class:`~macos.errors.PermissionDeniedError`.
@@ -181,7 +218,8 @@ def delete(domain: str, key: str, *, current_host: bool = False) -> bool:
     """
     Remove ``key`` from ``domain``; return whether it was set.
 
-    Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable.
+    Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable,
+    and :class:`ValueError` for a domain with a slash in it (a file's path).
     """
     _check(domain, key)
     existed = _own(domain, key, _MISSING, current_host) is not _MISSING
@@ -217,7 +255,8 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
             record_demo()
         macos.finder.restart()                           # Finder reads it again: the icons are back
 
-    Each argument is a ``(domain, key)`` pair, or a whole domain (``"com.apple.dock"``).
+    Each argument is a ``(domain, key)`` pair, or a whole domain (``"com.apple.dock"``); one with a slash
+    in it (a file's path) raises :class:`ValueError` before anything is read, as it would be written back.
     Keys that weren't set are deleted again, not written with a value, so
     macOS goes back to its own default. It restores the preferences only:
     restart the Dock, Finder or app that read the changed ones, as the
@@ -230,17 +269,22 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     """
     missing = object()
     saved: List[Tuple[str, Optional[str], Any]] = []  # (domain, key or None for all, value)
-    for item in what:
+    wanted: List[Tuple[str, str, bool]] = []  # (domain, key or "", whole domain): each item unpacked once
+    for item in what:  # every domain checked before any is read
         if isinstance(item, str):
-            _check(item)
+            wanted.append((item, "", True))
+        else:
+            domain, key = item
+            wanted.append((domain, key, False))
+        _check(wanted[-1][0])
+    for domain, key, whole in wanted:
+        if whole:
             # The domain's own layer, as keys() lists it and the restore writes it back:
             # read() would give the values in effect, from a profile or the global
             # domain too, and the restore would copy those into the user's own file.
-            own = {name: _own(item, name, missing, current_host) for name in keys(item, current_host=current_host)}
-            saved.append((item, None, {name: value for name, value in own.items() if value is not missing}))
+            own = {name: _own(domain, name, missing, current_host) for name in keys(domain, current_host=current_host)}
+            saved.append((domain, None, {name: value for name, value in own.items() if value is not missing}))
         else:
-            domain, key = item
-            _check(domain)
             saved.append((domain, key, _own(domain, key, missing, current_host)))
     failed: Optional[BaseException] = None
     try:
