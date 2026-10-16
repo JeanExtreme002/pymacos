@@ -207,14 +207,7 @@ def test_defaults_refuse_a_domain_that_is_a_path(monkeypatch, domain):
     from macos import defaults
 
     monkeypatch.setattr(defaults, "_preferences", lambda: pytest.fail("CoreFoundation asked about a path"))
-    calls = [
-        lambda: macos.defaults.read(domain, "key"),
-        lambda: macos.defaults.read(domain),
-        lambda: macos.defaults.write(domain, "key", 1),
-        lambda: macos.defaults.delete(domain, "key"),
-        lambda: macos.defaults.keys(domain),
-    ]
-    for call in calls:
+    for call in (lambda: macos.defaults.write(domain, "key", 1), lambda: macos.defaults.delete(domain, "key")):
         with pytest.raises(ValueError, match="not a path"):
             call()
     with pytest.raises(ValueError, match="not a path"):
@@ -250,3 +243,19 @@ def test_defaults_take_the_global_names_and_bundle_ids(monkeypatch, domain):
         macos.defaults.read(domain, "key")
     with pytest.raises(Accepted):
         macos.defaults.write(domain, "key", 1, current_host=True)
+
+
+@pytest.mark.parametrize("domain", ["/Library/Preferences/com.apple.loginwindow", "rel/x"])
+def test_defaults_still_read_a_plist_by_its_path_and_warn(monkeypatch, domain):
+    """Reading a .plist by its path worked: it still does, with a DeprecationWarning, and 2.0 refuses it."""
+    from macos import defaults
+
+    class Asked(Exception):
+        """CoreFoundation was asked: the read went through."""
+
+    monkeypatch.setattr(defaults, "_preferences", lambda: (_ for _ in ()).throw(Asked()))
+    reads = (lambda: macos.defaults.read(domain, "key"), lambda: macos.defaults.read(domain), lambda: macos.defaults.keys(domain))
+    for call in reads:
+        with pytest.warns(DeprecationWarning, match="not a path") as reported, pytest.raises(Asked):
+            call()
+        assert len(reported) == 1 and reported[0].filename == __file__  # once, at the caller's line

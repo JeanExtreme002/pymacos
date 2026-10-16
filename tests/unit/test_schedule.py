@@ -598,3 +598,23 @@ def test_schedule_pause_leaves_a_paused_job_paused_when_it_cant_be_unloaded(fake
 
     # Paused before the call: not enabled again by the rollback, which would bring it back at the next login.
     assert [call[1] for call in calls] == ["print-disabled", "disable", "bootout"]
+
+
+def test_schedule_pause_unloads_first_when_launchctl_wont_say_whether_its_paused(fake_run, home, monkeypatch):
+    from macos import schedule
+
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    def silent():
+        raise macos.errors.CommandTimeoutError(["launchctl", "print-disabled"], 60)
+
+    monkeypatch.setattr(schedule, "_paused", silent)  # launchctl print-disabled out of time (an error reads as {})
+    calls = _refusing_launchctl(monkeypatch, fake_run, "none")
+    macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["bootout", "disable"]
+
+    # Unloading refused: nothing done, so nothing to put back (enabling could resume a job that was paused).
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootout")
+    with pytest.raises(macos.errors.CommandError, match="bootout failed"):
+        macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["bootout"]

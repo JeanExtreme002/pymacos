@@ -125,3 +125,32 @@ def test_the_gatekeeper_lets_through_the_page_alone(monkeypatch, tmp_path):
     answered = {request: document._will_send(99, 0, 0, 0, request, 0, 0) for request in urls}
     assert answered == {1: 1, 2: 2, 3: None, 4: None, 5: None, 6: None}
     assert document._will_send(98, 0, 0, 0, 1, 0, 0) is None  # another load's gatekeeper: not its page
+
+
+@pytest.mark.parametrize("name", ["page.shtml", "page.xhtml", "report.docx", "notes.rtf"])
+def test_resources_off_installs_the_gatekeeper_whatever_the_extension(monkeypatch, tmp_path, name):
+    from macos import document
+
+    source = tmp_path / name
+    source.write_text("x")
+    made = {}
+    monkeypatch.setattr(document, "_gatekeeper_class", lambda: 1)
+    monkeypatch.setattr(document._objc, "send", lambda receiver, selector, *args, **kwargs: 42)
+    monkeypatch.setattr(document._objc, "nsdictionary_of", lambda options: made.update(options) or 7)
+    monkeypatch.setattr(document, "_reads_as_utf8", lambda path: False)
+
+    options, gatekeeper = document._options(source, resources=False)
+    assert (options, gatekeeper) == (7, 42) and made == {"WebResourceLoadDelegate": 42}
+    assert document._PAGES.pop(42) == str(source.resolve())
+    assert document._options(source) == (None, None)  # resources on: nothing installed
+
+
+def test_every_html_extension_needs_the_main_thread(monkeypatch, tmp_path):
+    from macos import document
+
+    monkeypatch.setattr(document._files, "on_main_thread", lambda: False)
+    for name in ("page.html", "page.shtml", "page.xhtml", "saved.webarchive"):
+        page = tmp_path / name
+        page.write_text("<p>x</p>")
+        with pytest.raises(macos.MainThreadError):  # off it, WebKit would wait for the main thread for good
+            document._load(page)

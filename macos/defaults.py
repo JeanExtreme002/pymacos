@@ -23,6 +23,7 @@ most apps only read them when they start, so restart them to see a change.
 import ctypes
 import functools
 import math
+import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, Union
 
@@ -97,15 +98,23 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
         )
 
 
-def _check(domain: str, key: Optional[str] = None) -> None:
+def _check(domain: str, key: Optional[str] = None, *, reading: bool = False) -> None:
     if not domain or not domain.strip():
         raise ValueError("domain must not be empty")
     if "/" in domain:
         # CFPreferences takes a domain with a slash for a file, as the defaults command does: an absolute
-        # one is that file, a relative one is under ~/Library/Preferences (".." included). write() would
-        # create any .plist a domain taken from input names; a domain is a name, which never has one.
-        raise ValueError(
-            "domain must be a name such as 'com.apple.dock' or NSGlobalDomain, not a path: {!r}".format(domain)
+        # one is that file, a relative one is under ~/Library/Preferences (".." included). Written to, it
+        # creates any .plist a domain taken from input names: refused. Read, it's a .plist read by its
+        # path, which worked: it warns, and 2.0 refuses it too.
+        if not reading:
+            raise ValueError(
+                "domain must be a name such as 'com.apple.dock' or NSGlobalDomain, not a path: {!r}".format(domain)
+            )
+        warnings.warn(
+            "a domain is a name such as 'com.apple.dock', not a path ({!r}): reading a .plist by its path "
+            "works today, and pymacos 2.0 will raise ValueError".format(domain),
+            DeprecationWarning,
+            stacklevel=3,
         )
     if key is not None and (not isinstance(key, str) or not key.strip()):
         raise ValueError("key must not be empty")
@@ -121,7 +130,11 @@ def _domain(domain: str) -> int:
 
 def keys(domain: str, *, current_host: bool = False) -> List[str]:
     """The keys the domain has, sorted, such as ``["autohide", "orientation", ...]`` for ``"com.apple.dock"``."""
-    _check(domain)
+    _check(domain, reading=True)
+    return _keys(domain, current_host)
+
+
+def _keys(domain: str, current_host: bool) -> List[str]:
     cf = _preferences()
     with _cf.owned(_domain(domain)) as name, _cf.owned(
         cf.CFPreferencesCopyKeyList(name, _user(), _host(current_host))
@@ -141,16 +154,22 @@ def read(domain: str, key: Optional[str] = None, *, default: Any = None, current
     The value of ``key`` in ``domain`` (an app's bundle ID, or :data:`GLOBAL`), or ``default`` when it isn't set.
 
     A domain is a name: one with a slash in it, which the ``defaults``
-    command would take for a file's path, raises :class:`ValueError`.
+    command takes for a file's path, still reads that ``.plist`` but warns
+    (``DeprecationWarning``); pymacos 2.0 will raise :class:`ValueError`, as
+    :func:`write` already does.
     As apps see it, a key an app's domain doesn't set falls back to the
     global domain's value (``defaults read`` doesn't). Without ``key``,
     returns all the domain's own values, as a ``dict``.
     ``current_host=True`` reads the settings kept for this Mac only, like
     ``defaults -currentHost``.
     """
-    _check(domain)
+    _check(domain, reading=True)
     if key is None:
-        return {name: read(domain, name, current_host=current_host) for name in keys(domain, current_host=current_host)}
+        return {name: _value(domain, name, None, current_host) for name in _keys(domain, current_host)}
+    return _value(domain, key, default, current_host)
+
+
+def _value(domain: str, key: str, default: Any, current_host: bool) -> Any:
     cf = _preferences()
     with _cf.owned(_domain(domain)) as name, _cf.owned(_cf.string(key)) as wanted:
         if current_host:

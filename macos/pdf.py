@@ -2270,10 +2270,10 @@ def _file_strings(data: Union[bytes, mmap.mmap]) -> Iterator[str]:
         dictionary = data[header if header >= 0 else position:start.start()]
         outside.append(data[position:start.start()])
         end = data.find(b"endstream", start.end())
-        body = data[start.end():end if end >= 0 else len(data)]
         position = len(data) if end < 0 else end + len(b"endstream")
         if not _OBJECT_STREAM.search(dictionary):
-            continue
+            continue  # a page's drawing or a picture: not copied, from a mapped file
+        body = data[start.end():end if end >= 0 else len(data)]
         filters = re.findall(rb"/(\w+Decode)\b", dictionary)
         if filters == [b"FlateDecode"]:
             try:

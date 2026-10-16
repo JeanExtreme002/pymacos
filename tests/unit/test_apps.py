@@ -742,3 +742,35 @@ def test_open_in_the_background_returns_the_copy_running_from_elsewhere_once_the
     assert apps._find_launched(asked, "com.example.tool", running_before=[7]) is None
     assert apps.open("Tool", background=True, timeout=0) == running
     assert fake_run.args == ["open", "-g", "-a", asked]
+
+
+def test_find_launched_skips_an_app_at_the_path_that_has_quit(monkeypatch):
+    from macos import apps
+
+    fake = _FakeObjC([5], terminated=[5])
+    monkeypatch.setattr(apps, "_objc", fake)
+    monkeypatch.setattr(apps, "_handles", lambda include_background: iter([5]))
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: "/Applications/Tool.app")
+    monkeypatch.setattr(apps, "_app", lambda handle: pytest.fail("a quit app was taken"))
+    assert apps._find_launched("/Applications/Tool.app", None) is None
+
+
+def test_open_in_the_background_takes_the_running_copy_after_a_moment_not_at_once(fake_run, monkeypatch):
+    from macos import apps
+
+    clock = [100.0]
+    running = apps.App("Tool", "com.example.tool", 7, "/Applications/Tool.app")
+    monkeypatch.setattr(apps, "_locate", lambda name: "/Volumes/Disk/Tool.app")
+    monkeypatch.setattr(apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(apps, "_objc", _FakeObjC([7], inactive=[7]))
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: running.path)
+    monkeypatch.setattr(apps, "_app", lambda handle: running)
+    monkeypatch.setattr(apps.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    assert apps.open("Tool", background=True) == running
+    assert 101.0 <= clock[0] < 101.3  # about a second, not the whole 10-second wait
+    # In front, a copy that stays in the background isn't what macOS opened: the wait ends in an error.
+    with pytest.raises(macos.AppNotFoundError, match="did not show up"):
+        apps.open("Tool", timeout=0.5)

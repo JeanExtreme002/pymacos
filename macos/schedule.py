@@ -520,7 +520,11 @@ def pause(name: str) -> None:
     try:
         was_paused = name in _paused()  # a job paused already stays paused, whatever happens below
     except (CommandError, CommandTimeoutError):
-        was_paused = False
+        # Not known: unloaded first, then disabled, so a refusal leaves the job as it was with nothing to put
+        # back (enabling it again could resume a job that was paused).
+        _bootout(name)
+        _run(["launchctl", "disable", _target(name)])
+        return
     # Disabled first: that alone changes nothing until the next login, so a refusal leaves the job as it
     # was. Unloaded second, and enabled again if that fails, rather than left loaded with a switch that
     # keeps it from coming back: paused at the next login, with nothing to show for it now.

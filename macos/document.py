@@ -50,7 +50,8 @@ _UTF8 = 4  # NSUTF8StringEncoding
 _CHARSET = re.compile(rb"charset\s*=", re.I)
 _CHUNK = 1 << 20  # bytes read at a time to check a file is UTF-8
 # Read through WebKit, which AppKit only runs on the main thread.
-_WEB_FORMATS = (".html", ".htm", ".webarchive")
+# What macOS reads through WebKit, as public.html (and a web archive): only on the main thread.
+_WEB_FORMATS = (".html", ".htm", ".shtml", ".shtm", ".xhtml", ".xht", ".webarchive")
 
 
 def _existing(path: PathLike) -> Path:
@@ -137,7 +138,7 @@ def _options(source: Path, resources: bool = True) -> Tuple[Optional[int], Optio
         options["CharacterEncoding"] = _objc.send(
             _objc.cls("NSNumber"), "numberWithUnsignedInteger:", _UTF8, argtypes=(ctypes.c_ulong,)
         )
-    if not resources:  # whatever the extension: macOS reads more of them than _WEB_FORMATS through WebKit (.shtml)
+    if not resources:  # whatever the extension: should macOS read another one through WebKit, it's guarded too
         gatekeeper = _objc.send(_objc.send(_objc.send(_gatekeeper_class(), "alloc"), "init"), "autorelease")
         _PAGES[gatekeeper] = os.path.realpath(str(source))
         options["WebResourceLoadDelegate"] = gatekeeper  # NSWebResourceLoadDelegateDocumentOption

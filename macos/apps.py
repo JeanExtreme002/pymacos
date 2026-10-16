@@ -29,7 +29,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from functools import lru_cache
-from typing import Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
@@ -324,14 +324,15 @@ def _find_launched(
     Failing that, a copy of the app (the same bundle id, another path) whose pid is in ``running_before``, once
     it's the active app: LaunchServices brings a copy that's already running to the front rather than launch
     the one asked for. Until it's in front, the one at ``path`` may still be coming up, so the poll goes on;
-    ``in_front=False`` takes it in the background too (``open -g``), once the poll has run out.
+    ``in_front=False`` takes it in the background too (``open -g``, which doesn't bring it to the front).
     """
     with _objc.autorelease_pool():
+        candidates: Iterable[int]
         if bundle_id is not None:
             # Only asks about this one bundle id, instead of listing every process on each poll.
             candidates = _handles_with_bundle_id(bundle_id)  # the live ones
         else:
-            candidates = list(_handles(include_background=True))
+            candidates = _handles(include_background=True)  # no copies to look for: the first match ends it
 
         copy = None
         for handle in candidates:
@@ -390,19 +391,22 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
             raise AppNotFoundError("unable to launch {!r}: {}".format(name, error.stderr or error)) from error
         raise  # found, but it won't open: its reason says why
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     while True:
-        app = _find_launched(path, bundle_id, running_before=running_before)
+        # Opened in the background (open -g), a copy already running from elsewhere stays there, never in
+        # front: it's taken once the one at `path` has had a moment to come up instead (or the wait ends).
+        now = time.monotonic()
+        settled = background and (now - started >= _BACKGROUND_SETTLE or now >= deadline)
+        app = _find_launched(path, bundle_id, running_before=running_before, in_front=not settled)
         if app is not None:
             return app
-        if time.monotonic() >= deadline:
-            # Opened in the background (open -g), a copy already running from elsewhere stays there: not in
-            # front, it's still the one LaunchServices reopened, as nothing at `path` came up.
-            app = _find_launched(path, bundle_id, running_before=running_before, in_front=False)
-            if app is not None:
-                return app
+        if now >= deadline:
             raise AppNotFoundError("{!r} was launched but did not show up within {}s".format(name, timeout))
         time.sleep(0.1)
+
+
+_BACKGROUND_SETTLE = 1.0  # seconds open(background=True) gives the app at `path` before taking a running copy
 
 
 _ALL_ROLES = 0xFFFFFFFF  # kLSRolesAll
