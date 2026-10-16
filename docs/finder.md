@@ -21,7 +21,9 @@ macos.finder.trash("old.log")   # PosixPath('/Users/alice/.Trash/old.log')
 ```
 
 Unlike {func}`os.remove` or {func}`shutil.rmtree`, nothing is deleted: the item
-can be restored from the Trash with *Put Back*.
+can be restored from the Trash with *Put Back*. It raises
+{class}`~macos.MacOSError` when macOS refuses (a file it may not move), or, rarely,
+when macOS moved the item without saying where it went.
 
 ## Tags
 
@@ -189,6 +191,9 @@ after `timeout` seconds of it (60 by default), Spotlight's answer included,
 
 The settings people change most, each with its reader: they apply at once, as
 Finder is relaunched ({func}`~macos.finder.restart` relaunches it yourself).
+Several changes relaunch it several times, unless they're in a
+{func}`~macos.settings.batch` block, which relaunches it once at its end
+({func}`~macos.settings.apply` does that by itself).
 
 | Read | Change | Shows |
 |---|---|---|

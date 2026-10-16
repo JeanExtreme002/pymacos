@@ -1,6 +1,12 @@
 """Unit tests for :mod:`macos.windows`. They run on any platform."""
 
+import contextlib
+import gc
+
+import pytest
+
 import macos
+from macos import windows as _windows
 
 
 def test_set_fullscreen_asks_again_when_macos_drops_the_request(monkeypatch):
@@ -112,12 +118,15 @@ def test_tile_all_ignores_an_app_that_quits(monkeypatch):
         def is_hidden(self):
             raise macos.AppNotFoundError("gone")
 
-    monkeypatch.setattr(windows.apps, "running", lambda include_background=False: [Quitting()])
-    monkeypatch.setattr(windows, "list", lambda app=None, title=None: [])
+    scans = []
+    monkeypatch.setattr(windows, "has_permission", lambda: True)
+    monkeypatch.setattr(windows, "_targets", lambda app: scans.append(app) or [Quitting()])
+    monkeypatch.setattr(windows, "_list", lambda targets, title: [])
+    monkeypatch.setattr(windows.apps, "running", lambda **options: pytest.fail("the apps are scanned once, by _targets"))
     tiled = []
     monkeypatch.setattr(windows, "tile", lambda chosen, **options: tiled.append(chosen))
 
-    assert windows.tile_all() == [] and tiled == [[]]
+    assert windows.tile_all("Terminal") == [] and tiled == [[]] and scans == ["Terminal"]
 
 
 def test_tile_with_too_large_a_gap_moves_nothing(monkeypatch):
@@ -232,3 +241,216 @@ def test_a_full_screen_change_that_never_happens_is_a_wait_timeout(monkeypatch):
     monkeypatch.setattr(macos.windows, "_FULL_SCREEN_TIMEOUT", 0.05)
     with pytest.raises(macos.WaitTimeoutError, match="within"):  # a MacOSError and a TimeoutError too
         Window().set_fullscreen()
+
+
+# --- The Accessibility layer, against a fake AX API ---------------------------------------------------------------
+
+_CANNOT_COMPLETE, _API_DISABLED, _ATTRIBUTE_UNSUPPORTED = -25204, -25211, -25205
+
+
+class _FakeAX:
+    """
+    The AX functions :mod:`macos.windows` calls, and the CoreFoundation helpers that read their answers.
+
+    Elements and values are integers, as the real ones are pointers: ``refs`` maps each to the Python value
+    behind it. An app is a dict of attributes (``AXWindows``, ``AXFocusedWindow``), a window one too (``AXTitle``,
+    ``AXPosition``...), and ``failing`` holds the AXError an app answers with instead.
+    """
+
+    def __init__(self):
+        self.refs, self.attributes, self.failing, self.trusted = {}, {}, {}, True
+        self.set, self.performed = [], []
+
+    def ref(self, value):
+        self.refs[len(self.refs) + 1] = value
+        return len(self.refs)
+
+    def element(self, **attributes):
+        return self.ref(attributes)
+
+    def app(self, pid, **attributes):
+        self.attributes[pid] = attributes
+        return pid
+
+    # --- ApplicationServices ---
+
+    def AXIsProcessTrusted(self):
+        return self.trusted
+
+    def AXUIElementCreateApplication(self, pid):
+        return self.ref(self.attributes.get(pid, {})) if pid in self.attributes or pid not in self.failing else self.ref({})
+
+    def AXUIElementSetMessagingTimeout(self, element, seconds):
+        return 0
+
+    def AXUIElementCopyAttributeValue(self, element, name, out):
+        if not self.trusted:
+            return _API_DISABLED
+        holder = self.refs[element]
+        for pid, status in self.failing.items():
+            if holder is self.attributes.get(pid, None) or (pid not in self.attributes and holder == {}):
+                return status
+        if name not in holder:
+            return _ATTRIBUTE_UNSUPPORTED
+        value = holder[name]
+        # An element held by another (a window, a close button) is handed out as itself, not as a copy.
+        out._obj.value = value if type(value) is int and value in self.refs else self.ref(value)
+        return 0
+
+    def AXUIElementSetAttributeValue(self, element, name, value):
+        self.set.append((element, name, self.refs[value]))
+        self.refs[element][name] = self.refs[value]
+        return 0
+
+    def AXUIElementPerformAction(self, element, action):
+        self.performed.append((element, action))
+        return 0
+
+    def AXValueCreate(self, kind, holder):
+        point = holder._obj
+        return self.ref((point.x, point.y) if kind == 1 else (point.width, point.height))
+
+    def AXValueGetValue(self, value, kind, out):
+        first, second = self.refs[value]
+        if kind == 1:
+            out._obj.x, out._obj.y = first, second
+        else:
+            out._obj.width, out._obj.height = first, second
+        return True
+
+    # --- CoreFoundation, as macos._cf wraps it ---
+
+    def lib(self):
+        return self
+
+    def CFEqual(self, left, right):
+        return self.refs[left] is self.refs[right]
+
+    def string(self, text):
+        return text
+
+    def owned(self, ref):
+        return contextlib.nullcontext(ref)
+
+    def retain(self, ref):
+        return ref
+
+    def release(self, ref):
+        pass
+
+    def constant(self, library, name):
+        return self.ref(name == "kCFBooleanTrue")
+
+    def to_str(self, ref):
+        return self.refs[ref] if isinstance(self.refs.get(ref), str) else None
+
+    def to_bool(self, ref):
+        return bool(self.refs.get(ref))
+
+    def items(self, ref):
+        return list(self.refs[ref])
+
+
+@pytest.fixture
+def fake_ax(monkeypatch):
+    fake = _FakeAX()
+    monkeypatch.setattr(_windows, "_accessibility", lambda: fake)
+    monkeypatch.setattr(_windows, "_cf", fake)
+    yield fake
+    # A Window releases its element when it goes: with the real CFRelease, once the fake is gone, a fake
+    # element would crash the process. Every window left (a failed test's traceback keeps them) gives its up.
+    gc.collect()
+    for window in [obj for obj in gc.get_objects() if isinstance(obj, _windows.Window)]:
+        window._element = 0
+
+
+def _two_windows(fake):
+    """Terminal (pid 7) with two windows, the second minimized."""
+    front = fake.element(AXTitle="Notes", AXPosition=(10.0, 25.0), AXSize=(640.0, 480.0), AXMinimized=False)
+    back = fake.element(AXTitle="Scratch", AXPosition=(300.0, 200.0), AXSize=(400.0, 300.0), AXMinimized=True)
+    fake.app(7, AXWindows=[front, back], AXFocusedWindow=front)
+    return macos.apps.App("Terminal", "com.apple.Terminal", 7, "/System/Applications/Utilities/Terminal.app")
+
+
+def test_windows_of_an_app_read_their_titles_frames_and_state(fake_ax):
+    terminal = _two_windows(fake_ax)
+    found = macos.windows.list(terminal)
+
+    assert [window.title for window in found] == ["Notes", "Scratch"]
+    assert [window.frame for window in found] == [(10, 25, 640, 480), (300, 200, 400, 300)]
+    assert [window.minimized for window in found] == [False, True]
+    assert all((window.app, window.pid) == ("Terminal", 7) for window in found)
+    assert found[0] == macos.windows.list(terminal)[0] and found[0] != found[1]  # the same window, listed again
+    assert repr(found[0]) == "Window(app='Terminal', title='Notes', frame=(10, 25, 640, 480))"
+    assert [window.title for window in macos.windows.list(terminal, title="scr")] == ["Scratch"]
+    assert macos.windows.list(terminal, title="Nothing") == []
+
+
+def test_windows_of_an_app_found_by_name(fake_ax, monkeypatch):
+    terminal = _two_windows(fake_ax)
+    monkeypatch.setattr(macos.apps, "get", lambda name: terminal if name == "Terminal" else None)
+
+    assert [window.title for window in macos.windows.list("Terminal")] == ["Notes", "Scratch"]
+    assert macos.windows.list("Typo") == []  # not running by that name: as documented, no windows
+
+
+def test_an_app_that_does_not_answer_counts_as_having_no_windows(fake_ax):
+    busy = macos.apps.App("Busy", "com.example.busy", 9, "/Applications/Busy.app")
+    fake_ax.failing[9] = _CANNOT_COMPLETE
+
+    assert macos.windows.list(busy) == []
+    assert macos.windows.list(macos.apps.App("Idle", None, 10, None)) == []  # answers, with no windows
+
+
+def test_the_missing_accessibility_permission_is_said(fake_ax, monkeypatch):
+    fake_ax.trusted = False
+    terminal = _two_windows(fake_ax)
+    monkeypatch.setattr(macos.apps, "frontmost", lambda: terminal)
+
+    assert macos.windows.has_permission() is False
+    with pytest.raises(macos.PermissionDeniedError, match="Accessibility permission is missing"):
+        macos.windows.list(terminal)
+    with pytest.raises(macos.PermissionDeniedError):
+        macos.windows.focused()
+    fake_ax.trusted = True
+    assert macos.windows.focused().title == "Notes"
+    # Trusted when asked, refused when the windows are read: the same error, not an empty list.
+    monkeypatch.setattr(_windows, "has_permission", lambda: True)
+    fake_ax.trusted = False
+    with pytest.raises(macos.PermissionDeniedError):
+        macos.windows.list(terminal)
+
+
+def test_focused_window(fake_ax, monkeypatch):
+    terminal = _two_windows(fake_ax)
+    monkeypatch.setattr(macos.apps, "frontmost", lambda: terminal)
+    assert macos.windows.focused().title == "Notes"
+
+    fake_ax.app(8)  # the app in front has no window focused
+    monkeypatch.setattr(macos.apps, "frontmost", lambda: macos.apps.App("Empty", None, 8, None))
+    assert macos.windows.focused() is None
+    monkeypatch.setattr(macos.apps, "frontmost", lambda: None)
+    assert macos.windows.focused() is None
+
+
+def test_window_actions_reach_the_right_element(fake_ax):
+    front, back = macos.windows.list(_two_windows(fake_ax))
+
+    front.minimize()
+    assert fake_ax.set[-1] == (front._element, "AXMinimized", True) and front.minimized
+    front.restore()
+    assert fake_ax.set[-1] == (front._element, "AXMinimized", False)
+    front.move(50, 60)
+    front.resize(800, 600)
+    assert front.frame == (50, 60, 800, 600)
+    back.set_frame(0, 25, 1280, 800)
+    assert back.frame == (0, 25, 1280, 800)
+    with pytest.raises(ValueError, match="positive"):
+        front.resize(0, 10)
+
+    with pytest.raises(macos.MacOSError, match="no close button"):
+        front.close()
+    button = fake_ax.element()
+    fake_ax.refs[front._element]["AXCloseButton"] = button
+    front.close()
+    assert fake_ax.performed[-1][1] == "AXPress" and fake_ax.refs[fake_ax.performed[-1][0]] is fake_ax.refs[button]

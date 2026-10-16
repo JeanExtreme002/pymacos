@@ -14,7 +14,18 @@ macos.dock.remove_app("Podcasts")
 ```
 
 Each change restarts the Dock to apply it ({func}`~macos.dock.restart` does it
-by hand): it disappears for a second. No permission is needed.
+by hand): it disappears for a second. To make several changes with one
+restart, put them in a {func}`~macos.settings.batch` block
+({func}`~macos.settings.apply` does that by itself):
+
+```python
+with macos.settings.batch():
+    macos.dock.set_autohide(True)
+    macos.dock.set_size(48)
+    macos.dock.set_position("left")   # the Dock restarts once, here
+```
+
+No permission is needed.
 
 ## Settings
 
@@ -104,6 +115,11 @@ macos.dock.add_folder("~/Projects", display="folder", sort="name")
 
 macos.dock.remove_folder("~/Projects")
 ```
+
+An entry of the Dock's preferences that isn't a tile (edited by hand, or by
+another tool) is left out of {func}`~macos.dock.apps` and
+{func}`~macos.dock.folders` with a `RuntimeWarning`, and a change made here
+writes the list back without it.
 
 A folder kept already is updated. Each {class}`~macos.dock.DockFolder` has its
 `name`, `path`, `view`, `sort` and `display`.

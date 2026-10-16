@@ -12,20 +12,21 @@ Configure the Dock: hide it, size and place it, and choose the apps kept in it.
     macos.dock.add_app("Visual Studio Code")
     macos.dock.remove_app("Podcasts")
 
-Each change restarts the Dock to apply it: it disappears for a second. No
-permission is needed.
+Each change restarts the Dock to apply it: it disappears for a second. To
+make several changes with one restart, put them in a
+:func:`macos.settings.batch` block. No permission is needed.
 """
 
 import ctypes
 import os
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import quote, unquote, urlparse
 
 from . import _objc, apps as _apps, defaults
-from ._objc import BOOL
+from .finder import _file_url, _url_path
 from ._system import killall, require_macos, restart_later
 from .errors import AppNotFoundError, WaitTimeoutError
 
@@ -101,16 +102,8 @@ _SETTLE = 1.5  # seconds a new Dock takes to read its settings, and write them b
 def _pid() -> Optional[int]:
     """The running Dock's pid: asked by bundle ID, not by listing every process on each poll."""
     with _objc.autorelease_pool():
-        for handle in _objc.nsarray(
-            _objc.send(
-                _apps._running_application_class(),
-                "runningApplicationsWithBundleIdentifier:",
-                _objc.nsstring("com.apple.dock"),
-                argtypes=(_objc.id,),
-            )
-        ):
-            if not _objc.send(handle, "isTerminated", restype=BOOL):
-                return int(_objc.send(handle, "processIdentifier", restype=ctypes.c_int))
+        for handle in _apps._handles_with_bundle_id("com.apple.dock"):
+            return int(_objc.send(handle, "processIdentifier", restype=ctypes.c_int))
     return None
 
 
@@ -179,8 +172,35 @@ def set_position(where: str) -> None:
     restart()
 
 
+def _tile_list(key: str) -> List[Dict[str, Any]]:
+    """
+    The tiles under ``key``; a hand-edited value that isn't a list of them counts as none.
+
+    An entry that isn't a tile (not a dictionary) is left out, with a :class:`RuntimeWarning`: the
+    setters write the list back without it, as the Dock itself would drop it.
+    """
+    found = defaults.read(_DOMAIN, key, default=[])
+    if not isinstance(found, list):
+        warnings.warn(
+            "the Dock's {} isn't a list of tiles (edited by hand?): it's read as empty, and a change to the "
+            "Dock here replaces it".format(key),
+            RuntimeWarning,
+            stacklevel=4,
+        )
+        return []
+    tiles = [tile for tile in found if isinstance(tile, dict)]
+    if len(tiles) != len(found):
+        warnings.warn(
+            "{} of the Dock's {} entries aren't tiles (edited by hand?): they're left out, and a change to the "
+            "Dock here drops them".format(len(found) - len(tiles), key),
+            RuntimeWarning,
+            stacklevel=4,  # _tile_list, _tiles or _others, the public function, its caller
+        )
+    return tiles
+
+
 def _tiles() -> List[Dict[str, Any]]:
-    return list(defaults.read(_DOMAIN, "persistent-apps", default=[]))
+    return _tile_list("persistent-apps")
 
 
 def _tile_path(tile: Dict[str, Any]) -> Optional[Path]:
@@ -188,7 +208,7 @@ def _tile_path(tile: Dict[str, Any]) -> Optional[Path]:
     if not url.startswith("file://"):
         return None
     # Resolved, like the app paths it's compared with: /Applications/Safari.app is a link.
-    return Path(os.path.realpath(unquote(urlparse(url).path).rstrip("/")))
+    return Path(os.path.realpath(_url_path(url).rstrip("/")))
 
 
 def _is_app(tile: Dict[str, Any]) -> bool:
@@ -268,7 +288,7 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
     name = path.stem
     tile = {
         "tile-data": {
-            "file-data": {"_CFURLString": "file://{}/".format(quote(str(path))), "_CFURLStringType": _FILE_URL},
+            "file-data": {"_CFURLString": _file_url(path), "_CFURLStringType": _FILE_URL},
             "file-label": name,
             **({"bundle-identifier": bundle_id} if bundle_id else {}),
         },
@@ -627,19 +647,21 @@ class DockFolder:
 
 
 def _others() -> List[Dict[str, Any]]:
-    return list(defaults.read(_DOMAIN, "persistent-others", default=[]))
+    return _tile_list("persistent-others")
 
 
 def _folder(tile: Dict[str, Any]) -> DockFolder:
     data = tile.get("tile-data", {})
     path = _tile_path(tile)
     sorts = {number: name for name, number in _SORTS.items()}
-    view, display = int(data.get("showas", 0)), int(data.get("displayas", 0))
+    # Hand-edited values (text, a list) read as the defaults, as the Dock's numbers do.
+    view = defaults._as_int(data.get("showas", 0), 0)
+    display = defaults._as_int(data.get("displayas", 0), 0)
     return DockFolder(
         name=data.get("file-label") or (path.name if path else ""),
         path=path,
         view=_VIEWS[view] if 0 <= view < len(_VIEWS) else "automatic",
-        sort=sorts.get(int(data.get("arrangement", 1)), "name"),
+        sort=sorts.get(defaults._as_int(data.get("arrangement", 1), 1), "name"),
         display=_DISPLAYS[display] if 0 <= display < len(_DISPLAYS) else "stack",
     )
 
@@ -684,7 +706,7 @@ def add_folder(
         raise ValueError("{} is an app: add it with add_app()".format(path))
     tile = {
         "tile-data": {
-            "file-data": {"_CFURLString": "file://{}/".format(quote(str(path))), "_CFURLStringType": _FILE_URL},
+            "file-data": {"_CFURLString": _file_url(path), "_CFURLStringType": _FILE_URL},
             "file-label": path.name,
             "file-type": 2,  # a folder
             "showas": _VIEWS.index(view),
