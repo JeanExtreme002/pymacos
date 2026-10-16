@@ -1079,10 +1079,6 @@ def _on_complete(observer: int, _cmd: int, request: int) -> None:
     _heard.setdefault(observer, {"labels": {}})["done"] = True
 
 
-# Seconds classify() waits, once the analysis has returned, for results still on their way (see there).
-_ANALYSIS_TIMEOUT = 30.0
-
-
 def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> List[Tuple[str, float]]:
     """
     Tell what an audio (or video) file sounds like: ``[('speech', 0.97), ('music', 0.4), ...]``, most likely first.
@@ -1159,12 +1155,7 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
         _heard.setdefault(observer, {"labels": {}})["analyzer"] = analyzer  # for a Ctrl-C to cancel it
         try:
             with _cf.deferred_interrupt():  # a Ctrl-C meanwhile: the observer cancels the analysis, then it's raised
-                _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile...
-                # ...on the macOS versions seen so far. Where the results come from another queue, after analyze()
-                # has returned, they're waited for: requestDidComplete: (or an error) says the last one came.
-                state = _heard.setdefault(observer, {"labels": {}})
-                if not (state.get("done") or state.get("error")):
-                    _objc.run_until(lambda: bool(state.get("done") or state.get("error")), _ANALYSIS_TIMEOUT)
+                _objc.send(analyzer, "analyze", restype=None)  # synchronous: the observer is called meanwhile
             heard = _heard.get(observer, {"labels": {}})
         finally:
             _heard.pop(observer, None)
