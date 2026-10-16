@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import macos
-from macos import network, system
+from macos import _system, network, system
 
 
 def test_speed_test(fake_run):
@@ -45,23 +45,28 @@ def test_nettop_rows_take_the_last_sample():
 
 def test_disk_health(monkeypatch):
     import plistlib
+    import subprocess
 
     answers = {
         ("list",): {"WholeDisks": ["disk0", "disk4"]},
         ("info", "disk0"): {
             "MediaName": "APPLE SSD", "Size": 500, "Internal": True, "SolidState": True, "SMARTStatus": "Verified"
         },
-        ("info", "disk4"): {"MediaName": "USB Drive ", "Size": 64, "Internal": False, "SMARTStatus": "Not Supported"},
+        ("info", "disk4"): {"MediaName": "USB\rDrive ", "Size": 64, "Internal": False, "SMARTStatus": "Not Supported"},
     }
-    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
 
     def diskutil(args, **kwargs):
-        return plistlib.dumps(answers[(args[1],) if args[1] == "list" else (args[1], args[3])]).decode()
+        # The plist as diskutil wrote it, in bytes: text mode would turn the CR in the name into a LF, and
+        # make U+FFFD of the bytes of a binary plist.
+        assert "text" not in kwargs and kwargs["timeout"]
+        answer = answers[(args[1],) if args[1] == "list" else (args[1], args[3])]
+        return subprocess.CompletedProcess(args, 0, plistlib.dumps(answer, fmt=plistlib.FMT_BINARY), b"")
 
-    monkeypatch.setattr(system, "_run", diskutil)
+    monkeypatch.setattr(_system.subprocess, "run", diskutil)
     assert system.disk_health() == [
         system.DiskHealth("disk0", "APPLE SSD", 500, True, True, "verified"),
-        system.DiskHealth("disk4", "USB Drive", 64, False, None, None),
+        system.DiskHealth("disk4", "USB\rDrive", 64, False, None, None),
     ]
 
 

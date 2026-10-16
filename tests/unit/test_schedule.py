@@ -5,6 +5,8 @@ import plistlib
 import sys
 from pathlib import Path
 
+import warnings
+
 import pytest
 
 import macos
@@ -112,8 +114,9 @@ def test_schedule_pause_and_resume(fake_run, home):
     fake_run.calls.clear()
 
     macos.schedule.pause("backup")
-    assert [call["args"][1] for call in fake_run.calls] == ["bootout", "disable"]
-    assert fake_run.args == ["launchctl", "disable", "gui/501/pymacos.backup"]
+    # Asked whether it's paused already, then disabled first: see the tests below.
+    assert [call["args"][1] for call in fake_run.calls] == ["print-disabled", "disable", "bootout"]
+    assert fake_run.args == ["launchctl", "bootout", "gui/501/pymacos.backup"]
 
     fake_run.stdout = '\tdisabled services = {\n\t\t"pymacos.backup" => disabled\n\t\t"pymacos.other" => enabled\n\t}\n'
     assert macos.schedule.get("backup").paused is True
@@ -125,7 +128,7 @@ def test_schedule_pause_and_resume(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     fake_run.calls.clear()
     macos.schedule.resume("backup")
-    assert [call["args"][1] for call in fake_run.calls] == ["bootout", "enable", "bootstrap"]
+    assert [call["args"][1] for call in fake_run.calls] == ["print-disabled", "bootout", "enable", "bootstrap"]
     with pytest.raises(ValueError, match="no job named"):
         macos.schedule.pause("missing")
 
@@ -489,3 +492,148 @@ def test_schedule_trusts_folders_only_the_admin_group_may_write_in(monkeypatch, 
     assert schedule._swappable(script) is None  # its members can use sudo anyway
     monkeypatch.setattr(schedule.os, "stat", stat_as(schedule._ADMIN_GROUP + 1))
     assert schedule._swappable(script) == "other users may replace what's in {}".format(os.path.realpath(str(tmp_path)))
+
+
+def _notes_of(error, reported):
+    """What add_note() told: the error's notes (Python 3.11+), or the RuntimeWarnings it fell back to."""
+    return " ".join(getattr(error, "__notes__", [])) + " ".join(
+        str(item.message) for item in reported if issubclass(item.category, RuntimeWarning)
+    )
+
+
+def _refusing_launchctl(monkeypatch, fake_run, refused, *, disabled=(), also=()):
+    """
+    Record launchctl's commands; ``refused`` fails (every time), and so does any in ``also``.
+
+    ``disabled`` names the jobs ``launchctl print-disabled`` reports as paused.
+    """
+    import subprocess
+
+    from macos import _system
+
+    calls = []
+    listing = "".join('\t\t"pymacos.{}" => disabled\n'.format(name) for name in disabled)
+
+    def launchctl(args, **kwargs):
+        calls.append(list(args))
+        if args[1] == refused or args[1] in also:
+            return subprocess.CompletedProcess(args, 5, "", "{} failed: 5: Input/output error".format(args[1]))
+        return subprocess.CompletedProcess(args, 0, listing if args[1] == "print-disabled" else "", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", launchctl)
+    return calls
+
+
+def test_schedule_pause_leaves_a_job_it_couldnt_unload_as_it_was(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootout")
+
+    with pytest.raises(macos.errors.CommandError, match="bootout failed"):
+        macos.schedule.pause("backup")
+
+    # Disabled before unloading (a refusal there changes nothing), and enabled again when unloading
+    # failed: not left loaded now, and gone at the next login.
+    assert [call[1] for call in calls] == ["print-disabled", "disable", "bootout", "enable"]
+    assert calls[-1] == ["launchctl", "enable", "gui/501/pymacos.backup"]
+
+
+def test_schedule_pause_says_when_the_job_couldnt_be_enabled_again(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    _refusing_launchctl(monkeypatch, fake_run, "bootout", also=("enable",))
+
+    with warnings.catch_warnings(record=True) as reported:  # before Python 3.11, a note is a RuntimeWarning
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootout failed") as caught:
+            macos.schedule.pause("backup")
+    assert "won't be at the next login" in _notes_of(caught.value, reported)
+
+
+def test_schedule_resume_pauses_again_a_paused_job_it_couldnt_load(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap", disabled=["backup"])
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
+
+    # Enabled and unloaded, it would have come back at the next login as if resumed: paused again instead.
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap", "disable"]
+    assert calls[-1] == ["launchctl", "disable", "gui/501/pymacos.backup"]
+    assert _notes_of(caught.value, reported) == ""
+
+
+def test_schedule_resume_says_when_a_paused_job_couldnt_be_paused_again(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap", disabled=["backup"], also=("disable",))
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
+
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap", "disable"]
+    assert "couldn't be paused again either" in _notes_of(caught.value, reported)
+
+
+def test_schedule_resume_says_when_a_loaded_job_stays_unloaded(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap")  # not paused: resume() reloads it
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
+
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]  # not paused by mistake
+    assert "stays unloaded until the next login" in _notes_of(caught.value, reported)
+
+
+def test_schedule_pause_leaves_a_paused_job_paused_when_it_cant_be_unloaded(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootout", disabled=["backup"])
+
+    with pytest.raises(macos.errors.CommandError, match="bootout failed"):
+        macos.schedule.pause("backup")
+
+    # Paused before the call: not enabled again by the rollback, which would bring it back at the next login.
+    assert [call[1] for call in calls] == ["print-disabled", "disable", "bootout"]
+
+
+def test_schedule_pause_unloads_first_when_launchctl_wont_say_whether_its_paused(fake_run, home, monkeypatch):
+    from macos import schedule
+
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    def silent(strict=False):
+        raise macos.errors.CommandTimeoutError(["launchctl", "print-disabled"], 60)
+
+    monkeypatch.setattr(schedule, "_paused", silent)  # launchctl print-disabled out of time (an error reads as {})
+    calls = _refusing_launchctl(monkeypatch, fake_run, "none")
+    macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["bootout", "disable"]
+
+    # Unloading refused: nothing done, so nothing to put back (enabling could resume a job that was paused).
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootout")
+    with pytest.raises(macos.errors.CommandError, match="bootout failed"):
+        macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["bootout"]
+
+
+def test_schedule_pause_and_resume_dont_take_an_unanswered_question_for_not_paused(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")  # an error: before, read as "none paused"
+    macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "disable"]  # the unknown state's order
+
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled", also=("disable",))
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="disable failed") as caught:
+            macos.schedule.pause("backup")
+    assert "comes back at the next login: it couldn't be paused" in _notes_of(caught.value, reported)
+
+    # The other functions still read "won't say" as none paused, as before: listing jobs doesn't fail for it.
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")
+    assert [job.name for job in macos.schedule.jobs()] == ["backup"]
