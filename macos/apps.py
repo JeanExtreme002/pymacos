@@ -376,8 +376,9 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
 
     When a copy of the app is already running from another path (an older
     version in another folder, say), macOS brings that one to the front
-    rather than open the one asked for, and that running copy is returned:
-    check its ``path``.
+    rather than open the one asked for (with ``background=True``, it stays
+    behind), and that running copy is returned after a second, once the
+    one asked for hasn't come up: check its ``path``.
     """
     path = _locate(name)
     bundle_id = _bundle_id(path)
@@ -394,11 +395,14 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     started = time.monotonic()
     deadline = started + timeout
     while True:
-        # Opened in the background (open -g), a copy already running from elsewhere stays there, never in
-        # front: it's taken once the one at `path` has had a moment to come up instead (or the wait ends).
+        # A copy already running from elsewhere is only taken once the one at `path` has had a moment to come up
+        # (or the wait ends): one already in front before the call would otherwise pass for the one macOS opened.
+        # In front, it must be the active app; opened in the background (open -g), it stays there.
         now = time.monotonic()
-        settled = background and (now - started >= _BACKGROUND_SETTLE or now >= deadline)
-        app = _find_launched(path, bundle_id, running_before=running_before, in_front=not settled)
+        settled = now - started >= _COPY_SETTLE or now >= deadline
+        app = _find_launched(
+            path, bundle_id, running_before=running_before if settled else (), in_front=not background
+        )
         if app is not None:
             return app
         if now >= deadline:
@@ -406,7 +410,7 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
         time.sleep(0.1)
 
 
-_BACKGROUND_SETTLE = 1.0  # seconds open(background=True) gives the app at `path` before taking a running copy
+_COPY_SETTLE = 1.0  # seconds open() gives the app at `path` to come up before taking a copy that was running
 
 
 _ALL_ROLES = 0xFFFFFFFF  # kLSRolesAll

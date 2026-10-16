@@ -605,7 +605,7 @@ def test_schedule_pause_unloads_first_when_launchctl_wont_say_whether_its_paused
 
     macos.schedule.add("backup", home / "backup.py", every=60)
 
-    def silent():
+    def silent(strict=False):
         raise macos.errors.CommandTimeoutError(["launchctl", "print-disabled"], 60)
 
     monkeypatch.setattr(schedule, "_paused", silent)  # launchctl print-disabled out of time (an error reads as {})
@@ -618,3 +618,22 @@ def test_schedule_pause_unloads_first_when_launchctl_wont_say_whether_its_paused
     with pytest.raises(macos.errors.CommandError, match="bootout failed"):
         macos.schedule.pause("backup")
     assert [call[1] for call in calls] == ["bootout"]
+
+
+def test_schedule_pause_and_resume_dont_take_an_unanswered_question_for_not_paused(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")  # an error: before, read as "none paused"
+    macos.schedule.pause("backup")
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "disable"]  # the unknown state's order
+
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled", also=("disable",))
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="disable failed") as caught:
+            macos.schedule.pause("backup")
+    assert "comes back at the next login: it couldn't be paused" in _notes_of(caught.value, reported)
+
+    # The other functions still read "won't say" as none paused, as before: listing jobs doesn't fail for it.
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")
+    assert [job.name for job in macos.schedule.jobs()] == ["backup"]

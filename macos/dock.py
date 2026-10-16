@@ -181,6 +181,12 @@ def _tile_list(key: str) -> List[Dict[str, Any]]:
     """
     found = defaults.read(_DOMAIN, key, default=[])
     if not isinstance(found, list):
+        warnings.warn(
+            "the Dock's {} isn't a list of tiles (edited by hand?): it's read as empty, and a change to the "
+            "Dock here replaces it".format(key),
+            RuntimeWarning,
+            stacklevel=4,
+        )
         return []
     tiles = [tile for tile in found if isinstance(tile, dict)]
     if len(tiles) != len(found):

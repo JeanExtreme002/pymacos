@@ -173,3 +173,32 @@ def test_player_commands_read_the_running_players_once(players, monkeypatch):
     macos.music.pause()
     macos.music.volume()
     assert len(reads) == 3  # one read per call, not one per helper on the way
+
+
+def test_set_volume_takes_any_integer_without_a_warning(monkeypatch):
+    import warnings
+
+    from macos import music
+
+    class Integer:
+        """An integer that isn't an int, as numpy's are: operator.index takes it."""
+
+        def __index__(self):
+            return 40
+
+        def __int__(self):
+            return 40
+
+        def __le__(self, other):
+            return 40 <= other
+
+        def __ge__(self, other):
+            return 40 >= other
+
+    sent = []
+    monkeypatch.setattr(music, "_running_player", lambda app: "Music")
+    monkeypatch.setattr(music, "_osascript", lambda player, script: sent.append(script))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        music.set_volume(Integer())
+    assert sent == ['tell application "Music" to set sound volume to 40']

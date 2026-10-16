@@ -224,9 +224,11 @@ def test_dock_tiles_tolerate_hand_edited_values(dock_settings):
     # The lists of tiles replaced by something else, or holding something that isn't a tile: not a crash.
     store["persistent-apps"] = "Safari"
     store["persistent-others"] = {"tile-type": "directory-tile"}
-    assert macos.dock.apps() == [] and macos.dock.folders() == []
-    assert macos.dock.remove_app("Safari") is False and macos.dock.remove_spacers() == 0 and restarts == []
-    added = macos.dock.add_app("Code")  # written back as a proper list
+    with pytest.warns(RuntimeWarning, match="isn't a list of tiles"):
+        assert macos.dock.apps() == [] and macos.dock.folders() == []
+    with pytest.warns(RuntimeWarning, match="isn't a list of tiles"):
+        assert macos.dock.remove_app("Safari") is False and macos.dock.remove_spacers() == 0 and restarts == []
+        added = macos.dock.add_app("Code")  # written back as a proper list
     assert added.path == app and [entry.name for entry in macos.dock.apps()] == ["Code"]
     store["persistent-apps"] = [
         "Safari",

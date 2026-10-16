@@ -113,9 +113,10 @@ errors go to `job.log`, in `~/Library/Logs/pymacos`.
 {func}`~macos.schedule.pause` keeps a job without running it, even after a
 restart, and `job.paused` tells; {func}`~macos.schedule.resume` puts it back on
 its schedule. Pausing or removing a job also stops a run in progress. When
-launchd refuses one of these, the job is left as it was and the error raised:
-a job `resume` couldn't load again goes back to paused, or, if it wasn't
-paused, stays unloaded until the next login (the error says so).
+launchd refuses to pause a job, it's left as it was and the error raised (if
+it was stopped but not paused, the error says so); a job `resume` couldn't
+load again goes back to paused, or, if it wasn't paused, stays unloaded until
+the next login (the error says so).
 
 ## Reference
 

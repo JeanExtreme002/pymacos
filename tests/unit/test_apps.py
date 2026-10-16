@@ -774,3 +774,28 @@ def test_open_in_the_background_takes_the_running_copy_after_a_moment_not_at_onc
     # In front, a copy that stays in the background isn't what macOS opened: the wait ends in an error.
     with pytest.raises(macos.AppNotFoundError, match="did not show up"):
         apps.open("Tool", timeout=0.5)
+
+
+def test_open_doesnt_take_a_copy_that_was_in_front_already_before_the_one_asked_for_can_come_up(fake_run, monkeypatch):
+    from macos import apps
+
+    clock = [100.0]
+    asked = "/Volumes/Disk/Tool.app"
+    running = apps.App("Tool", "com.example.tool", 7, "/Applications/Tool.app")
+    launched = apps.App("Tool", "com.example.tool", 8, asked)
+    handles = [7]
+    monkeypatch.setattr(apps, "_locate", lambda name: asked)
+    monkeypatch.setattr(apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(apps, "_objc", _FakeObjC(handles))  # 7 is active, as the app in front before the call
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: asked if handle == 8 else running.path)
+    monkeypatch.setattr(apps, "_app", lambda handle: launched if handle == 8 else running)
+    monkeypatch.setattr(apps.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] >= 100.5 and 8 not in handles:
+            handles.append(8)  # the one asked for comes up half a second in
+
+    monkeypatch.setattr(apps.time, "sleep", sleep)
+    assert apps.open("Tool") == launched  # not the copy that was already in front

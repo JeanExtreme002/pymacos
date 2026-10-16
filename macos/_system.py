@@ -317,13 +317,20 @@ def launchd_user_domain() -> str:
     return "gui/{}".format(os.getuid())
 
 
-def launchd_disabled(domain: str) -> Dict[str, bool]:
-    """launchctl's own on/off switches in ``domain``: label -> disabled; ``{}`` when it won't say."""
+def launchd_disabled(domain: str, *, strict: bool = False) -> Dict[str, bool]:
+    """
+    launchctl's own on/off switches in ``domain``: label -> disabled; ``{}`` when it won't say.
+
+    ``strict=True`` raises its :class:`CommandError` instead, for a caller that must tell "none is off"
+    from "launchctl won't say".
+    """
     import re
 
     try:
         output = run(["launchctl", "print-disabled", domain], timeout=LAUNCHCTL_TIMEOUT)
     except CommandError:
+        if strict:
+            raise
         return {}
     # Written as words or as booleans, depending on the macOS version: "disabled" and true mean off.
     found = re.findall(r'"([^"]+)"\s*=>\s*(enabled|disabled|true|false)', output)

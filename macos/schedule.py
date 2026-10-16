@@ -424,9 +424,12 @@ def _bootout(name: str) -> None:
             raise
 
 
-def _paused() -> List[str]:
-    """The names of the paused jobs, from ``launchctl print-disabled``."""
-    switches = launchd_disabled(_domain())
+def _paused(*, strict: bool = False) -> List[str]:
+    """
+    The names of the paused jobs, from ``launchctl print-disabled``: none when it won't say, unless ``strict``
+    (then its error), for pause() and resume(), whose rollback must not take "won't say" for "not paused".
+    """
+    switches = launchd_disabled(_domain(), strict=strict)
     return [label[len(_PREFIX):] for label, disabled in switches.items() if disabled and label.startswith(_PREFIX)]
 
 
@@ -518,12 +521,16 @@ def pause(name: str) -> None:
     """
     _existing_job(name)
     try:
-        was_paused = name in _paused()  # a job paused already stays paused, whatever happens below
+        was_paused = name in _paused(strict=True)  # a job paused already stays paused, whatever happens below
     except (CommandError, CommandTimeoutError):
-        # Not known: unloaded first, then disabled, so a refusal leaves the job as it was with nothing to put
-        # back (enabling it again could resume a job that was paused).
+        # Not known: unloaded first, then disabled, so a refusal of the unloading leaves the job as it was with
+        # nothing to put back (enabling it again could resume a job that was paused).
         _bootout(name)
-        _run(["launchctl", "disable", _target(name)])
+        try:
+            _run(["launchctl", "disable", _target(name)])
+        except BaseException as error:
+            add_note(error, "the job {!r} was stopped, but comes back at the next login: it couldn't be paused".format(name))
+            raise
         return
     # Disabled first: that alone changes nothing until the next login, so a refusal leaves the job as it
     # was. Unloaded second, and enabled again if that fails, rather than left loaded with a switch that
@@ -555,7 +562,7 @@ def resume(name: str) -> None:
     """
     path = _existing_job(name)
     try:
-        was_paused = name in _paused()  # read first: resuming is what changes it
+        was_paused = name in _paused(strict=True)  # read first: resuming is what changes it
     except (CommandError, CommandTimeoutError):
         was_paused = False  # launchctl wouldn't say: only the rollback below needs it, and the error will say
     _bootout(name)  # resuming a job that isn't paused: reload it

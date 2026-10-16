@@ -218,7 +218,8 @@ def delete(domain: str, key: str, *, current_host: bool = False) -> bool:
     """
     Remove ``key`` from ``domain``; return whether it was set.
 
-    Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable.
+    Like :func:`write`, raises :class:`~macos.errors.PermissionDeniedError` when the domain isn't writable,
+    and :class:`ValueError` for a domain with a slash in it (a file's path).
     """
     _check(domain, key)
     existed = _own(domain, key, _MISSING, current_host) is not _MISSING
@@ -254,7 +255,8 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
             record_demo()
         macos.finder.restart()                           # Finder reads it again: the icons are back
 
-    Each argument is a ``(domain, key)`` pair, or a whole domain (``"com.apple.dock"``).
+    Each argument is a ``(domain, key)`` pair, or a whole domain (``"com.apple.dock"``); one with a slash
+    in it (a file's path) raises :class:`ValueError` before anything is read, as it would be written back.
     Keys that weren't set are deleted again, not written with a value, so
     macOS goes back to its own default. It restores the preferences only:
     restart the Dock, Finder or app that read the changed ones, as the

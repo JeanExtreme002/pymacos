@@ -57,7 +57,8 @@ It raises {class}`~macos.AppNotFoundError` if no installed app matches, or if
 the app doesn't show up within `timeout` seconds (10 by default). When a copy
 of the app is already running from another path (an older version in another
 folder, say), macOS brings that one to the front rather than open the one
-asked for, and that running copy is returned: check its `path`.
+asked for (with `background=True`, it stays behind), and that running copy is
+returned after a second, once the one asked for hasn't come up: check its `path`.
 
 A name is only treated as a path when it contains a `/` (or starts with `~`),
 so `open("Notes")` finds the Notes app even if the current directory has a
