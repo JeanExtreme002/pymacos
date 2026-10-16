@@ -92,7 +92,11 @@ def test_audio_editing(speech, tmp_path):
 
     if speech.name == "speech.aiff":  # not the tone the fixture falls back to
         labels = dict(audio.classify(speech))
-        assert labels.get("speech", 0) > 0.5
+        # Since GitHub's macos-26-arm64 image 20261013, the classifier hears nothing in some jobs: name what
+        # it did hear, under any confidence, so a failure tells a silent file from a silent classifier.
+        assert labels.get("speech", 0) > 0.5, "heard {} in {:.2f} s of speech".format(
+            audio.classify(speech, limit=10, min_confidence=0.0), details.duration
+        )
     # Shorter than the classifier's usual 3-second window: still heard.
     assert audio.classify("/System/Library/Sounds/Tink.aiff")
 

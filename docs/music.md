@@ -45,6 +45,9 @@ macos.music.seek(90)        # jump to 1:30 in the current song
 ```
 
 The player's volume is separate from the system volume ({mod}`macos.volume`).
+It takes an int: another number (`40.5`) is rounded down and warns
+(`DeprecationWarning`), and pymacos 2.0 will raise `TypeError` instead, as
+{func}`macos.volume.set` does.
 These need the player running, and raise {class}`~macos.MacOSError`
 otherwise.
 

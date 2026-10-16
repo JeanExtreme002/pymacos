@@ -1,6 +1,7 @@
 """Unit tests for :mod:`macos.music`. They run on any platform."""
 
 import subprocess
+import warnings
 
 import pytest
 
@@ -116,6 +117,20 @@ def test_player_volume_and_seek(players):
     assert players.commands == [("Spotify", "set sound volume to 30"), ("Music", "set player position to 62.5")]
 
 
+def test_player_volume_warns_about_a_level_that_isnt_an_int(players):
+    players.volumes = {"Music": 40, "Spotify": 75}
+
+    with pytest.warns(DeprecationWarning, match="2.0 will raise TypeError"):
+        macos.music.set_volume(30.9)
+    with pytest.warns(DeprecationWarning):
+        macos.music.set_volume(True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.music.set_volume(30)  # an int: no warning
+
+    assert players.commands == [("Spotify", "set sound volume to {}".format(level)) for level in (30, 1, 30)]
+
+
 def test_player_controls_never_open_a_player(players):
     players.running = []
 
@@ -158,3 +173,32 @@ def test_player_commands_read_the_running_players_once(players, monkeypatch):
     macos.music.pause()
     macos.music.volume()
     assert len(reads) == 3  # one read per call, not one per helper on the way
+
+
+def test_set_volume_takes_any_integer_without_a_warning(monkeypatch):
+    import warnings
+
+    from macos import music
+
+    class Integer:
+        """An integer that isn't an int, as numpy's are: operator.index takes it."""
+
+        def __index__(self):
+            return 40
+
+        def __int__(self):
+            return 40
+
+        def __le__(self, other):
+            return 40 <= other
+
+        def __ge__(self, other):
+            return 40 >= other
+
+    sent = []
+    monkeypatch.setattr(music, "_running_player", lambda app: "Music")
+    monkeypatch.setattr(music, "_osascript", lambda player, script: sent.append(script))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        music.set_volume(Integer())
+    assert sent == ['tell application "Music" to set sound volume to 40']

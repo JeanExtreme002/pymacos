@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.vision`. They run on any platform."""
 
+import warnings
+
 import pytest
 
 import macos
@@ -36,9 +38,23 @@ def test_joint_names_are_readable():
     assert len(macos.vision._BODY_JOINTS) == 19 and len(macos.vision._HAND_JOINTS) == 21
 
 
-def test_vision_argument_checks():
+def test_vision_argument_checks(monkeypatch):
     with pytest.raises(ValueError):
         macos.vision.classify(b"image", limit=0)
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(macos.vision, "_load", lambda: None)
+    monkeypatch.setattr(macos.vision._objc, "autorelease_pool", nullcontext)  # no Objective-C: runs on Linux too
+    monkeypatch.setattr(macos.vision._objc, "new", lambda name: 0)  # the request isn't made: nothing is classified
+    monkeypatch.setattr(macos.vision, "_perform", lambda image, request: [])
+    for bad in (1.5, -0.1, True, "0.5", None):  # 1.5 finds nothing, quietly; True reads as 1.0: said, refused in 2.0
+        with pytest.warns(DeprecationWarning, match="min_confidence from 0.0 to 1.0, not {!r}".format(bad)):
+            assert macos.vision.classify(b"image", min_confidence=bad) == []
+    from fractions import Fraction
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert macos.vision.classify(b"image", min_confidence=Fraction(1, 2)) == []  # a number: fine
     with pytest.raises(ValueError, match="threshold"):
         macos.vision.duplicates([b"image"], threshold=0)
     with pytest.raises(ValueError, match="positive"):

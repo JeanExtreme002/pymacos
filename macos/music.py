@@ -17,6 +17,8 @@ IDE) to control the player; if that's denied,
 """
 
 import math
+import operator
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -197,10 +199,32 @@ def volume(app: Optional[str] = None) -> int:
     return int(round(level))
 
 
+def _integral(value: object) -> bool:
+    """Whether ``value`` is an integer: an int, or one of numpy's (what operator.index takes)."""
+    try:
+        operator.index(value)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    return True
+
+
 def set_volume(level: int, app: Optional[str] = None) -> None:
-    """Set the player's own volume, from 0 to 100. ``app`` works as in :func:`volume`."""
+    """
+    Set the player's own volume, an int from 0 to 100. ``app`` works as in :func:`volume`.
+
+    Another number (``40.5``, ``True``) is rounded down today, and warns
+    (``DeprecationWarning``): pymacos 2.0 will raise :class:`TypeError`
+    instead, as :func:`macos.volume.set` does.
+    """
     if not 0 <= level <= 100:
         raise ValueError("volume must be from 0 to 100, not {}".format(level))
+    if isinstance(level, bool) or not _integral(level):  # one it refuses already (NaN, 120.5) doesn't warn too
+        warnings.warn(
+            "macos.music.set_volume() takes an int from 0 to 100, not {!r}: it's rounded down today, "
+            "and pymacos 2.0 will raise TypeError; pass int(level)".format(level),
+            DeprecationWarning,
+            stacklevel=2,
+        )
     player = _running_player(app)
     _osascript(player, 'tell application "{}" to set sound volume to {}'.format(player, int(level)))
 

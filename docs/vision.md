@@ -24,6 +24,7 @@ macos.vision.text(macos.clipboard.paste_image())      # text of a copied image
 macos.vision.text(macos.screenshot(region=(0, 0, 800, 600)))
 ```
 
+Bytes that aren't an image raise {class}`~macos.MacOSError`.
 Vision reads images, not PDFs: a PDF raises `ValueError`. Draw the pages you
 want with {func}`macos.pdf.render` first:
 
@@ -98,7 +99,9 @@ macos.vision.classify("holiday.jpg")
 ```
 
 Labels are English words from Vision's own list of over a thousand categories.
-`limit` (5 by default) and `min_confidence` (0.1) decide how many come back.
+`limit` (5 by default) and `min_confidence` (0.1, from 0.0 to 1.0) decide how
+many come back; a `min_confidence` outside that range is used as it is today
+and warns (`DeprecationWarning`): pymacos 2.0 will raise `ValueError`.
 
 ## Faces
 

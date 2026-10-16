@@ -3,6 +3,8 @@
 import sys
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 import pytest
 
 import macos
@@ -68,7 +70,7 @@ def test_set_taken_at_writes_the_offset(monkeypatch):
     assert written[2] == {"{GPS}": {"Latitude": 22.95, "LatitudeRef": "S", "Longitude": 43.21, "LongitudeRef": "E"}}
 
 
-def test_image_argument_checks(tmp_path):
+def test_image_argument_checks(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="needs a width"):
         macos.image.resize(__file__, tmp_path / "out.png")
     with pytest.raises(ValueError, match="positive"):
@@ -83,6 +85,13 @@ def test_image_argument_checks(tmp_path):
         macos.image.rotate(__file__, tmp_path / "out.png", 45)
     with pytest.raises(ValueError, match=r"int multiple of 90, not 90\.0"):  # was a TypeError from deep inside
         macos.image.rotate(__file__, tmp_path / "out.png", 90.0)
+    edits = []
+    monkeypatch.setattr(macos.image, "_edit", lambda *args: edits.append(args) or Path("out.png"))
+    with pytest.warns(DeprecationWarning, match="not True: it's taken as 1"), pytest.raises(ValueError, match="not 1"):
+        macos.image.rotate(__file__, tmp_path / "out.png", True)  # 1 degree: no angle, as before, said more clearly
+    with pytest.warns(DeprecationWarning, match="not False: it's taken as 0"):
+        macos.image.rotate(__file__, tmp_path / "out.png", False)  # a copy, as before; 2.0 refuses it
+    assert len(edits) == 1
     with pytest.raises(ValueError, match="direction"):
         macos.image.flip(__file__, tmp_path / "out.png", direction="diagonal")
     with pytest.raises(ValueError, match="positive"):

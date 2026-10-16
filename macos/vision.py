@@ -16,8 +16,10 @@ Photos and Preview: nothing to install and no permission needed.
 
 import ctypes
 import math
+import numbers
 import os
 import re
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -135,11 +137,8 @@ def _handler(image: Image) -> int:
             handler, "initWithData:options:", _objc.nsdata(bytes(image)), options, argtypes=(_objc.id, _objc.id)
         )
     else:
-        path = Path(image).expanduser().absolute()
-        if not path.exists():
-            raise FileNotFoundError(str(path))
         handler = _objc.send(
-            handler, "initWithURL:options:", _objc.file_url(path), options, argtypes=(_objc.id, _objc.id)
+            handler, "initWithURL:options:", _objc.file_url(_files.existing(image)), options, argtypes=(_objc.id, _objc.id)
         )
     return _objc.send(handler, "autorelease")
 
@@ -221,7 +220,8 @@ def lines(image: Image, *, languages: Optional[Sequence[str]] = None, fast: bool
     :func:`macos.pdf.render`. ``languages`` lists the languages to
     expect, most likely first (e.g. ``["fr-FR", "en-US"]``; see
     :func:`languages`); by default Vision detects them. ``fast=True`` trades
-    accuracy for speed.
+    accuracy for speed. Bytes that aren't an image raise
+    :class:`~macos.MacOSError` (``"the image could not be read"``).
     """
     _load()
     found: List[Any] = []
@@ -376,6 +376,18 @@ def barcodes(image: Image) -> List[Barcode]:
     return found
 
 
+def _check_confidence(min_confidence: Any, function: str) -> None:
+    """Warn for a ``min_confidence`` that isn't a number from 0.0 to 1.0: used as it is today, refused in 2.0."""
+    a_number = isinstance(min_confidence, numbers.Real) and not isinstance(min_confidence, bool)
+    if not a_number or not 0.0 <= float(min_confidence) <= 1.0:
+        warnings.warn(
+            "{}() takes min_confidence from 0.0 to 1.0, not {!r}: it's used as it is today, and pymacos 2.0 will "
+            "raise ValueError".format(function, min_confidence),
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+
 def classify(image: Image, *, limit: int = 5, min_confidence: float = 0.1) -> List[Tuple[str, float]]:
     """
     Say what an image shows, as ``(label, confidence)`` pairs, most likely first.
@@ -385,10 +397,14 @@ def classify(image: Image, *, limit: int = 5, min_confidence: float = 0.1) -> Li
         macos.vision.classify("holiday.jpg")   # [('beach', 0.91), ('sky', 0.87), ('ocean', 0.74)]
 
     Labels are English words from Vision's own taxonomy (over a thousand
-    categories, such as ``'dog'``, ``'food'`` or ``'document'``).
+    categories, such as ``'dog'``, ``'food'`` or ``'document'``). Only those
+    at least ``min_confidence`` sure (from 0.0 to 1.0) are given. One outside
+    that range, or a ``bool``, is used as it is today (1.5 finds nothing) and
+    warns (``DeprecationWarning``); pymacos 2.0 will raise :class:`ValueError`.
     """
     if limit <= 0:
         raise ValueError("limit must be positive, not {}".format(limit))
+    _check_confidence(min_confidence, "macos.vision.classify")
     _load()
     with _objc.autorelease_pool():
         observations = _perform(image, _objc.new("VNClassifyImageRequest"))

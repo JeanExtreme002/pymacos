@@ -48,6 +48,16 @@ def test_entities():
     assert ("São Paulo", "place", 17) in [(entity.text, entity.kind, entity.start) for entity in found]
 
 
+def test_positions_count_python_characters_not_utf16_units():
+    # NaturalLanguage counts in UTF-16 units, where an emoji is two; a start is a Python index, where it's one.
+    text = "🙂🙂 Tim Cook went to Paris. 👨‍👩‍👧 Then Sundar Pichai arrived in London."
+    found = {(entity.text, entity.kind): entity.start for entity in macos.language.entities(text, language="en")}
+    assert found[("Tim Cook", "person")] == 3 and text[3:11] == "Tim Cook"
+    assert found[("London", "place")] == text.index("London")
+    assert "London" in macos.language.keywords(text, language="en")
+    assert "arrive" in macos.language.keywords(text, language="en", lemmas=True, verbs=True)
+
+
 def test_entities_without_the_language_model():
     with pytest.raises(macos.NotSupportedError):
         macos.language.entities("東京でティム・クックに会いました", language="ja")

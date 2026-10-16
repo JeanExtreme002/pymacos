@@ -17,7 +17,7 @@ no permission.
 import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import _files, _objc
 from ._objc import NSInteger, NSUInteger
@@ -93,26 +93,66 @@ def sentiment(text: str) -> Optional[float]:
     if scheme is None:
         return None
     with _objc.autorelease_pool():
-        tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
-        tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of([scheme]), argtypes=(_objc.id,))
-        _objc.send(tagger, "autorelease")
-        _objc.send(tagger, "setString:", _objc.nsstring(flat), argtypes=(_objc.id,), restype=None)
-        tag = _objc.send(
-            tagger,
-            "tagAtIndex:unit:scheme:tokenRange:",
-            0,
-            _PARAGRAPH,
-            scheme,
-            None,
-            argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
-        )
-        score = _objc.pystring(tag)
+        score = _tag(_tagger(flat, [scheme]), 0, _PARAGRAPH, scheme)
     return float(score) if score else None
 
 
 _COSINE = 0  # NLDistanceTypeCosine
 _WORD = 0  # NLTokenUnitWord
 _ENTITY_KINDS = {"PersonalName": "person", "PlaceName": "place", "OrganizationName": "organization"}
+
+
+def _utf16_length(text: str) -> int:
+    """``text``'s length as Foundation counts it, in UTF-16 units: encoded in C, not walked in Python."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _tagger(text: str, schemes: Sequence[int], language: Optional[str] = None) -> int:
+    """An autoreleased ``NLTagger`` over ``text`` for the tag ``schemes``, told the ``language`` (a code) when given."""
+    tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
+    tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of(list(schemes)), argtypes=(_objc.id,))
+    _objc.send(tagger, "autorelease")
+    _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
+    if language is not None:
+        whole = _files.NSRange(0, _utf16_length(text))
+        _objc.send(
+            tagger, "setLanguage:range:", _objc.nsstring(language), whole, argtypes=(_objc.id, _files.NSRange), restype=None
+        )
+    return tagger
+
+
+def _tag(tagger: int, index: int, unit: int, scheme: int, token: Optional[_files.NSRange] = None) -> Optional[str]:
+    """The tag of ``scheme`` at ``index`` (in UTF-16 units), the token's range written to ``token`` when given."""
+    tag = _objc.send(
+        tagger,
+        "tagAtIndex:unit:scheme:tokenRange:",
+        index,
+        unit,
+        scheme,
+        ctypes.byref(token) if token is not None else None,
+        argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
+    )
+    return _objc.pystring(tag)
+
+
+def _words(tagger: int, text: str, scheme: int) -> Iterator[Tuple[int, int, int, Optional[str]]]:
+    """
+    The words of ``text`` as the tagger finds them, with their tag of ``scheme``: ``(index, start, end, tag)``,
+    where ``index`` is where the word was asked for and ``start``/``end`` where it is, all in UTF-16 units.
+    Punctuation and spaces come too, with no tag; a word's tag is read at ``index`` again for another scheme.
+    """
+    index, total = 0, _utf16_length(text)
+    while index < total:
+        token = _files.NSRange()
+        tag = _tag(tagger, index, _WORD, scheme, token)
+        end = token.location + token.length
+        yield index, token.location, end, tag
+        index = max(end, index + 1)  # always forward, even for a token of no length
+
+
+def _python_indexes(text: str) -> Dict[int, int]:
+    """Python's index for each UTF-16 position the tagger gives (one past the end included)."""
+    return {position: index for index, position in enumerate(_objc.utf16_offsets(text))}
 
 
 def _language_of(text: str, language: Optional[str]) -> str:
@@ -274,38 +314,13 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
     if scheme is None:
         raise NotSupportedError("name recognition is not available on this Mac")
     # NSString indexes count UTF-16 units; map them back to Python indexes.
-    units = text.encode("utf-16-le")
-    offsets = {}
-    position = 0
-    for index, char in enumerate(text):
-        offsets[position] = index
-        position += len(char.encode("utf-16-le")) // 2
-    offsets[position] = len(text)
-
+    offsets = _python_indexes(text)
     words: List[Tuple[int, int, str]] = []
     with _objc.autorelease_pool():
-        tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
-        tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of([scheme]), argtypes=(_objc.id,))
-        _objc.send(tagger, "autorelease")
-        _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
-        whole = _files.NSRange(0, len(units) // 2)
-        _objc.send(tagger, "setLanguage:range:", _objc.nsstring(code), whole, argtypes=(_objc.id, _files.NSRange), restype=None)
-        index, total = 0, len(units) // 2
-        while index < total:
-            found = _files.NSRange()
-            tag = _objc.send(
-                tagger,
-                "tagAtIndex:unit:scheme:tokenRange:",
-                index,
-                _WORD,
-                scheme,
-                ctypes.byref(found),
-                argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
-            )
-            kind = _ENTITY_KINDS.get(_objc.pystring(tag) or "")
-            if kind and found.length:
-                words.append((found.location, found.location + found.length, kind))
-            index = max(found.location + found.length, index + 1)
+        for _, start, end, tag in _words(_tagger(text, [scheme], code), text, scheme):
+            kind = _ENTITY_KINDS.get(tag or "")
+            if kind and end > start:
+                words.append((start, end, kind))
 
     # Join neighbouring words of the same kind ("São" + "Paulo").
     merged: List[Tuple[int, int, str]] = []
@@ -350,50 +365,17 @@ def keywords(text: str, *, language: Optional[str] = None, verbs: bool = False, 
         raise NotSupportedError("word classes are not available on this Mac")
     wanted = {"Noun", "Verb"} if verbs else {"Noun"}
 
-    units = text.encode("utf-16-le")
+    offsets = _python_indexes(text)
     found: List[str] = []
     seen = set()
     with _objc.autorelease_pool():
-        tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
-        tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of([lexical, lemma]), argtypes=(_objc.id,))
-        _objc.send(tagger, "autorelease")
-        _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
-        total = len(units) // 2
-        _objc.send(
-            tagger,
-            "setLanguage:range:",
-            _objc.nsstring(code),
-            _files.NSRange(0, total),
-            argtypes=(_objc.id, _files.NSRange),
-            restype=None,
-        )
-        index = 0
-        while index < total:
-            token = _files.NSRange()
-            kind = _objc.send(
-                tagger,
-                "tagAtIndex:unit:scheme:tokenRange:",
-                index,
-                _WORD,
-                lexical,
-                ctypes.byref(token),
-                argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
-            )
-            if token.length and _objc.pystring(kind) in wanted:
-                word = units[token.location * 2 : (token.location + token.length) * 2].decode("utf-16-le")
+        tagger = _tagger(text, [lexical, lemma], code)
+        for index, start, end, kind in _words(tagger, text, lexical):
+            if end > start and kind in wanted:
+                word = text[offsets[start]:offsets[end]]
                 if lemmas:
-                    base = _objc.send(
-                        tagger,
-                        "tagAtIndex:unit:scheme:tokenRange:",
-                        index,
-                        _WORD,
-                        lemma,
-                        None,
-                        argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
-                    )
-                    word = _objc.pystring(base) or word
+                    word = _tag(tagger, index, _WORD, lemma) or word
                 if word.casefold() not in seen:
                     seen.add(word.casefold())
                     found.append(word)
-            index = max(token.location + token.length, index + 1)
     return found

@@ -464,3 +464,15 @@ def test_an_exception_in_the_classifier_callback_ends_the_analysis_with_that_err
         assert "cancelAnalysis" in sent
     finally:
         audio._heard.pop(7, None)
+
+
+def test_classify_warns_for_a_min_confidence_out_of_range_as_vision_does(monkeypatch, tmp_path):
+    from macos import _cf, audio
+
+    clip = tmp_path / "clip.m4a"
+    clip.write_bytes(b"")
+    monkeypatch.setattr(audio, "framework", lambda name: None)
+    monkeypatch.setattr(_cf, "constant", lambda library, name: (_ for _ in ()).throw(_cf.Unavailable(name)))
+    with pytest.warns(DeprecationWarning, match=r"macos\.audio\.classify\(\) takes min_confidence from 0\.0 to 1\.0, not 1\.5"):
+        with pytest.raises(macos.NotSupportedError):  # stops right after the check: no classifier here
+            macos.audio.classify(clip, min_confidence=1.5)
