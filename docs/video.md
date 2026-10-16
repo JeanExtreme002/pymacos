@@ -25,7 +25,8 @@ Path("cover.png").write_bytes(macos.video.frame("clip.mov", at=3.0))
 Path("thumb.png").write_bytes(macos.video.frame("clip.mov", at=3.0, size=320))
 ```
 
-`size` limits the longest side, for thumbnails.
+`size` limits the longest side, for thumbnails. `at` may be the duration
+{func}`~macos.video.info` gives: that's the last frame.
 
 ## Converting
 
@@ -49,8 +50,9 @@ macos.video.convert("talk.mov", "talk.m4a")                        # the sound o
   high quality or at `height=1080` or `2160`.
 
 It uses the `avconvert` command that ships with macOS, and replaces the output
-if it exists; the output can't be the source itself (it raises `ValueError`).
-To record the screen, see {func}`macos.screen.record`.
+if it exists, which may be the source itself; a conversion that fails leaves
+the file that was there as it was. To record the screen, see
+{func}`macos.screen.record`.
 
 ## Animated GIFs
 
@@ -90,6 +92,9 @@ macos.video.reverse("jump.mov", "jump-backwards.mov")
 - {func}`~macos.video.speed` keeps the sound's pitch.
 - {func}`~macos.video.crop` measures the box on the upright picture, in
   pixels from the top-left corner.
+- A video marked to play turned (a portrait phone video, or
+  {func}`~macos.video.rotate`'s output) stays turned through every edit, and
+  another turn adds to it: rotating by 90 twice is rotating by 180.
 - {func}`~macos.video.reverse` plays the sound backwards too. It reads every
   frame, so it's best for short clips; it reads them a few at a time (about
   256 MB of frames at once), so a long or 4K one takes time, not all the memory.
