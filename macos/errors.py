@@ -63,7 +63,7 @@ class CommandError(MacOSError):
         # The command's name only, as in str(): the default repr would print self.args, that is the
         # whole command line, and the arguments can hold a URL with a token, a dialog's default text,
         # a notification... which a traceback or a log line mustn't show. ``cmd`` keeps them for
-        # whoever asks for them.
+        # whoever asks for them. ``stderr`` stays as the command wrote it, and may quote one.
         return "{}({!r}, returncode={!r}, stderr={!r})".format(
             type(self).__name__, self.cmd[0], self.returncode, self.stderr
         )

@@ -269,9 +269,14 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     """
     missing = object()
     saved: List[Tuple[str, Optional[str], Any]] = []  # (domain, key or None for all, value)
-    for item in what:
+    for item in what:  # every domain checked before any is read
         if isinstance(item, str):
             _check(item)
+        else:
+            domain, key = item
+            _check(domain)
+    for item in what:
+        if isinstance(item, str):
             # The domain's own layer, as keys() lists it and the restore writes it back:
             # read() would give the values in effect, from a profile or the global
             # domain too, and the restore would copy those into the user's own file.
@@ -279,7 +284,6 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
             saved.append((item, None, {name: value for name, value in own.items() if value is not missing}))
         else:
             domain, key = item
-            _check(domain)
             saved.append((domain, key, _own(domain, key, missing, current_host)))
     failed: Optional[BaseException] = None
     try:

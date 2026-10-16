@@ -216,6 +216,9 @@ def test_defaults_refuse_a_domain_that_is_a_path(monkeypatch, domain):
     with pytest.raises(ValueError, match="not a path"):
         with macos.defaults.restored((domain, "key")):
             pass
+    with pytest.raises(ValueError, match="not a path"):  # after a good one: refused before that one is read
+        with macos.defaults.restored("com.example.app", (domain, "key")):
+            pass
 
 
 @pytest.mark.parametrize(
