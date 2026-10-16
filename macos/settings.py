@@ -269,209 +269,181 @@ def _set_night_shift_schedule(schedule: Any) -> None:
     screen.set_night_shift_schedule(tuple(schedule) if isinstance(schedule, list) else schedule)
 
 
-# Section -> name -> how to read and change it, with JSON values.
+def _on_off(read: Callable[[], Any], change: Callable[[Any], None]) -> _Setting:
+    """A setting that is on or off."""
+    return _Setting(read, change, _flag)
+
+
+# Section -> name -> how to read and change it, with JSON values, and the check of the value.
+# The check is given with the setting: one kept in a table of its own was easy to forget, and a
+# setting without one would have been checked as a flag, refusing every valid value.
 _SETTINGS: Dict[str, Dict[str, _Setting]] = {
     "keyboard": {
         "key_repeat": _Setting(
-            lambda: list(keyboard.key_repeat()), lambda value: keyboard.set_key_repeat(value[0], delay=value[1])
+            lambda: list(keyboard.key_repeat()), lambda value: keyboard.set_key_repeat(value[0], delay=value[1]), _key_repeat
         ),
-        "press_and_hold": _Setting(keyboard.press_and_hold, keyboard.set_press_and_hold),
-        "standard_function_keys": _Setting(keyboard.standard_function_keys, keyboard.set_standard_function_keys),
-        "fn_key_action": _Setting(keyboard.fn_key_action, keyboard.set_fn_key_action),
-        "autocorrect": _Setting(keyboard.autocorrect, keyboard.set_autocorrect),
-        "smart_quotes": _Setting(keyboard.smart_quotes, keyboard.set_smart_quotes),
-        "smart_dashes": _Setting(keyboard.smart_dashes, keyboard.set_smart_dashes),
-        "auto_capitalization": _Setting(keyboard.auto_capitalization, keyboard.set_auto_capitalization),
-        "double_space_period": _Setting(keyboard.double_space_period, keyboard.set_double_space_period),
-        "inline_predictions": _Setting(keyboard.inline_predictions, keyboard.set_inline_predictions),
-        "full_keyboard_access": _Setting(keyboard.full_keyboard_access, keyboard.set_full_keyboard_access),
-        "system_shortcuts": _Setting(keyboard.system_shortcuts, _each(keyboard.set_system_shortcut)),
-        "remappings": _Setting(keyboard.remappings, _set_remappings),
-        "backlight_timeout": _Setting(keyboard.backlight_timeout, keyboard.set_backlight_timeout),
+        "press_and_hold": _on_off(keyboard.press_and_hold, keyboard.set_press_and_hold),
+        "standard_function_keys": _on_off(keyboard.standard_function_keys, keyboard.set_standard_function_keys),
+        "fn_key_action": _Setting(
+            keyboard.fn_key_action, keyboard.set_fn_key_action, _choice(("emoji", "input_source", "dictation"), optional=True)
+        ),
+        "autocorrect": _on_off(keyboard.autocorrect, keyboard.set_autocorrect),
+        "smart_quotes": _on_off(keyboard.smart_quotes, keyboard.set_smart_quotes),
+        "smart_dashes": _on_off(keyboard.smart_dashes, keyboard.set_smart_dashes),
+        "auto_capitalization": _on_off(keyboard.auto_capitalization, keyboard.set_auto_capitalization),
+        "double_space_period": _on_off(keyboard.double_space_period, keyboard.set_double_space_period),
+        "inline_predictions": _on_off(keyboard.inline_predictions, keyboard.set_inline_predictions),
+        "full_keyboard_access": _on_off(keyboard.full_keyboard_access, keyboard.set_full_keyboard_access),
+        "system_shortcuts": _Setting(
+            keyboard.system_shortcuts,
+            _each(keyboard.set_system_shortcut),
+            _entries(keyboard.SYSTEM_SHORTCUTS, lambda name, on: _flag(on)),
+        ),
+        "remappings": _Setting(keyboard.remappings, _set_remappings, _check_remappings),
+        "backlight_timeout": _Setting(
+            keyboard.backlight_timeout, keyboard.set_backlight_timeout, _number(above=0, optional=True)
+        ),
     },
     "trackpad": {
-        "tap_to_click": _Setting(trackpad.tap_to_click, trackpad.set_tap_to_click),
-        "natural_scrolling": _Setting(trackpad.natural_scrolling, trackpad.set_natural_scrolling),
-        "tracking_speed": _Setting(trackpad.tracking_speed, trackpad.set_tracking_speed),
-        "click_pressure": _Setting(trackpad.click_pressure, trackpad.set_click_pressure),
-        "secondary_click": _Setting(trackpad.secondary_click, trackpad.set_secondary_click),
-        "three_finger_drag": _Setting(trackpad.three_finger_drag, trackpad.set_three_finger_drag),
-        "gestures": _Setting(trackpad.gestures, _each(trackpad.set_gesture)),
+        "tap_to_click": _on_off(trackpad.tap_to_click, trackpad.set_tap_to_click),
+        "natural_scrolling": _on_off(trackpad.natural_scrolling, trackpad.set_natural_scrolling),
+        "tracking_speed": _Setting(trackpad.tracking_speed, trackpad.set_tracking_speed, _number(0, 1)),
+        "click_pressure": _Setting(trackpad.click_pressure, trackpad.set_click_pressure, _choice(("light", "medium", "firm"))),
+        "secondary_click": _Setting(
+            trackpad.secondary_click,
+            trackpad.set_secondary_click,
+            _choice(("two_fingers", "bottom_right", "bottom_left"), optional=True),
+        ),
+        "three_finger_drag": _on_off(trackpad.three_finger_drag, trackpad.set_three_finger_drag),
+        "gestures": _Setting(trackpad.gestures, _each(trackpad.set_gesture), _entries(trackpad.GESTURES, _gesture)),
     },
     "mouse": {
-        "tracking_speed": _Setting(mouse.tracking_speed, mouse.set_tracking_speed),
-        "acceleration": _Setting(mouse.acceleration, mouse.set_acceleration),
-        "scroll_speed": _Setting(mouse.scroll_speed, mouse.set_scroll_speed),
-        "double_click_speed": _Setting(mouse.double_click_speed, mouse.set_double_click_speed),
+        "tracking_speed": _Setting(mouse.tracking_speed, mouse.set_tracking_speed, _number(0, 1)),
+        "acceleration": _on_off(mouse.acceleration, mouse.set_acceleration),
+        "scroll_speed": _Setting(mouse.scroll_speed, mouse.set_scroll_speed, _number(0)),
+        "double_click_speed": _Setting(mouse.double_click_speed, mouse.set_double_click_speed, _number(above=0)),
     },
     "dock": {
-        "autohide": _Setting(dock.autohide, dock.set_autohide),
-        "autohide_delay": _Setting(dock.autohide_delay, dock.set_autohide_delay),
-        "autohide_duration": _Setting(dock.autohide_duration, dock.set_autohide_duration),
-        "size": _Setting(dock.size, dock.set_size),
-        "position": _Setting(dock.position, dock.set_position),
-        "magnification": _Setting(dock.magnification, dock.set_magnification),
-        "minimize_effect": _Setting(dock.minimize_effect, dock.set_minimize_effect),
-        "minimize_to_app": _Setting(dock.minimize_to_app, dock.set_minimize_to_app),
-        "show_recents": _Setting(dock.show_recents, dock.set_show_recents),
-        "show_indicators": _Setting(dock.show_indicators, dock.set_show_indicators),
-        "dim_hidden_apps": _Setting(dock.dim_hidden_apps, dock.set_dim_hidden_apps),
-        "only_open_apps": _Setting(dock.only_open_apps, dock.set_only_open_apps),
-        "launch_animation": _Setting(dock.launch_animation, dock.set_launch_animation),
-        "hot_corners": _Setting(_hot_corners, _set_hot_corners),
-        "group_windows_by_app": _Setting(dock.group_windows_by_app, dock.set_group_windows_by_app),
-        "switch_to_space_with_app": _Setting(dock.switch_to_space_with_app, dock.set_switch_to_space_with_app),
-        "auto_rearrange_spaces": _Setting(dock.auto_rearrange_spaces, dock.set_auto_rearrange_spaces),
-        "separate_spaces_per_display": _Setting(dock.separate_spaces_per_display, dock.set_separate_spaces_per_display),
+        "autohide": _on_off(dock.autohide, dock.set_autohide),
+        "autohide_delay": _Setting(dock.autohide_delay, dock.set_autohide_delay, _number(0)),
+        "autohide_duration": _Setting(dock.autohide_duration, dock.set_autohide_duration, _number(0, optional=True)),
+        "size": _Setting(dock.size, dock.set_size, _number(16, 128)),
+        "position": _Setting(dock.position, dock.set_position, _choice(("left", "bottom", "right"))),
+        "magnification": _Setting(dock.magnification, dock.set_magnification, _number(16, 128, optional=True)),
+        "minimize_effect": _Setting(dock.minimize_effect, dock.set_minimize_effect, _choice(("genie", "scale"))),
+        "minimize_to_app": _on_off(dock.minimize_to_app, dock.set_minimize_to_app),
+        "show_recents": _on_off(dock.show_recents, dock.set_show_recents),
+        "show_indicators": _on_off(dock.show_indicators, dock.set_show_indicators),
+        "dim_hidden_apps": _on_off(dock.dim_hidden_apps, dock.set_dim_hidden_apps),
+        "only_open_apps": _on_off(dock.only_open_apps, dock.set_only_open_apps),
+        "launch_animation": _on_off(dock.launch_animation, dock.set_launch_animation),
+        "hot_corners": _Setting(_hot_corners, _set_hot_corners, _entries(dock._CORNERS, _hot_corner)),
+        "group_windows_by_app": _on_off(dock.group_windows_by_app, dock.set_group_windows_by_app),
+        "switch_to_space_with_app": _on_off(dock.switch_to_space_with_app, dock.set_switch_to_space_with_app),
+        "auto_rearrange_spaces": _on_off(dock.auto_rearrange_spaces, dock.set_auto_rearrange_spaces),
+        "separate_spaces_per_display": _on_off(dock.separate_spaces_per_display, dock.set_separate_spaces_per_display),
     },
     "finder": {
-        "show_hidden_files": _Setting(finder.show_hidden_files, finder.set_show_hidden_files),
-        "show_extensions": _Setting(finder.show_extensions, finder.set_show_extensions),
-        "show_path_bar": _Setting(finder.show_path_bar, finder.set_show_path_bar),
-        "show_status_bar": _Setting(finder.show_status_bar, finder.set_show_status_bar),
-        "show_full_path_in_title": _Setting(finder.show_full_path_in_title, finder.set_show_full_path_in_title),
-        "show_library_folder": _Setting(finder.show_library_folder, finder.set_show_library_folder),
-        "show_desktop_icons": _Setting(finder.show_desktop_icons, finder.set_show_desktop_icons),
-        "default_view": _Setting(finder.default_view, finder.set_default_view),
-        "new_window_folder": _Setting(lambda: _portable(finder.new_window_folder()), finder.set_new_window_folder),
-        "search_scope": _Setting(finder.search_scope, finder.set_search_scope),
-        "folders_first": _Setting(finder.folders_first, finder.set_folders_first),
-        "extension_change_warning": _Setting(finder.extension_change_warning, finder.set_extension_change_warning),
-        "remove_old_trash_items": _Setting(finder.remove_old_trash_items, finder.set_remove_old_trash_items),
-        "quit_menu": _Setting(finder.quit_menu, finder.set_quit_menu),
-        "drives_on_desktop": _Setting(finder.drives_on_desktop, lambda value: finder.set_show_drives_on_desktop(**value)),
-        "desktop_view": _Setting(finder.desktop_view, lambda value: finder.set_desktop_view(**value)),
+        "show_hidden_files": _on_off(finder.show_hidden_files, finder.set_show_hidden_files),
+        "show_extensions": _on_off(finder.show_extensions, finder.set_show_extensions),
+        "show_path_bar": _on_off(finder.show_path_bar, finder.set_show_path_bar),
+        "show_status_bar": _on_off(finder.show_status_bar, finder.set_show_status_bar),
+        "show_full_path_in_title": _on_off(finder.show_full_path_in_title, finder.set_show_full_path_in_title),
+        "show_library_folder": _on_off(finder.show_library_folder, finder.set_show_library_folder),
+        "show_desktop_icons": _on_off(finder.show_desktop_icons, finder.set_show_desktop_icons),
+        "default_view": _Setting(finder.default_view, finder.set_default_view, _choice(finder._VIEWS)),
+        "new_window_folder": _Setting(lambda: _portable(finder.new_window_folder()), finder.set_new_window_folder, _text()),
+        "search_scope": _Setting(finder.search_scope, finder.set_search_scope, _choice(finder._SCOPES)),
+        "folders_first": _on_off(finder.folders_first, finder.set_folders_first),
+        "extension_change_warning": _on_off(finder.extension_change_warning, finder.set_extension_change_warning),
+        "remove_old_trash_items": _on_off(finder.remove_old_trash_items, finder.set_remove_old_trash_items),
+        "quit_menu": _on_off(finder.quit_menu, finder.set_quit_menu),
+        "drives_on_desktop": _Setting(
+            finder.drives_on_desktop,
+            lambda value: finder.set_show_drives_on_desktop(**value),
+            _options(finder.set_show_drives_on_desktop, internal=_flag, external=_flag, removable=_flag, servers=_flag),
+        ),
+        "desktop_view": _Setting(
+            finder.desktop_view,
+            lambda value: finder.set_desktop_view(**value),
+            _options(
+                finder.set_desktop_view,
+                icon_size=_number(16, 128, optional=True),
+                grid_spacing=_number(1, 100, optional=True),
+                text_size=_number(10, 16, optional=True),
+                sort=_choice(finder._DESKTOP_SORTS, optional=True),
+                show_item_info=_flag,
+                labels_on_bottom=_flag,
+            ),
+        ),
     },
     "windows": {
-        "double_click_title_bar": _Setting(windows.double_click_title_bar, windows.set_double_click_title_bar),
-        "tiling": _Setting(windows.tiling, windows.set_tiling),
-        "click_wallpaper_to_show_desktop": _Setting(
+        "double_click_title_bar": _Setting(
+            windows.double_click_title_bar,
+            windows.set_double_click_title_bar,
+            _choice(("zoom", "fill", "minimize"), optional=True),
+        ),
+        "tiling": _on_off(windows.tiling, windows.set_tiling),
+        "click_wallpaper_to_show_desktop": _on_off(
             windows.click_wallpaper_to_show_desktop, windows.set_click_wallpaper_to_show_desktop
         ),
-        "animations": _Setting(windows.animations, windows.set_animations),
+        "animations": _on_off(windows.animations, windows.set_animations),
     },
     "appearance": {
-        "auto_mode": _Setting(appearance.is_auto, appearance.set_auto_mode),
-        "hide_menu_bar": _Setting(appearance.menu_bar_hidden, appearance.set_hide_menu_bar),
-        "scroll_bars": _Setting(appearance.scroll_bars, appearance.set_scroll_bars),
-        "font_smoothing": _Setting(appearance.font_smoothing, appearance.set_font_smoothing),
+        "auto_mode": _on_off(appearance.is_auto, appearance.set_auto_mode),
+        "hide_menu_bar": _on_off(appearance.menu_bar_hidden, appearance.set_hide_menu_bar),
+        "scroll_bars": _Setting(appearance.scroll_bars, appearance.set_scroll_bars, _choice(appearance._SCROLL_BARS)),
+        "font_smoothing": _on_off(appearance.font_smoothing, appearance.set_font_smoothing),
     },
     "screen": {
-        "screenshot_folder": _Setting(lambda: _portable(screen.screenshot_folder()), screen.set_screenshot_folder),
-        "screenshot_format": _Setting(screen.screenshot_format, screen.set_screenshot_format),
-        "screenshot_name": _Setting(screen.screenshot_name, screen.set_screenshot_name),
-        "screenshot_target": _Setting(screen.screenshot_target, screen.set_screenshot_target),
-        "screenshot_shadow": _Setting(screen.screenshot_shadow, screen.set_screenshot_shadow),
-        "screenshot_thumbnail": _Setting(screen.screenshot_thumbnail, screen.set_screenshot_thumbnail),
-        "screensaver_delay": _Setting(screen.screensaver_delay, screen.set_screensaver_delay),
-        "night_shift_schedule": _Setting(_night_shift_schedule, _set_night_shift_schedule),
-        "night_shift_strength": _Setting(screen.night_shift_strength, screen.set_night_shift_strength),
+        "screenshot_folder": _Setting(lambda: _portable(screen.screenshot_folder()), screen.set_screenshot_folder, _text()),
+        "screenshot_format": _Setting(screen.screenshot_format, screen.set_screenshot_format, _screenshot_format),
+        "screenshot_name": _Setting(screen.screenshot_name, screen.set_screenshot_name, _screenshot_name),
+        "screenshot_target": _Setting(
+            screen.screenshot_target, screen.set_screenshot_target, _choice(screen._SCREENSHOT_TARGETS)
+        ),
+        "screenshot_shadow": _on_off(screen.screenshot_shadow, screen.set_screenshot_shadow),
+        "screenshot_thumbnail": _on_off(screen.screenshot_thumbnail, screen.set_screenshot_thumbnail),
+        "screensaver_delay": _Setting(screen.screensaver_delay, screen.set_screensaver_delay, _number(above=0, optional=True)),
+        "night_shift_schedule": _Setting(_night_shift_schedule, _set_night_shift_schedule, _night_shift),
+        "night_shift_strength": _Setting(screen.night_shift_strength, screen.set_night_shift_strength, _number(0, 1)),
     },
     "sound": {
-        "alert_sound": _Setting(sound.alert_sound, sound.set_alert_sound),
-        "alert_volume": _Setting(sound.alert_volume, sound.set_alert_volume),
-        "ui_sounds": _Setting(sound.ui_sounds, sound.set_ui_sounds),
+        "alert_sound": _Setting(sound.alert_sound, sound.set_alert_sound, _alert_sound),
+        "alert_volume": _Setting(sound.alert_volume, sound.set_alert_volume, _number(0, 1)),
+        "ui_sounds": _on_off(sound.ui_sounds, sound.set_ui_sounds),
     },
     "system": {
-        "clock_format": _Setting(system.clock_format, lambda value: system.set_clock_format(**value)),
-        "menu_bar_items": _Setting(system.menu_bar_items, lambda value: system.set_menu_bar_items(**value)),
-        "menu_bar_spacing": _Setting(system.menu_bar_spacing, system.set_menu_bar_spacing),
-        "battery_percentage": _Setting(system.battery_percentage_shown, system.set_show_battery_percentage),
-        "measurement_units": _Setting(system.measurement_units, system.set_measurement_units),
-        "temperature_unit": _Setting(system.temperature_unit, system.set_temperature_unit),
-        "keep_windows_on_quit": _Setting(system.keep_windows_on_quit, system.set_keep_windows_on_quit),
-        "save_to_icloud_by_default": _Setting(system.save_to_icloud_by_default, system.set_save_to_icloud_by_default),
-        "expanded_save_dialog": _Setting(system.expanded_save_dialog, system.set_expanded_save_dialog),
-        "ds_store_on_network": _Setting(system.ds_store_on_network, system.set_ds_store_on_network),
-        "ds_store_on_usb": _Setting(system.ds_store_on_usb, system.set_ds_store_on_usb),
-        "open_photos_on_device_connect": _Setting(
+        "clock_format": _Setting(
+            system.clock_format,
+            lambda value: system.set_clock_format(**value),
+            _options(
+                system.set_clock_format,
+                seconds=_flag, day_of_week=_flag, am_pm=_flag, analog=_flag,
+                date=_choice(("auto", "always", "never"), optional=True),
+            ),
+        ),
+        "menu_bar_items": _Setting(
+            system.menu_bar_items,
+            lambda value: system.set_menu_bar_items(**value),
+            _entries(system.MENU_BAR_ITEMS, lambda name, on: _flag(on), at_least_one=True),
+        ),
+        "menu_bar_spacing": _Setting(
+            system.menu_bar_spacing, system.set_menu_bar_spacing, _number(0, 30, optional=True, whole=True)
+        ),
+        "battery_percentage": _on_off(system.battery_percentage_shown, system.set_show_battery_percentage),
+        "measurement_units": _Setting(system.measurement_units, system.set_measurement_units, _choice(("metric", "us"))),
+        "temperature_unit": _Setting(system.temperature_unit, system.set_temperature_unit, _choice(("celsius", "fahrenheit"))),
+        "keep_windows_on_quit": _on_off(system.keep_windows_on_quit, system.set_keep_windows_on_quit),
+        "save_to_icloud_by_default": _on_off(system.save_to_icloud_by_default, system.set_save_to_icloud_by_default),
+        "expanded_save_dialog": _on_off(system.expanded_save_dialog, system.set_expanded_save_dialog),
+        "ds_store_on_network": _on_off(system.ds_store_on_network, system.set_ds_store_on_network),
+        "ds_store_on_usb": _on_off(system.ds_store_on_usb, system.set_ds_store_on_usb),
+        "open_photos_on_device_connect": _on_off(
             system.open_photos_on_device_connect, system.set_open_photos_on_device_connect
         ),
     },
 }
-
-
-# The check of each setting that isn't a plain on/off flag.
-_CHECKS: Dict[str, Dict[str, Callable[[Any], None]]] = {
-    "keyboard": {
-        "key_repeat": _key_repeat,
-        "fn_key_action": _choice(("emoji", "input_source", "dictation"), optional=True),
-        "system_shortcuts": _entries(keyboard.SYSTEM_SHORTCUTS, lambda name, on: _flag(on)),
-        "remappings": _check_remappings,
-        "backlight_timeout": _number(above=0, optional=True),
-    },
-    "trackpad": {
-        "tracking_speed": _number(0, 1),
-        "click_pressure": _choice(("light", "medium", "firm")),
-        "secondary_click": _choice(("two_fingers", "bottom_right", "bottom_left"), optional=True),
-        "gestures": _entries(trackpad.GESTURES, _gesture),
-    },
-    "mouse": {
-        "tracking_speed": _number(0, 1),
-        "scroll_speed": _number(0),
-        "double_click_speed": _number(above=0),
-    },
-    "dock": {
-        "autohide_delay": _number(0),
-        "autohide_duration": _number(0, optional=True),
-        "size": _number(16, 128),
-        "position": _choice(("left", "bottom", "right")),
-        "magnification": _number(16, 128, optional=True),
-        "minimize_effect": _choice(("genie", "scale")),
-        "hot_corners": _entries(dock._CORNERS, _hot_corner),
-    },
-    "finder": {
-        "default_view": _choice(finder._VIEWS),
-        "new_window_folder": _text(),
-        "search_scope": _choice(finder._SCOPES),
-        "drives_on_desktop": _options(
-            finder.set_show_drives_on_desktop, internal=_flag, external=_flag, removable=_flag, servers=_flag
-        ),
-        "desktop_view": _options(
-            finder.set_desktop_view,
-            icon_size=_number(16, 128, optional=True),
-            grid_spacing=_number(1, 100, optional=True),
-            text_size=_number(10, 16, optional=True),
-            sort=_choice(finder._DESKTOP_SORTS, optional=True),
-            show_item_info=_flag,
-            labels_on_bottom=_flag,
-        ),
-    },
-    "windows": {
-        "double_click_title_bar": _choice(("zoom", "fill", "minimize"), optional=True),
-    },
-    "appearance": {
-        "scroll_bars": _choice(appearance._SCROLL_BARS),
-    },
-    "screen": {
-        "screenshot_folder": _text(),
-        "screenshot_format": _screenshot_format,
-        "screenshot_name": _screenshot_name,
-        "screenshot_target": _choice(screen._SCREENSHOT_TARGETS),
-        "screensaver_delay": _number(above=0, optional=True),
-        "night_shift_schedule": _night_shift,
-        "night_shift_strength": _number(0, 1),
-    },
-    "sound": {
-        "alert_sound": _alert_sound,
-        "alert_volume": _number(0, 1),
-    },
-    "system": {
-        "clock_format": _options(
-            system.set_clock_format,
-            seconds=_flag, day_of_week=_flag, am_pm=_flag, analog=_flag,
-            date=_choice(("auto", "always", "never"), optional=True),
-        ),
-        "menu_bar_items": _entries(system.MENU_BAR_ITEMS, lambda name, on: _flag(on), at_least_one=True),
-        "menu_bar_spacing": _number(0, 30, optional=True, whole=True),
-        "measurement_units": _choice(("metric", "us")),
-        "temperature_unit": _choice(("celsius", "fahrenheit")),
-    },
-}
-for _section, _table in _SETTINGS.items():
-    for _name, _setting in _table.items():
-        _SETTINGS[_section][_name] = _setting._replace(check=_CHECKS.get(_section, {}).get(_name, _flag))
-del _section, _table, _name, _setting
 
 
 def names() -> List[str]:

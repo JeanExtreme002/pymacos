@@ -51,7 +51,8 @@ class _Commands:
         if args[:2] == ["shortcuts", "run"]:
             for flag, path in zip(args, args[1:]):
                 if flag == "--input-path" and path.endswith(".txt"):
-                    self.text_input = open(path, encoding="utf-8").read()
+                    with open(path, encoding="utf-8") as file:
+                        self.text_input = file.read()
         key = " ".join(args[:3]) if args[:2] == ["shortcuts", "list"] else args[1]
         returncode, stdout, stderr = self.answers.get(key, (0, "", ""))
         return subprocess.CompletedProcess(args, returncode, stdout, stderr)

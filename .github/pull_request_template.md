@@ -17,7 +17,6 @@ problem the pull request solves or what new features it implements.
 Link tasks, issues, PRs that are related to this pull request, etc. 
 -->
 
-No references to be shared. 
 
 **Notes:**
 
@@ -25,4 +24,3 @@ No references to be shared.
 Explain some changes that can be useful when reviewing this pull request. 
 -->
 
-No notes to be shared.

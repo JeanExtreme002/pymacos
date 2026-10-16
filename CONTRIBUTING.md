@@ -29,7 +29,8 @@ pytest tests/unit/test_audio.py tests/live/test_audio.py   # one module
 The tests are in two folders, with one file per module (`test_audio.py`
 tests `macos.audio`):
 
-- `tests/unit`: fake the system commands and frameworks, and run anywhere.
+- `tests/unit`: fake the system commands and frameworks, and run anywhere;
+  the few that use a framework for real (PDFKit, CoreFoundation) skip outside macOS.
 - `tests/live`: talk to the real system, and are skipped outside macOS.
 
 Helpers shared by several files are in `tests/helpers.py`, and each folder's

@@ -103,7 +103,12 @@ def test_a_symbolic_link_stays_one_and_its_file_is_replaced(tmp_path):
 
 def test_write_atomically(tmp_path):
     target = tmp_path / "out.txt"
-    assert _files.write_atomically(str(target), lambda name: open(name, "w").write("hi")) == target
+
+    def write(name):
+        with open(name, "w") as file:
+            file.write("hi")
+
+    assert _files.write_atomically(str(target), write) == target
     assert target.read_text() == "hi"
     with pytest.raises(macos.MacOSError, match="could not write"):
         _files.write_atomically(target, lambda name: False)

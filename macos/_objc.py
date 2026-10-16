@@ -425,7 +425,8 @@ def define_class(name: str, methods: Any, protocols: Sequence[str] = ()) -> int:
 
     ``methods`` maps a selector to ``(type encoding, ctypes function type,
     function)``; each function gets ``(self, _cmd, *arguments)``. Used for
-    the delegates the camera and microphone APIs call back.
+    the delegates and targets Cocoa calls back: the camera's and the
+    microphone's, the system events observer, the menu bar's items.
     """
     with _CLASSES_LOCK:
         return _define_class(name, methods, protocols)

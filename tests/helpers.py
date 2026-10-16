@@ -30,7 +30,12 @@ def png_size(png):
     return struct.unpack(">II", png[16:24])
 
 
-WALLPAPER_MOVIE = Path("/System/Library/Desktop Pictures/.wallpapers/Sequoia Sunrise/Sequoia Sunrise.mov")
+# A movie macOS ships (a dynamic wallpaper), for the video and vision tests: any of them does, so the tests
+# don't depend on the wallpapers of one release. A path that doesn't exist when there is none.
+WALLPAPER_MOVIE = next(
+    iter(sorted(Path("/System/Library/Desktop Pictures/.wallpapers").glob("*/*.mov"))),
+    Path("/System/Library/Desktop Pictures/.wallpapers/none/none.mov"),
+)
 
 
 # GitHub's runners, where the tests that change the Mac may run unasked: a throwaway machine.

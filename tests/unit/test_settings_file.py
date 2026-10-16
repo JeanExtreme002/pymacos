@@ -1,11 +1,13 @@
 """Unit tests for :mod:`macos.settings`, over fake settings. They run on any platform."""
 
 import json
+import sys
+from typing import Mapping
 
 import pytest
 
 import macos
-from macos import _system, settings
+from macos import _system, appearance, dock, finder, keyboard, screen, settings, trackpad
 
 
 @pytest.fixture
@@ -228,10 +230,12 @@ def test_apply_refuses_a_section_that_is_not_an_object(fake_settings):
     assert changes == []
 
 
-def test_every_real_setting_has_a_check_and_this_macs_values_pass_it():
+def test_every_real_setting_has_a_check_of_its_own():
+    # The check is given with the setting: one left out would be _anything, the default for the fake
+    # settings above, and apply() would then let any value through to the setter.
     for section, table in settings._SETTINGS.items():
         for name, setting in table.items():
-            assert setting.check is not settings._anything, "{}.{}".format(section, name)
+            assert setting.check is not settings._anything, "{}.{} has no check".format(section, name)
     exported = {
         "keyboard": {"key_repeat": [0.03, 0.225], "fn_key_action": None, "remappings": {"caps_lock": "escape"}},
         "trackpad": {"tracking_speed": 0.5, "gestures": {"mission_control": 4, "pinch_to_zoom": False}},
@@ -253,6 +257,46 @@ def test_every_real_setting_has_a_check_and_this_macs_values_pass_it():
     for section, values in exported.items():
         for name, value in values.items():
             settings._SETTINGS[section][name].check(value)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads this Mac's settings")
+def test_this_macs_values_pass_their_checks():
+    """Each check takes what read() gives (through JSON, as from a file), and only an on/off setting is checked as a flag."""
+    for section, table in settings._SETTINGS.items():
+        for name, setting in table.items():
+            try:
+                value = json.loads(json.dumps(setting.read()))
+            except (macos.MacOSError, ValueError, TypeError):  # this Mac lacks it, or it couldn't be read: export() skips it too
+                continue
+            setting.check(value)
+            # A setting that isn't on/off checked as a flag would refuse every value it can take.
+            assert (setting.check is settings._flag) == isinstance(value, bool), "{}.{} reads {!r}".format(section, name, value)
+
+
+def test_the_privates_borrowed_from_other_modules_still_exist():
+    # settings.py reaches into these modules for what its checks need. A rename there shows up
+    # here by name, rather than as an AttributeError somewhere in the table or in a check.
+    borrowed = [
+        (keyboard, "_hid_code", callable),
+        (keyboard, "_set_mappings", callable),
+        (trackpad, "_SWIPES", Mapping),
+        (dock, "_corner_flags", callable),
+        (dock, "_CORNERS", Mapping),
+        (screen, "_clock_time", callable),
+        (screen, "_SETTING_FORMATS", tuple),
+        (screen, "_SCREENSHOT_TARGETS", tuple),
+        (finder, "_VIEWS", Mapping),
+        (finder, "_SCOPES", Mapping),
+        (finder, "_DESKTOP_SORTS", Mapping),
+        (appearance, "_SCROLL_BARS", Mapping),
+    ]
+    for module, name, kind in borrowed:
+        assert hasattr(module, name), "settings.py uses {}.{}, which is gone".format(module.__name__, name)
+        value = getattr(module, name)
+        if kind is callable:
+            assert callable(value), "{}.{} isn't callable any more".format(module.__name__, name)
+        else:
+            assert isinstance(value, kind) and value, "{}.{} isn't a {} any more".format(module.__name__, name, kind.__name__)
 
 
 @pytest.mark.parametrize(

@@ -115,6 +115,9 @@ check_untyped_defs = true
 # themselves; listing them tells a full run from a green one with gaps.
 addopts = "-rs"
 xfail_strict = true
+# An exception raised where nothing can catch it (in a __del__, in a callback C called) fails the
+# test it came from, rather than scroll by in the output as "Exception ignored in".
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 markers = [
     "live: talks to the real system (macOS only); may touch the clipboard, Keychain and running apps",
 ]
