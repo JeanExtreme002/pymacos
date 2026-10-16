@@ -68,3 +68,36 @@ def test_run_decodes_bytes_whichever_way_it_was_asked(fake_run):
 def test_main_thread_error_is_also_a_runtime_error():
     # menubar raised RuntimeError before, and the other checks MacOSError: a handler for either still catches it.
     assert issubclass(macos.MainThreadError, RuntimeError) and issubclass(macos.MainThreadError, macos.MacOSError)
+
+
+def test_command_errors_keep_the_arguments_out_of_repr():
+    # The default repr prints self.args, that is the whole command line: a URL with a token (browser),
+    # a dialog's default text, a notification... str() names the command only, and so must repr().
+    error = macos.CommandError(["open", "https://example.com/?token=s3cret"], 1, "boom\n")
+    assert repr(error) == "CommandError('open', returncode=1, stderr='boom')"
+    assert str(error) == "'open' exited with status 1: boom"
+    assert error.cmd == ["open", "https://example.com/?token=s3cret"] and error.args[0] == error.cmd  # still there
+    timeout = macos.CommandTimeoutError(["osascript", "-e", "display dialog", "--", "s3cret"], 30)
+    assert repr(timeout) == "CommandTimeoutError('osascript', timeout=30)"
+    assert str(timeout) == "'osascript' didn't finish within 30 seconds"
+    missing = macos.ShortcutNotFoundError(["shortcuts", "run", "s3cret name"], 1, "not found")
+    assert repr(missing) == "ShortcutNotFoundError('shortcuts', returncode=1, stderr='not found')"
+    for shown in (repr(error), repr(timeout), repr(missing), str(error), str(timeout), str(missing)):
+        assert "s3cret" not in shown
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        macos.CommandError(["say", "-v", "x"], 1, "boom\n"),
+        macos.CommandTimeoutError(["say", "-v", "x"], 2.5),
+        macos.ShortcutNotFoundError(["shortcuts", "run", "x"], 1, ""),
+    ],
+)
+def test_command_errors_still_cross_a_pickle(error):
+    import pickle
+
+    copy = pickle.loads(pickle.dumps(error))
+
+    assert type(copy) is type(error) and copy.cmd == error.cmd
+    assert (str(copy), repr(copy)) == (str(error), repr(error))
