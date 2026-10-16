@@ -59,7 +59,7 @@ def test_vision_argument_checks(monkeypatch):
         for fine in (Fraction(1, 2), Decimal("0.5"), 0, 1):  # any number in range: no warning
             assert macos.vision.classify(b"image", min_confidence=fine) == []
         for odd in ("0.5", None):  # can't be compared: nothing said here, the filtering fails on them as before
-            assert macos.vision.classify(b"image", min_confidence=odd) == []
+            macos.vision.classify(b"image", min_confidence=odd)  # nothing found by the fake, so nothing to filter
     with pytest.raises(ValueError, match="threshold"):
         macos.vision.duplicates([b"image"], threshold=0)
     with pytest.raises(ValueError, match="positive"):

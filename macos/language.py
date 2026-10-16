@@ -112,6 +112,11 @@ def _tagger(text: str, schemes: Sequence[int], language: Optional[str] = None) -
     tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
     tagger = _objc.send(tagger, "initWithTagSchemes:", _objc.nsarray_of(list(schemes)), argtypes=(_objc.id,))
     _objc.send(tagger, "autorelease")
+    if text.startswith("\ufeff"):
+        # NSString drops a leading byte order mark (a text read with encoding="utf-8" may start with one),
+        # which would shift every position by one against the Python text: a word joiner, as wide and as
+        # silent, takes its place for the tagger.
+        text = "\u2060" + text[1:]
     _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
     if language is not None:
         whole = _files.NSRange(0, _utf16_length(text))

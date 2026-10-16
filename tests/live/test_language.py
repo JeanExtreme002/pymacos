@@ -81,3 +81,16 @@ def test_keywords():
     assert macos.language.keywords("   ") == []
     with pytest.raises(macos.NotSupportedError):
         macos.language.keywords("東京でティム・クックに会いました", language="ja")
+
+
+def test_a_byte_order_mark_doesnt_shift_the_words():
+    """NSString drops a leading BOM: the words and their positions must still be the text's own."""
+    plain = "Tim Cook went to Paris. 🙂 café in London"
+    marked = "\ufeff" + plain
+
+    assert macos.language.keywords(marked, language="en") == macos.language.keywords(plain, language="en")
+    found = macos.language.entities(marked, language="en")
+    assert [(entity.text, entity.kind) for entity in found] == [
+        (entity.text, entity.kind) for entity in macos.language.entities(plain, language="en")
+    ]
+    assert all(marked[entity.start : entity.start + len(entity.text)] == entity.text for entity in found)
