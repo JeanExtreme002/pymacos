@@ -130,3 +130,12 @@ def test_scan_document_says_it_needs_macos_12_where_vision_cant(monkeypatch):
     monkeypatch.setattr(_objc, "cls", cls)
     with pytest.raises(macos.NotSupportedError, match=r"scan_document\(\) needs macOS 12 or later"):
         macos.vision.scan_document(b"\x89PNG\r\n\x1a\n")
+
+
+def test_classify_reports_a_missing_file_whatever_min_confidence_is(tmp_path):
+    from decimal import Decimal
+
+    # A value whose comparison raises (a Decimal NaN) fails in the filtering, as it always did: never before
+    # the file's own error.
+    with pytest.raises(FileNotFoundError):
+        macos.vision.classify(tmp_path / "missing.png", min_confidence=Decimal("NaN"))

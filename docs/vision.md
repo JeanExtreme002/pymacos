@@ -100,8 +100,8 @@ macos.vision.classify("holiday.jpg")
 
 Labels are English words from Vision's own list of over a thousand categories.
 `limit` (5 by default) and `min_confidence` (0.1, from 0.0 to 1.0) decide how
-many come back; a `min_confidence` outside that range is used as it is today
-and warns (`DeprecationWarning`): pymacos 2.0 will raise `ValueError`.
+many come back; a `min_confidence` outside that range, or a `bool`, is used as
+it is today and warns (`DeprecationWarning`): pymacos 2.0 will raise `ValueError`.
 
 ## Faces
 

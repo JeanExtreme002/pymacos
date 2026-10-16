@@ -380,10 +380,11 @@ def _check_confidence(min_confidence: Any, function: str) -> None:
     if not isinstance(min_confidence, bool):
         try:
             # Compared as it is, as the filtering compares it: any number (a Decimal, a huge int) works, and one
-            # that can't be compared ("0.5", None) fails there as it always did, with nothing to warn about.
+            # that can't be compared ("0.5", None, Decimal("NaN")) fails there as it always did, after the file's
+            # own errors, with nothing to warn about here.
             if 0.0 <= min_confidence <= 1.0:
                 return
-        except TypeError:
+        except Exception:
             return
     warnings.warn(
         "{}() takes min_confidence from 0.0 to 1.0, not {!r}: it's used as it is today, and pymacos 2.0 will "
