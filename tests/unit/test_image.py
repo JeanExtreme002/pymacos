@@ -1,6 +1,7 @@
 """Unit tests for :mod:`macos.image`. They run on any platform."""
 
 import sys
+import warnings
 from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
@@ -87,8 +88,10 @@ def test_image_argument_checks(tmp_path, monkeypatch):
         macos.image.rotate(__file__, tmp_path / "out.png", 90.0)
     edits = []
     monkeypatch.setattr(macos.image, "_edit", lambda *args: edits.append(args) or Path("out.png"))
-    with pytest.warns(DeprecationWarning, match="not True: it's taken as 1"), pytest.raises(ValueError, match="not 1"):
-        macos.image.rotate(__file__, tmp_path / "out.png", True)  # 1 degree: no angle, as before, said more clearly
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # refused already, as 1 degree is: no warning before the ValueError
+        with pytest.raises(ValueError, match="not 1"):
+            macos.image.rotate(__file__, tmp_path / "out.png", True)
     with pytest.warns(DeprecationWarning, match="not False: it's taken as 0"):
         macos.image.rotate(__file__, tmp_path / "out.png", False)  # a copy, as before; 2.0 refuses it
     assert len(edits) == 1

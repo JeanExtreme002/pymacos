@@ -16,7 +16,6 @@ Photos and Preview: nothing to install and no permission needed.
 
 import ctypes
 import math
-import numbers
 import os
 import re
 import warnings
@@ -377,15 +376,21 @@ def barcodes(image: Image) -> List[Barcode]:
 
 
 def _check_confidence(min_confidence: Any, function: str) -> None:
-    """Warn for a ``min_confidence`` that isn't a number from 0.0 to 1.0: used as it is today, refused in 2.0."""
-    a_number = isinstance(min_confidence, numbers.Real) and not isinstance(min_confidence, bool)
-    if not a_number or not 0.0 <= float(min_confidence) <= 1.0:
-        warnings.warn(
-            "{}() takes min_confidence from 0.0 to 1.0, not {!r}: it's used as it is today, and pymacos 2.0 will "
-            "raise ValueError".format(function, min_confidence),
-            DeprecationWarning,
-            stacklevel=3,
-        )
+    """Warn for a ``min_confidence`` outside 0.0 to 1.0, or a bool: used as it is today, refused in 2.0."""
+    if not isinstance(min_confidence, bool):
+        try:
+            # Compared as it is, as the filtering compares it: any number (a Decimal, a huge int) works, and one
+            # that can't be compared ("0.5", None) fails there as it always did, with nothing to warn about.
+            if 0.0 <= min_confidence <= 1.0:
+                return
+        except TypeError:
+            return
+    warnings.warn(
+        "{}() takes min_confidence from 0.0 to 1.0, not {!r}: it's used as it is today, and pymacos 2.0 will "
+        "raise ValueError".format(function, min_confidence),
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def classify(image: Image, *, limit: int = 5, min_confidence: float = 0.1) -> List[Tuple[str, float]]:

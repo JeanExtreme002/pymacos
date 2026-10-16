@@ -17,7 +17,6 @@ IDE) to control the player; if that's denied,
 """
 
 import math
-import operator
 import warnings
 from dataclasses import dataclass
 from typing import List, Optional
@@ -199,15 +198,6 @@ def volume(app: Optional[str] = None) -> int:
     return int(round(level))
 
 
-def _integral(value: object) -> bool:
-    """Whether ``value`` is an integer: an int, or one of numpy's (what operator.index takes)."""
-    try:
-        operator.index(value)  # type: ignore[arg-type]
-    except TypeError:
-        return False
-    return True
-
-
 def set_volume(level: int, app: Optional[str] = None) -> None:
     """
     Set the player's own volume, an int from 0 to 100. ``app`` works as in :func:`volume`.
@@ -218,7 +208,7 @@ def set_volume(level: int, app: Optional[str] = None) -> None:
     """
     if not 0 <= level <= 100:
         raise ValueError("volume must be from 0 to 100, not {}".format(level))
-    if isinstance(level, bool) or not _integral(level):  # one it refuses already (NaN, 120.5) doesn't warn too
+    if isinstance(level, bool) or not isinstance(level, int):  # one it refuses already (NaN, 120.5) doesn't warn too
         warnings.warn(
             "macos.music.set_volume() takes an int from 0 to 100, not {!r}: it's rounded down today, "
             "and pymacos 2.0 will raise TypeError; pass int(level)".format(level),

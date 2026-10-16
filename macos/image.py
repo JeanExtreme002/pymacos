@@ -653,15 +653,15 @@ def rotate(source: PathLike, output: PathLike, degrees: int, *, quality: Optiona
     """
     Turn an image clockwise by ``degrees`` (90, 180 or 270; negative turns counter-clockwise).
 
-    The metadata is kept and ``output``'s extension sets the format. ``True``
-    or ``False`` as ``degrees`` isn't an angle: it's taken as 1 (refused, as
-    1 degree is) or 0 (a copy) today, and warns (``DeprecationWarning``);
-    pymacos 2.0 will raise :class:`ValueError` for both.
+    The metadata is kept and ``output``'s extension sets the format.
+    ``False`` as ``degrees`` isn't an angle: it's taken as 0 (a copy) today,
+    and warns (``DeprecationWarning``); pymacos 2.0 will raise
+    :class:`ValueError`, as it does for ``True`` (1 degree) already.
     """
-    if isinstance(degrees, bool):
+    if degrees is False:
         warnings.warn(
-            "macos.image.rotate() takes an int multiple of 90 as degrees, not {!r}: it's taken as {} today, "
-            "and pymacos 2.0 will raise ValueError".format(degrees, int(degrees)),
+            "macos.image.rotate() takes an int multiple of 90 as degrees, not False: it's taken as 0 (a copy) "
+            "today, and pymacos 2.0 will raise ValueError",
             DeprecationWarning,
             stacklevel=2,
         )

@@ -47,14 +47,18 @@ def test_vision_argument_checks(monkeypatch):
     monkeypatch.setattr(macos.vision._objc, "autorelease_pool", nullcontext)  # no Objective-C: runs on Linux too
     monkeypatch.setattr(macos.vision._objc, "new", lambda name: 0)  # the request isn't made: nothing is classified
     monkeypatch.setattr(macos.vision, "_perform", lambda image, request: [])
-    for bad in (1.5, -0.1, True, "0.5", None):  # 1.5 finds nothing, quietly; True reads as 1.0: said, refused in 2.0
-        with pytest.warns(DeprecationWarning, match="min_confidence from 0.0 to 1.0, not {!r}".format(bad)):
+    for bad in (1.5, -0.1, True, float("nan"), 10**400):  # 1.5 finds nothing, quietly; True reads as 1.0
+        with pytest.warns(DeprecationWarning, match="min_confidence from 0.0 to 1.0, not "):
             assert macos.vision.classify(b"image", min_confidence=bad) == []
+    from decimal import Decimal
     from fractions import Fraction
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert macos.vision.classify(b"image", min_confidence=Fraction(1, 2)) == []  # a number: fine
+        for fine in (Fraction(1, 2), Decimal("0.5"), 0, 1):  # any number in range: no warning
+            assert macos.vision.classify(b"image", min_confidence=fine) == []
+        for odd in ("0.5", None):  # can't be compared: nothing said here, the filtering fails on them as before
+            assert macos.vision.classify(b"image", min_confidence=odd) == []
     with pytest.raises(ValueError, match="threshold"):
         macos.vision.duplicates([b"image"], threshold=0)
     with pytest.raises(ValueError, match="positive"):

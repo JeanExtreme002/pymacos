@@ -67,9 +67,10 @@ macos.image.flip("photo.jpg", "upside-down.jpg", direction="vertical")
 The crop box is in pixels from the top-left corner. {func}`~macos.image.rotate`
 turns by 90, 180 or 270 degrees; negative values turn counter-clockwise. As
 with {func}`~macos.image.resize`, photos are turned upright first, the
-metadata is kept, and the output's extension sets the format. `True` or
-`False` as the degrees isn't an angle: it's taken as 1 or 0 today and warns
-(`DeprecationWarning`); pymacos 2.0 will raise `ValueError`.
+metadata is kept, and the output's extension sets the format. `False` as the
+degrees isn't an angle: it's taken as 0 (a copy) today and warns
+(`DeprecationWarning`); pymacos 2.0 will raise `ValueError`, as it does for
+`True` already.
 
 ## Straightening
 
