@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.audio`. They run on any platform."""
 
+from types import SimpleNamespace
+
 import pytest
 
 import macos
@@ -476,3 +478,47 @@ def test_classify_warns_for_a_min_confidence_out_of_range_as_vision_does(monkeyp
     with pytest.warns(DeprecationWarning, match=r"macos\.audio\.classify\(\) takes min_confidence from 0\.0 to 1\.0, not 1\.5"):
         with pytest.raises(macos.NotSupportedError):  # stops right after the check: no classifier here
             macos.audio.classify(clip, min_confidence=1.5)
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_classify_waits_for_results_that_come_after_the_analysis_returns(monkeypatch, tmp_path, late):
+    """Where SoundAnalysis delivers its results from another queue, after analyze() returns, they're waited for."""
+    from contextlib import nullcontext
+
+    from macos import _cf, audio
+
+    clip = tmp_path / "clip.aiff"
+    clip.write_bytes(b"")
+    observer = 0x50
+
+    def deliver():
+        audio._heard[observer]["labels"].setdefault("speech", []).append(0.9)
+        audio._heard[observer]["done"] = True
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "analyze" and not late:
+            deliver()  # during analyze(), as on the Macs seen so far
+        return 1
+
+    waited = []
+
+    def run_until(done, timeout):
+        waited.append(timeout)
+        deliver()  # the late results, on the run loop meanwhile
+        return done()
+
+    monkeypatch.setattr(audio, "framework", lambda name: None)
+    monkeypatch.setattr(_cf, "constant", lambda library, name: 1)
+    monkeypatch.setattr(audio, "info", lambda path: SimpleNamespace(duration=2.0))  # only its length is read
+    monkeypatch.setattr(audio._objc, "define_class", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(audio._objc, "send", send)
+    monkeypatch.setattr(audio._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(audio._objc, "file_url", lambda path: 1)
+    monkeypatch.setattr(audio._objc, "new", lambda name: observer)
+    monkeypatch.setattr(audio._objc, "run_until", run_until)
+    monkeypatch.setattr(audio._media, "time", lambda seconds: seconds)
+
+    assert audio.classify(clip) == [("speech", 0.9)]
+    assert waited == ([audio._ANALYSIS_TIMEOUT] if late else [])  # no wait when they came during analyze()
+    assert observer not in audio._heard
