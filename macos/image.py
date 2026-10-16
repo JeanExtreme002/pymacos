@@ -665,7 +665,7 @@ def rotate(source: PathLike, output: PathLike, degrees: int, *, quality: Optiona
             stacklevel=2,
         )
     try:
-        degrees = operator.index(degrees)  # an int, or an integer of numpy's: a float would fail later, unclearly
+        degrees = int(operator.index(degrees))  # an int, or an integer of numpy's (a bool, before 3.10): not a float
     except TypeError:
         raise ValueError("degrees must be an int multiple of 90, not {!r}".format(degrees)) from None
     if degrees % 90:

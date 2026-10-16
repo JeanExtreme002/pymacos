@@ -49,6 +49,7 @@ def test_open_with_reports_a_missing_app_as_app_not_found(fake_run, monkeypatch,
 def test_open_keeps_the_reason_of_an_app_that_is_there_but_wont_open(fake_run, monkeypatch, tmp_path, stderr):
     monkeypatch.setattr(macos.apps, "_locate", lambda app: "/Applications/Tool.app")
     monkeypatch.setattr(macos.apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(macos.apps, "_running_pids", lambda bundle_id: ())  # asked of Objective-C: not on Linux
     fake_run.returncode, fake_run.stderr = 1, stderr
 
     for attempt in (lambda: macos.open_with(tmp_path, "Tool"), lambda: macos.apps.open("Tool")):

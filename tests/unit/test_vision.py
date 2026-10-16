@@ -41,7 +41,10 @@ def test_joint_names_are_readable():
 def test_vision_argument_checks(monkeypatch):
     with pytest.raises(ValueError):
         macos.vision.classify(b"image", limit=0)
+    from contextlib import nullcontext
+
     monkeypatch.setattr(macos.vision, "_load", lambda: None)
+    monkeypatch.setattr(macos.vision._objc, "autorelease_pool", nullcontext)  # no Objective-C: runs on Linux too
     monkeypatch.setattr(macos.vision._objc, "new", lambda name: 0)  # the request isn't made: nothing is classified
     monkeypatch.setattr(macos.vision, "_perform", lambda image, request: [])
     for bad in (1.5, -0.1, True, "0.5", None):  # 1.5 finds nothing, quietly; True reads as 1.0: said, refused in 2.0

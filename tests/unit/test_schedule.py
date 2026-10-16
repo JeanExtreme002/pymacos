@@ -5,6 +5,8 @@ import plistlib
 import sys
 from pathlib import Path
 
+import warnings
+
 import pytest
 
 import macos
@@ -491,6 +493,13 @@ def test_schedule_trusts_folders_only_the_admin_group_may_write_in(monkeypatch, 
     assert schedule._swappable(script) == "other users may replace what's in {}".format(os.path.realpath(str(tmp_path)))
 
 
+def _notes_of(error, reported):
+    """What add_note() told: the error's notes (Python 3.11+), or the RuntimeWarnings it fell back to."""
+    return " ".join(getattr(error, "__notes__", [])) + " ".join(
+        str(item.message) for item in reported if issubclass(item.category, RuntimeWarning)
+    )
+
+
 def _refusing_launchctl(monkeypatch, fake_run, refused, *, disabled=(), also=()):
     """
     Record launchctl's commands; ``refused`` fails (every time), and so does any in ``also``.
@@ -531,30 +540,36 @@ def test_schedule_pause_says_when_the_job_couldnt_be_enabled_again(fake_run, hom
     macos.schedule.add("backup", home / "backup.py", every=60)
     _refusing_launchctl(monkeypatch, fake_run, "bootout", also=("enable",))
 
-    with pytest.raises(macos.errors.CommandError, match="bootout failed") as caught:
-        macos.schedule.pause("backup")
-    assert any("won't be at the next login" in note for note in getattr(caught.value, "__notes__", []))
+    with warnings.catch_warnings(record=True) as reported:  # before Python 3.11, a note is a RuntimeWarning
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootout failed") as caught:
+            macos.schedule.pause("backup")
+    assert "won't be at the next login" in _notes_of(caught.value, reported)
 
 
 def test_schedule_resume_pauses_again_a_paused_job_it_couldnt_load(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
     calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap", disabled=["backup"])
 
-    with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
-        macos.schedule.resume("backup")
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
 
     # Enabled and unloaded, it would have come back at the next login as if resumed: paused again instead.
     assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap", "disable"]
     assert calls[-1] == ["launchctl", "disable", "gui/501/pymacos.backup"]
-    assert not getattr(caught.value, "__notes__", [])
+    assert _notes_of(caught.value, reported) == ""
 
 
 def test_schedule_resume_says_when_a_loaded_job_stays_unloaded(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
     calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap")  # not paused: resume() reloads it
 
-    with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
-        macos.schedule.resume("backup")
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
 
     assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]  # not paused by mistake
-    assert any("stays unloaded until the next login" in note for note in getattr(caught.value, "__notes__", []))
+    assert "stays unloaded until the next login" in _notes_of(caught.value, reported)

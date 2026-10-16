@@ -65,10 +65,10 @@ jobs:
         # a few points under where they are, so a module can't quietly lose its tests while the total stays put.
         # When a listed module rises well above its floor, raise the floor (or drop it from the list) with the change.
         FLOOR = 70
-        FLOORS = {
-            "language.py": 20, "video.py": 30, "menubar.py": 40, "vision.py": 40, "document.py": 45, "screen.py": 50,
-            "_media.py": 55, "audio.py": 55, "clipboard.py": 55, "image.py": 55,
-            "apps.py": 60, "camera.py": 65, "events.py": 65, "sound.py": 65,
+        FLOORS = {  # 8 to 10 points under what GitHub's runners and a Mac with a battery reach
+            "language.py": 15, "video.py": 30, "menubar.py": 35, "vision.py": 40, "document.py": 40, "screen.py": 45,
+            "power.py": 50, "_media.py": 50, "audio.py": 55, "clipboard.py": 55, "image.py": 55,
+            "apps.py": 60, "camera.py": 60, "events.py": 60, "sound.py": 60,
         }
         covered = {}
         for node in ET.parse(sys.argv[1]).getroot().iter("class"):
@@ -76,7 +76,9 @@ jobs:
             covered[name] = round(100 * float(node.get("line-rate")))
         short = {name: (covered[name], FLOORS.get(name, FLOOR)) for name in sorted(covered) if covered[name] < FLOORS.get(name, FLOOR)}
         for name, (rate, floor) in short.items():
-            print("::error::{} is {}% covered by the unit tests, under its floor of {}%".format(name, rate, floor))
+            problem = "{} is {}% covered by the unit tests, under its floor of {}%".format(name, rate, floor)
+            print(problem)  # in the log; the line below is the annotation, which GitHub takes out of the log
+            print("::error::" + problem)
         print("{} modules; lowest: {}".format(len(covered), ", ".join("{} {}%".format(n, covered[n]) for n in sorted(covered, key=covered.get)[:6])))
         sys.exit(1 if short else 0)
         EOF
