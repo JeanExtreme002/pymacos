@@ -114,11 +114,14 @@ def _glide(kind: int, x: float, y: float, button: int, duration: float) -> None:
     """Move to ``(x, y)`` in steps over ``duration`` seconds (or at once), posting ``kind`` events."""
     start_x, start_y = position()
     steps = max(1, int(duration * 60))  # about 60 moves a second, like a real mouse
+    started = time.monotonic()
     for step in range(1, steps + 1):
         fraction = step / steps
         _events.post(_mouse_event(kind, start_x + (x - start_x) * fraction, start_y + (y - start_y) * fraction, button))
         if steps > 1:
-            time.sleep(duration / steps)
+            # Each step is due by the clock, not after a fixed sleep: the pause post() takes after
+            # every event (and the time posting takes) would otherwise add up to a third more.
+            time.sleep(max(0.0, started + duration * fraction - time.monotonic()))
 
 
 def move(x: float, y: float, *, duration: float = 0.0) -> None:

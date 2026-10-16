@@ -32,6 +32,31 @@ def test_drag_releases_the_button_at_the_end(fake_events, monkeypatch):
     assert (fake_events.posted[-2]["x"], fake_events.posted[-2]["y"]) == (40, 80)
 
 
+def test_a_glide_takes_its_duration_and_not_a_third_more(fake_events, monkeypatch):
+    from macos import _events
+
+    # post() pauses after every event: counted in the pacing, or a 1 s move would take 1.3 s.
+    clock = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(macos.mouse.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(macos.mouse.time, "sleep", sleep)
+    monkeypatch.setattr(_events, "post", lambda event: clock.__setitem__(0, clock[0] + _events.PAUSE))
+
+    macos.mouse.move(70, 80, duration=1.0)
+
+    assert len(sleeps) == 60 and clock[0] == pytest.approx(101.0)
+    assert all(0 <= seconds < 1 / 60 for seconds in sleeps)  # each step short of 1/60 s by the pause post() took
+
+    sleeps.clear()
+    macos.mouse.move(0, 0)  # at once: no pacing at all
+    assert sleeps == []
+
+
 def test_scroll_directions(fake_events):
     macos.mouse.scroll(3)
     macos.mouse.scroll(-2, horizontal=True)
