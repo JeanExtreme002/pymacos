@@ -214,7 +214,13 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
         # frames() does: that's inside the last frame, where the very end isn't.
         if round(at, 3) > round(duration, 3):
             raise ValueError("at={} is past the end of the {:.3f}-second video".format(at, duration))
-        moment = min(at, max(duration - 0.001, 0.0))
+        # The duration counts the sound too, which may go on after the picture's last frame: that frame is
+        # what plays then, and nothing is there to read past the picture's own end.
+        ends = [
+            _seconds(span.start) + _seconds(span.duration)
+            for span in (_objc.send(track, "timeRange", restype=_media.CMTimeRange) for track in _media.tracks(asset, "vide"))
+        ]
+        moment = min(at, max(min(max(ends, default=duration), duration) - 0.001, 0.0))
         generator = _objc.send(
             _objc.cls("AVAssetImageGenerator"), "assetImageGeneratorWithAsset:", asset, argtypes=(_objc.id,)
         )

@@ -245,6 +245,20 @@ def test_ctrl_c_then_a_movie_that_wont_close_is_still_a_ctrl_c(capture_stubs, mo
         camera._record(tmp_path / "clip.mov", 60, None, False)
     assert isinstance(caught.value.__cause__, macos.MacOSError)
 
+    # A second Ctrl-C while the movie closes: as unfinished, as screen.record() says it.
+    waits.clear()
+
+    def wait_interrupted(delegate, what, timeout=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(camera, "_wait", wait_interrupted)
+    try:  # caught here: a plain KeyboardInterrupt let out would stop pytest itself, not fail the test
+        camera._record(tmp_path / "clip.mov", 60, None, False)
+    except KeyboardInterrupt as error:
+        second = error
+    assert isinstance(second, UnfinishedInterrupt)
+    monkeypatch.setattr(camera, "_wait", wait)
+
     # Without a Ctrl-C, the same failure is the camera's error, as before.
     waits.clear()
     monkeypatch.setattr(camera._objc, "run_until", lambda done, timeout: True)

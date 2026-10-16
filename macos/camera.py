@@ -420,7 +420,7 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
             # A long recording takes longer to close (its last samples, its index): allow for it.
             try:
                 _wait(delegate, "video", _TIMEOUT + seconds / 10)
-            except MacOSError as failure:
+            except BaseException as failure:  # the camera's failure, or a second Ctrl-C while it closes the movie
                 if interrupted is not None:
                     # The Ctrl-C goes on, not a camera failure: a loop that retries on MacOSError must still
                     # stop. As a KeyboardInterrupt that says the movie wasn't finished, like screen.record().

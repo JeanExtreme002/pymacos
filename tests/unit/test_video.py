@@ -276,10 +276,15 @@ def test_frame_at_the_end_reads_the_last_frame(monkeypatch):
     from macos import video
 
     asked = []
+    picture = [7 / 24]  # where the picture ends: with the sound, by default
 
     def send(receiver, selector, *args, **kwargs):
         if selector == "duration":
             return video._media.time(7 / 24)  # a 7-frame clip at 24 fps: 0.2917 s, which info() gives as 0.292
+        if selector == "tracksWithMediaType:":
+            return ["picture"]
+        if selector == "timeRange":
+            return video._media.time_range(0, picture[0])
         if selector == "copyCGImageAtTime:actualTime:error:":
             asked.append(video._media.seconds(args[0]))
         return 1
@@ -291,9 +296,16 @@ def test_frame_at_the_end_reads_the_last_frame(monkeypatch):
     monkeypatch.setattr(video._objc, "send", send)
     monkeypatch.setattr(video._objc, "cls", lambda name: 1)
     monkeypatch.setattr(video._objc, "cgimage_png", lambda image: b"png")
+    monkeypatch.setattr(video._objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(video._objc, "nsarray", lambda items: iter(items))
 
     assert video.frame("clip.mov", at=0.292) == b"png"
     assert asked[-1] == pytest.approx(7 / 24 - 0.001, abs=0.002)  # a millisecond before the end, as frames() reads it
     assert video.frame("clip.mov", at=0.1) == b"png" and asked[-1] == pytest.approx(0.1, abs=0.002)
     with pytest.raises(ValueError, match="past the end"):
         video.frame("clip.mov", at=0.293)
+
+    # The sound goes on after the picture: past its last frame, that frame is the one read.
+    picture[0] = 0.125
+    assert video.frame("clip.mov", at=0.25) == b"png" and asked[-1] == pytest.approx(0.124, abs=0.002)
+    assert video.frame("clip.mov", at=0.1) == b"png" and asked[-1] == pytest.approx(0.1, abs=0.002)

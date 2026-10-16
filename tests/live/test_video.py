@@ -211,3 +211,25 @@ def test_frame_at_the_duration_info_gives_is_the_last_frame(tmp_path):
     assert macos.video.frame(clip, at=details.duration)[:8] == b"\x89PNG\r\n\x1a\n"
     with pytest.raises(ValueError, match="past the end"):
         macos.video.frame(clip, at=0.293)
+
+
+def test_frame_past_the_picture_is_its_last_frame(tmp_path, speech):
+    """A video whose sound goes on after its picture: up to info()'s duration, the last frame is what plays."""
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(16, 16, lambda x, y: (0, 0, 255)))
+    clip = macos.video.from_images([frame] * 5, tmp_path / "clip.mov", fps=5)  # a second of picture
+    _media.load()
+    with _objc.autorelease_pool():
+        picture, sound = _media.asset(clip), _media.asset(speech)
+        mixed = _media.composition()
+        _media.insert(_media.add_track(mixed, "vide"), _media.tracks(picture, "vide")[0], 0, _media.duration(picture), 0)
+        _media.insert(_media.add_track(mixed, "soun"), _media.tracks(sound, "soun")[0], 0, _media.duration(sound), 0)
+        longer = _media.export(mixed, tmp_path / "longer.mov")
+
+    details = macos.video.info(longer)
+
+    assert details.duration > 2
+    for at in (1.5, details.duration):
+        shot = tmp_path / "shot.png"
+        shot.write_bytes(macos.video.frame(longer, at=at))
+        assert _is(macos.image.dominant_colors(shot, count=1)[0], (0, 0, 255))
