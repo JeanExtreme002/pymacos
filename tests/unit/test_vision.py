@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.vision`. They run on any platform."""
 
+import sys
 import warnings
 
 import pytest
@@ -132,6 +133,7 @@ def test_scan_document_says_it_needs_macos_12_where_vision_cant(monkeypatch):
         macos.vision.scan_document(b"\x89PNG\r\n\x1a\n")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Vision checks the file: outside macOS, the platform comes first")
 def test_classify_reports_a_missing_file_whatever_min_confidence_is(tmp_path):
     from decimal import Decimal
 
