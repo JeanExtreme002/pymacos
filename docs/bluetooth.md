@@ -47,6 +47,10 @@ macos.audio.set_output("AirPods")      # and play through them
 macos.bluetooth.disconnect("AirPods")  # still paired
 ```
 
+A few accessories are listed without an `address`: they can't be connected
+from here, and {func}`~macos.bluetooth.connect` says so (use the Bluetooth
+menu for them).
+
 Both wait until the device is connected (or disconnected) and return it, so
 the next line can count on it. The device must be on and in range; after
 `timeout` seconds (10 by default) they raise {class}`~macos.WaitTimeoutError`

@@ -1093,10 +1093,14 @@ def classify(path: PathLike, *, limit: int = 5, min_confidence: float = 0.1) -> 
             print("a dog!")
 
     ``limit`` works as in :func:`macos.vision.classify`; only the sounds at
-    least ``min_confidence`` sure (from 0.0 to 1.0) are given.
+    least ``min_confidence`` sure (from 0.0 to 1.0) are given; one outside
+    that range warns (``DeprecationWarning``), as in :func:`macos.vision.classify`.
     """
     if limit < 1:
         raise ValueError("limit must be at least 1, not {}".format(limit))
+    from .vision import _check_confidence
+
+    _check_confidence(min_confidence, "macos.audio.classify")
     source = _existing(path)
     try:
         identifier = _cf.constant(framework("SoundAnalysis"), "SNClassifierIdentifierVersion1")

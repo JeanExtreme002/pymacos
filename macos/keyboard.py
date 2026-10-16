@@ -836,7 +836,7 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
     """
     try:
         unshifted = {code: char for char, (code, shifted) in _layout().items() if not shifted}
-    except MacOSError as problem:
+    except MainThreadError as problem:
         # Off the main thread, on a layout not read there yet (the US table serves for a US-compatible
         # one): the keys are named by what they type, which isn't always how press() spells them.
         unshifted = {}
@@ -846,6 +846,8 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
             RuntimeWarning,
             stacklevel=2,
         )
+    except MacOSError:
+        unshifted = {}  # no layout to read (outside macOS, graphics() below says so): named by what they type
     cg = _events.graphics()
 
     def convert(kind: int, event: int) -> KeyPress:

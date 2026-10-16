@@ -608,3 +608,25 @@ def test_app_shortcuts_read_the_plus_key_as_press_does():
     assert encode("cmd+shift++") == "@$+"
     assert encode("cmd+plus") == "@+"
     assert encode("cmd+shift+e") == "@$e"
+
+
+def test_watch_only_warns_about_the_main_thread_when_that_is_the_problem(monkeypatch):
+    import warnings
+
+    from macos import _events, keyboard
+
+    class Stop(Exception):
+        """watch() went past the layout: its listener isn't started here."""
+
+    def graphics():
+        raise Stop
+
+    monkeypatch.setattr(_events, "graphics", graphics)
+    monkeypatch.setattr(keyboard, "_layout", lambda: (_ for _ in ()).throw(macos.NotSupportedError("not on macOS")))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # another layout problem falls back quietly, as before: graphics() tells
+        with pytest.raises(Stop):
+            next(keyboard.watch())
+    monkeypatch.setattr(keyboard, "_layout", lambda: (_ for _ in ()).throw(macos.MainThreadError("main thread only")))
+    with pytest.warns(RuntimeWarning, match="main thread only; until then, watch"), pytest.raises(Stop):
+        next(keyboard.watch())

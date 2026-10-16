@@ -220,7 +220,9 @@ macos.keyboard.set_app_shortcut("Safari", "Export as PDF…", None)         # re
 
 The title must be exactly the menu's, in the system's language, the
 ellipsis (…) included. Keys are written as for
-{func}`~macos.keyboard.press`. Apps pick it up when they're reopened.
+{func}`~macos.keyboard.press` (`help` and `minus` included; `fn` and
+`caps_lock` can't be part of a menu shortcut). Apps pick it up when they're
+reopened.
 
 ## macOS's shortcuts
 

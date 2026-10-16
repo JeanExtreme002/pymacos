@@ -116,6 +116,11 @@ macos.dock.add_folder("~/Projects", display="folder", sort="name")
 macos.dock.remove_folder("~/Projects")
 ```
 
+An entry of the Dock's preferences that isn't a tile (edited by hand, or by
+another tool) is left out of {func}`~macos.dock.apps` and
+{func}`~macos.dock.folders` with a `RuntimeWarning`, and a change made here
+writes the list back without it.
+
 A folder kept already is updated. Each {class}`~macos.dock.DockFolder` has its
 `name`, `path`, `view`, `sort` and `display`.
 

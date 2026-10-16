@@ -562,6 +562,19 @@ def test_schedule_resume_pauses_again_a_paused_job_it_couldnt_load(fake_run, hom
     assert _notes_of(caught.value, reported) == ""
 
 
+def test_schedule_resume_says_when_a_paused_job_couldnt_be_paused_again(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap", disabled=["backup"], also=("disable",))
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
+
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap", "disable"]
+    assert "couldn't be paused again either" in _notes_of(caught.value, reported)
+
+
 def test_schedule_resume_says_when_a_loaded_job_stays_unloaded(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
     calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap")  # not paused: resume() reloads it

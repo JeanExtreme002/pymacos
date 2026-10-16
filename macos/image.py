@@ -654,8 +654,9 @@ def rotate(source: PathLike, output: PathLike, degrees: int, *, quality: Optiona
     Turn an image clockwise by ``degrees`` (90, 180 or 270; negative turns counter-clockwise).
 
     The metadata is kept and ``output``'s extension sets the format. ``True``
-    or ``False`` as ``degrees`` isn't an angle: it's taken as 1 or 0 today, and
-    warns (``DeprecationWarning``); pymacos 2.0 will raise :class:`ValueError`.
+    or ``False`` as ``degrees`` isn't an angle: it's taken as 1 (refused, as
+    1 degree is) or 0 (a copy) today, and warns (``DeprecationWarning``);
+    pymacos 2.0 will raise :class:`ValueError` for both.
     """
     if isinstance(degrees, bool):
         warnings.warn(
