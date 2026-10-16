@@ -75,11 +75,13 @@ def test_is_allowed_reads_the_notification_settings(monkeypatch, apps, expected)
         return apps
 
     monkeypatch.setattr(macos.defaults, "read", read)
+    monkeypatch.setattr(macos.defaults, "_synchronize", lambda domain: asked.append(("synchronize", domain)))
     # In this process, through CFPreferences: no ``defaults export`` started for every notification.
     monkeypatch.setattr(_system.subprocess, "run", lambda *args, **kwargs: pytest.fail("a command was run"))
 
     assert macos.notifications.is_allowed() is expected
-    assert asked == [("com.apple.ncprefs", "apps")]
+    # Synchronized first: what System Settings wrote since, not this process's copy.
+    assert asked == [("synchronize", "com.apple.ncprefs"), ("com.apple.ncprefs", "apps")]
 
 
 @pytest.mark.parametrize("failure", [macos.MacOSError("cfprefsd didn't answer"), ValueError("not a property list"), OSError()])
@@ -90,6 +92,10 @@ def test_is_allowed_is_unknown_when_the_settings_cant_be_read(monkeypatch, failu
         raise failure
 
     monkeypatch.setattr(macos.defaults, "read", read)
+    monkeypatch.setattr(macos.defaults, "_synchronize", lambda domain: None)
+    assert macos.notifications.is_allowed() is None
+    # The synchronizing can fail the same way: still unknown, never an error out of notify().
+    monkeypatch.setattr(macos.defaults, "_synchronize", read)
     assert macos.notifications.is_allowed() is None
 
 
