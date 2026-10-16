@@ -15,7 +15,12 @@ macos.defaults.delete("com.example.app", "cache-size")
 
 A domain is an app's bundle identifier (`"com.apple.finder"`), or
 {data}`~macos.defaults.GLOBAL` (`"NSGlobalDomain"`, also spelled `"-g"`) for the
-preferences every app shares. No permission is needed.
+preferences every app shares. No permission is needed. It's a name, never a
+path: the `defaults` command takes `"/Users/me/Library/Preferences/x"` or
+`"../x"` for a file, so writing to a domain with a slash in it raises
+`ValueError` rather than create a `.plist` wherever it points, which matters
+when the domain comes from user input. Reading one still reads that `.plist`,
+and warns (`DeprecationWarning`): pymacos 2.0 will raise `ValueError` there too.
 
 ## Reading
 
