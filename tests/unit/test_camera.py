@@ -217,3 +217,54 @@ def test_an_exception_in_the_capture_callback_is_the_captures_error(monkeypatch)
     camera._movie_done(delegate, 0, 0, 0, 0, 0x1)  # an error whose details can't be read
     with pytest.raises(macos.MacOSError, match="no image data while reading the recording"):
         camera._wait(delegate, "movie")
+
+
+def test_ctrl_c_then_a_movie_that_wont_close_is_still_a_ctrl_c(capture_stubs, monkeypatch, tmp_path):
+    """The Ctrl-C isn't swallowed by the failure that follows it: a loop retrying on MacOSError still stops."""
+    from macos import camera
+    from macos._system import UnfinishedInterrupt
+
+    waits = []
+
+    def run_until(done, timeout):
+        waits.append(timeout)
+        if len(waits) == 1:
+            return True  # the recording began
+        raise KeyboardInterrupt  # while it records
+
+    def wait(delegate, what, timeout=None):
+        raise macos.MacOSError("the camera didn't finish the video within 21 seconds")
+
+    monkeypatch.setattr(camera, "_session", lambda inputs, output: "session")
+    monkeypatch.setattr(camera._objc, "send", lambda receiver, selector, *args, **kwargs: None)
+    monkeypatch.setattr(camera._objc, "file_url", lambda path: "url")
+    monkeypatch.setattr(camera._objc, "run_until", run_until)
+    monkeypatch.setattr(camera, "_wait", wait)
+
+    with pytest.raises(UnfinishedInterrupt) as caught:  # a KeyboardInterrupt that says the movie isn't whole
+        camera._record(tmp_path / "clip.mov", 60, None, False)
+    assert isinstance(caught.value.__cause__, macos.MacOSError)
+
+    # Without a Ctrl-C, the same failure is the camera's error, as before.
+    waits.clear()
+    monkeypatch.setattr(camera._objc, "run_until", lambda done, timeout: True)
+    with pytest.raises(macos.MacOSError, match="didn't finish the video"):
+        camera._record(tmp_path / "clip.mov", 60, None, False)
+
+
+def test_record_keeps_the_old_movie_when_the_new_one_wasnt_finished(monkeypatch, tmp_path):
+    from macos import _capture, camera
+    from macos._system import UnfinishedInterrupt
+
+    def record(temporary, seconds, which, audio):
+        temporary.write_bytes(b"half a movie")
+        raise UnfinishedInterrupt()
+
+    monkeypatch.setattr(camera._files, "require_main_thread", lambda what: None)
+    monkeypatch.setattr(_capture, "require_permission", lambda media: None)
+    monkeypatch.setattr(camera, "_record", record)
+    target = tmp_path / "clip.mov"
+    target.write_bytes(b"yesterday")
+    with pytest.raises(KeyboardInterrupt):
+        macos.camera.record(target, 60)
+    assert target.read_bytes() == b"yesterday" and [path.name for path in tmp_path.iterdir()] == ["clip.mov"]

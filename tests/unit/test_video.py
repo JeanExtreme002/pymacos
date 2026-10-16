@@ -221,3 +221,79 @@ def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path):
     # The session is stopped, not left encoding into the temporary folder, which is gone.
     assert sent[-1] == "cancelExport"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_editing_keeps_the_videos_turn(monkeypatch):
+    """insertTimeRange:ofAsset: gives the composition's tracks an identity transform: the source's are copied over."""
+    from contextlib import nullcontext
+
+    from macos import _media, _objc
+
+    media, edited = 1, 2
+    source_a, source_b, copy_a, copy_b, segment_a, segment_b, gap = 11, 12, 21, 22, 31, 32, 33
+    turns = {source_a: _objc.CGAffineTransform(0, 1, -1, 0, 480, 0), source_b: _objc.CGAffineTransform(-1, 0, 0, -1, 640, 480)}
+    set_on = []
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "composition":
+            return edited
+        if selector == "insertTimeRange:ofAsset:atTime:error:":
+            return True
+        if selector == "duration":
+            return _media.time(2)
+        if selector == "tracksWithMediaType:":
+            # The composition's video tracks, not in the source's order: matched by where their segment came from.
+            return {(media, "vide"): [source_a, source_b], (edited, "vide"): [copy_b, copy_a]}.get((receiver, args[0]), [])
+        if selector == "trackID":
+            return receiver
+        if selector == "preferredTransform":
+            return turns[receiver]
+        if selector == "segments":
+            return {copy_a: [gap, segment_a], copy_b: [segment_b]}[receiver]  # an empty edit first: no source
+        if selector == "isEmpty":
+            return receiver == gap
+        if selector == "sourceTrackID":
+            return {gap: 0, segment_a: source_a, segment_b: source_b}[receiver]
+        if selector == "setPreferredTransform:":
+            set_on.append((receiver, (args[0].a, args[0].b, args[0].c, args[0].d, args[0].tx, args[0].ty)))
+        return None
+
+    monkeypatch.setattr(_media, "load", lambda: None)
+    monkeypatch.setattr(_media._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(_media._objc, "send", send)
+    monkeypatch.setattr(_media._objc, "cls", lambda name: 0)
+    monkeypatch.setattr(_media._objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(_media._objc, "nsarray", lambda items: iter(items or []))
+
+    assert _media.editable(media) == edited
+    assert set_on == [(copy_b, (-1, 0, 0, -1, 640, 480)), (copy_a, (0, 1, -1, 0, 480, 0))]
+
+
+def test_frame_at_the_end_reads_the_last_frame(monkeypatch):
+    """info() rounds the duration to the millisecond: a frame asked at that time is the last one, not past the end."""
+    from contextlib import nullcontext
+
+    from macos import video
+
+    asked = []
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "duration":
+            return video._media.time(7 / 24)  # a 7-frame clip at 24 fps: 0.2917 s, which info() gives as 0.292
+        if selector == "copyCGImageAtTime:actualTime:error:":
+            asked.append(video._media.seconds(args[0]))
+        return 1
+
+    monkeypatch.setattr(video, "_load", lambda: None)
+    monkeypatch.setattr(video, "_existing", lambda path: Path(path))
+    monkeypatch.setattr(video, "_asset", lambda path: 1)
+    monkeypatch.setattr(video._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(video._objc, "send", send)
+    monkeypatch.setattr(video._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(video._objc, "cgimage_png", lambda image: b"png")
+
+    assert video.frame("clip.mov", at=0.292) == b"png"
+    assert asked[-1] == pytest.approx(7 / 24 - 0.001, abs=0.002)  # a millisecond before the end, as frames() reads it
+    assert video.frame("clip.mov", at=0.1) == b"png" and asked[-1] == pytest.approx(0.1, abs=0.002)
+    with pytest.raises(ValueError, match="past the end"):
+        video.frame("clip.mov", at=0.293)

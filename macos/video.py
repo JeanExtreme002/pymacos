@@ -197,7 +197,8 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
 
         Path("thumb.png").write_bytes(macos.video.frame("clip.mov", at=5, size=320))
 
-    The frame is turned upright, like the video plays.
+    The frame is turned upright, like the video plays. ``at`` may be the
+    video's duration, as :func:`info` gives it: that's its last frame.
     """
     if at < 0:
         raise ValueError("at must not be negative, not {}".format(at))
@@ -208,8 +209,12 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
     with _objc.autorelease_pool():
         asset = _asset(source)
         duration = _seconds(_objc.send(asset, "duration", restype=_CMTime))
-        if at > duration:
+        # To the millisecond: info() rounds the duration, so a time taken from it may be a hair past the
+        # exact end, and that's the last frame, not past the end. Read a millisecond before the end, as
+        # frames() does: that's inside the last frame, where the very end isn't.
+        if round(at, 3) > round(duration, 3):
             raise ValueError("at={} is past the end of the {:.3f}-second video".format(at, duration))
+        moment = min(at, max(duration - 0.001, 0.0))
         generator = _objc.send(
             _objc.cls("AVAssetImageGenerator"), "assetImageGeneratorWithAsset:", asset, argtypes=(_objc.id,)
         )
@@ -227,7 +232,7 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
         image = _objc.send(
             generator,
             "copyCGImageAtTime:actualTime:error:",
-            _media.time(at),
+            _media.time(moment),
             ctypes.byref(actual),
             ctypes.byref(error),
             argtypes=(_CMTime, ctypes.c_void_p, ctypes.c_void_p),

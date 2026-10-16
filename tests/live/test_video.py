@@ -164,3 +164,50 @@ def test_reverse_reads_the_frames_a_few_at_a_time(tmp_path, monkeypatch):
     levels = [square(at) for at in (0.05, 0.3, 0.55, 0.8, 0.95)]
     assert levels == sorted(levels, reverse=True) and levels[0] - levels[-1] > 150  # darker and darker, across batches
     assert len(macos.video.frames(clip, every=0.125)) == 8  # across batches too
+
+
+def test_editing_a_turned_video_keeps_its_turn(tmp_path):
+    """A video marked to play turned (rotate()'s output, a portrait phone video) stays so through the edits, which compose."""
+    video = macos.video
+    red, blue = (255, 0, 0), (0, 0, 255)
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(64, 32, lambda x, y: red if x < 32 else blue))
+    clip = video.from_images([frame] * 10, tmp_path / "clip.mp4", fps=5)
+
+    def halves(path, at=1.0):
+        """The size of the frame at ``at``, and the main colour of its two halves: left and right, or top and bottom."""
+        shot = tmp_path / "shot.png"
+        shot.write_bytes(video.frame(path, at=at))
+        details = macos.image.info(shot)
+        width, height = details.width, details.height
+        if width > height:
+            boxes = [(2, 2, width // 2 - 4, height - 4), (width // 2 + 2, 2, width // 2 - 4, height - 4)]
+        else:
+            boxes = [(2, 2, width - 4, height // 2 - 4), (2, height // 2 + 2, width - 4, height // 2 - 4)]
+        colors = [macos.image.dominant_colors(macos.image.crop(shot, tmp_path / "half.png", box), count=1)[0] for box in boxes]
+        return (width, height), colors
+
+    turned = video.rotate(clip, tmp_path / "turned.mov", 90)
+    size, (top, bottom) = halves(turned)
+    assert size == (32, 64) and _is(top, red) and _is(bottom, blue)  # a quarter turn clockwise: the left goes to the top
+    size, (top, bottom) = halves(video.speed(turned, tmp_path / "fast.mov", 2), at=0.5)
+    assert size == (32, 64) and _is(top, red) and _is(bottom, blue)  # still turned
+    size, (left, right) = halves(video.rotate(turned, tmp_path / "twice.mov", 90))
+    assert size == (64, 32) and _is(left, blue) and _is(right, red)  # the turns add up: as rotate(clip, 180)
+    size, (left, right) = halves(video.rotate(turned, tmp_path / "back.mov", -90))
+    assert size == (64, 32) and _is(left, red) and _is(right, blue)  # turned back
+    size, colors = halves(video.crop(turned, tmp_path / "bottom.mov", (0, 32, 32, 32)))
+    assert size == (32, 32) and all(_is(color, blue) for color in colors)  # the box is on the upright picture
+
+
+def test_frame_at_the_duration_info_gives_is_the_last_frame(tmp_path):
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(16, 16, lambda x, y: (255, 0, 0)))
+    clip = macos.video.from_images([frame] * 7, tmp_path / "clip.mp4", fps=24)  # 0.2917 s, which info() rounds up
+
+    details = macos.video.info(clip)
+
+    assert details.duration == 0.292
+    assert macos.video.frame(clip, at=details.duration)[:8] == b"\x89PNG\r\n\x1a\n"
+    with pytest.raises(ValueError, match="past the end"):
+        macos.video.frame(clip, at=0.293)

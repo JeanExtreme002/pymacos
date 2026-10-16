@@ -33,6 +33,8 @@ path = macos.camera.photo()                        # a temporary .jpg, yours to 
 ```
 
 The extension sets the format: `.jpg`, `.png`, `.heic` or `.tiff`. The camera
+takes the photo as a JPEG, which the other formats are converted from: a
+`.png` or `.tiff` is no sharper than the `.jpg`, only bigger. The camera
 turns on for about a second before the photo, so the exposure settles.
 `camera` is a {class}`~macos.camera.Camera`, its `id`, or its name, or part of
 it when only one camera matches.
@@ -50,7 +52,11 @@ macos.video.convert("hello.mov", "hello.mp4", quality="medium")
 it also records the default microphone, which needs the Microphone permission.
 
 It records beside the file and moves the video in place once saved: if the
-recording fails, a file that was already there stays as it was.
+recording fails, a file that was already there stays as it was. Ctrl-C stops
+the recording early and keeps what was recorded until then: the movie is
+finished first, then the `KeyboardInterrupt` goes on. If the camera then
+fails to finish it, the `KeyboardInterrupt` still goes on (one that says the
+recording is unfinished) and nothing is saved.
 
 The camera reports back on the main thread's run loop, which these functions
 turn while they wait: call {func}`~macos.camera.photo` and
