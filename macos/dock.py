@@ -188,7 +188,7 @@ def _tile_list(key: str) -> List[Dict[str, Any]]:
             "{} of the Dock's {} entries aren't tiles (edited by hand?): they're left out, and a change to the "
             "Dock here drops them".format(len(found) - len(tiles), key),
             RuntimeWarning,
-            stacklevel=3,
+            stacklevel=4,  # _tile_list, _tiles or _others, the public function, its caller
         )
     return tiles
 

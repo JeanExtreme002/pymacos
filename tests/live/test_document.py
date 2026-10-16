@@ -109,6 +109,18 @@ def test_html_resources_are_not_fetched_when_told_so(tmp_path, web_server):
     assert macos.document.text(page, resources=False).startswith("Hello")
     assert b"Hello" in macos.document.convert(page, tmp_path / "page.rtf", resources=False).read_bytes()
     assert asked == []
+    # Another extension macOS reads through WebKit: told so, it fetches nothing either.
+    other = tmp_path / "page.shtml"
+    other.write_text(page.read_text())
+    assert macos.document.text(other, resources=False).startswith("Hello")
+    assert asked == []
     # As a browser would, otherwise: the page's resources are fetched while it's read.
     assert macos.document.text(page).startswith("Hello")
     assert "/style.css" in asked
+
+
+def test_documents_that_arent_web_pages_read_the_same_with_resources_off(report, tmp_path):
+    assert macos.document.text(report, resources=False) == macos.document.text(report)
+    notes = tmp_path / "notes.rtf"
+    macos.document.convert(report, notes)
+    assert macos.document.text(notes, resources=False) == macos.document.text(notes)

@@ -137,7 +137,7 @@ def _options(source: Path, resources: bool = True) -> Tuple[Optional[int], Optio
         options["CharacterEncoding"] = _objc.send(
             _objc.cls("NSNumber"), "numberWithUnsignedInteger:", _UTF8, argtypes=(ctypes.c_ulong,)
         )
-    if not resources and source.suffix.lower() in _WEB_FORMATS:
+    if not resources:  # whatever the extension: macOS reads more of them than _WEB_FORMATS through WebKit (.shtml)
         gatekeeper = _objc.send(_objc.send(_objc.send(_gatekeeper_class(), "alloc"), "init"), "autorelease")
         _PAGES[gatekeeper] = os.path.realpath(str(source))
         options["WebResourceLoadDelegate"] = gatekeeper  # NSWebResourceLoadDelegateDocumentOption

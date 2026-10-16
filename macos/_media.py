@@ -182,7 +182,11 @@ def editable(media: int) -> int:
         for track in tracks(media, "vide")
     }
     for copy in tracks(edited, "vide"):
-        segments = list(_objc.nsarray(_objc.send(copy, "segments")))
+        segments = [
+            segment
+            for segment in _objc.nsarray(_objc.send(copy, "segments"))
+            if not _objc.send(segment, "isEmpty", restype=_objc.BOOL)  # an empty edit (a gap) has no source track
+        ]
         source = _objc.send(segments[0], "sourceTrackID", restype=ctypes.c_int32) if segments else None
         if source in turns:
             _objc.send(copy, "setPreferredTransform:", turns[source], argtypes=(_objc.CGAffineTransform,), restype=None)

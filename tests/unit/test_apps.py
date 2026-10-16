@@ -659,14 +659,16 @@ def test_installed_says_why_spotlight_was_not_asked(tmp_path, monkeypatch):
 class _FakeObjC:
     """Enough of the Objective-C bridge for the questions about running apps."""
 
-    def __init__(self, handles, terminated=()):
-        self.handles, self.terminated, self.sent = handles, set(terminated), []
+    def __init__(self, handles, terminated=(), inactive=()):
+        self.handles, self.terminated, self.inactive, self.sent = handles, set(terminated), set(inactive), []
         self.id = object
 
     def send(self, receiver, selector, *args, **kwargs):
         self.sent.append(selector)
         if selector == "isTerminated":
             return receiver in self.terminated
+        if selector == "isActive":
+            return receiver not in self.inactive
         if selector == "processIdentifier":
             return receiver
         return 1
@@ -719,3 +721,24 @@ def test_open_returns_a_copy_of_the_app_running_from_elsewhere(fake_run, monkeyp
     monkeypatch.setattr(apps, "_running_pids", lambda bundle_id: [])
     with pytest.raises(macos.AppNotFoundError, match="did not show up"):
         apps.open("Tool", timeout=0)
+
+
+def test_open_in_the_background_returns_the_copy_running_from_elsewhere_once_the_wait_ends(fake_run, monkeypatch):
+    """open -g reopens a running copy without bringing it to the front: it's taken when nothing else came up."""
+    from macos import apps
+
+    asked = "/Volumes/Disk/Tool.app"
+    running = apps.App("Tool", "com.example.tool", 7, "/Applications/Tool.app")
+    fake = _FakeObjC([7], inactive=[7])
+    monkeypatch.setattr(apps, "_locate", lambda name: asked)
+    monkeypatch.setattr(apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(apps, "_objc", fake)
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: running.path)
+    monkeypatch.setattr(apps, "_app", lambda handle: running if handle == 7 else None)
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+
+    # While the wait goes on, the one asked for may still be coming up: the copy in the background isn't taken.
+    assert apps._find_launched(asked, "com.example.tool", running_before=[7]) is None
+    assert apps.open("Tool", background=True, timeout=0) == running
+    assert fake_run.args == ["open", "-g", "-a", asked]

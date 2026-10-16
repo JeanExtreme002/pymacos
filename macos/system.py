@@ -2304,8 +2304,9 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
             reader.stdout.close()
         errors_file.seek(0)
         errors = errors_file.read().decode("utf-8", "replace")
-    # Out of time only if the kill is what ended the output: fired as log show ended by itself (its last
-    # line read, its exit not yet seen), the timer killed a process that was done, and all was read.
+    # Out of time only if the kill is what ended it: a timer that fired once log show had exited (its last
+    # line read, its exit not yet seen) killed nothing. One that fires in the instant between its last line
+    # and its exit still counts as out of time: it was, by that instant.
     if expired.is_set() and not stopped and reader.returncode == -signal.SIGKILL:
         raise CommandTimeoutError(args, timeout or 0)
     if not stopped and reader.returncode != 0:

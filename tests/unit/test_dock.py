@@ -234,8 +234,9 @@ def test_dock_tiles_tolerate_hand_edited_values(dock_settings):
         {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Safari.app/", "_CFURLStringType": 15},
                        "file-label": "Safari", "bundle-identifier": "com.apple.Safari"}, "tile-type": "file-tile"},
     ]  # fmt: skip
-    with pytest.warns(RuntimeWarning, match="2 of the Dock's persistent-apps entries aren't tiles"):
+    with pytest.warns(RuntimeWarning, match="2 of the Dock's persistent-apps entries aren't tiles") as reported:
         assert [entry.name for entry in macos.dock.apps()] == ["Safari"]
+    assert reported[0].filename == __file__  # it points at the call to apps(), not inside the package
     # A folder's view, sort and icon edited into text, a list, a number out of range: the defaults, as for the Dock's numbers.
     store["persistent-others"] = [
         {"tile-data": {"file-data": {"_CFURLString": "file:///Users/me/Downloads/", "_CFURLStringType": 15},

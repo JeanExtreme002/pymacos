@@ -114,7 +114,8 @@ def test_schedule_pause_and_resume(fake_run, home):
     fake_run.calls.clear()
 
     macos.schedule.pause("backup")
-    assert [call["args"][1] for call in fake_run.calls] == ["disable", "bootout"]  # disabled first: see the test below
+    # Asked whether it's paused already, then disabled first: see the tests below.
+    assert [call["args"][1] for call in fake_run.calls] == ["print-disabled", "disable", "bootout"]
     assert fake_run.args == ["launchctl", "bootout", "gui/501/pymacos.backup"]
 
     fake_run.stdout = '\tdisabled services = {\n\t\t"pymacos.backup" => disabled\n\t\t"pymacos.other" => enabled\n\t}\n'
@@ -532,7 +533,7 @@ def test_schedule_pause_leaves_a_job_it_couldnt_unload_as_it_was(fake_run, home,
 
     # Disabled before unloading (a refusal there changes nothing), and enabled again when unloading
     # failed: not left loaded now, and gone at the next login.
-    assert [call[1] for call in calls] == ["disable", "bootout", "enable"]
+    assert [call[1] for call in calls] == ["print-disabled", "disable", "bootout", "enable"]
     assert calls[-1] == ["launchctl", "enable", "gui/501/pymacos.backup"]
 
 
@@ -586,3 +587,14 @@ def test_schedule_resume_says_when_a_loaded_job_stays_unloaded(fake_run, home, m
 
     assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]  # not paused by mistake
     assert "stays unloaded until the next login" in _notes_of(caught.value, reported)
+
+
+def test_schedule_pause_leaves_a_paused_job_paused_when_it_cant_be_unloaded(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootout", disabled=["backup"])
+
+    with pytest.raises(macos.errors.CommandError, match="bootout failed"):
+        macos.schedule.pause("backup")
+
+    # Paused before the call: not enabled again by the rollback, which would bring it back at the next login.
+    assert [call[1] for call in calls] == ["print-disabled", "disable", "bootout"]

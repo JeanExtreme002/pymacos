@@ -517,6 +517,10 @@ def pause(name: str) -> None:
     When launchd refuses, the job is left as it was (and the error raised).
     """
     _existing_job(name)
+    try:
+        was_paused = name in _paused()  # a job paused already stays paused, whatever happens below
+    except (CommandError, CommandTimeoutError):
+        was_paused = False
     # Disabled first: that alone changes nothing until the next login, so a refusal leaves the job as it
     # was. Unloaded second, and enabled again if that fails, rather than left loaded with a switch that
     # keeps it from coming back: paused at the next login, with nothing to show for it now.
@@ -524,6 +528,8 @@ def pause(name: str) -> None:
     try:
         _bootout(name)
     except BaseException as error:
+        if was_paused:
+            raise
         try:
             _run(["launchctl", "enable", _target(name)])
         except Exception as failure:

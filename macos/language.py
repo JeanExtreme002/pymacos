@@ -102,6 +102,11 @@ _WORD = 0  # NLTokenUnitWord
 _ENTITY_KINDS = {"PersonalName": "person", "PlaceName": "place", "OrganizationName": "organization"}
 
 
+def _utf16_length(text: str) -> int:
+    """``text``'s length as Foundation counts it, in UTF-16 units: encoded in C, not walked in Python."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 def _tagger(text: str, schemes: Sequence[int], language: Optional[str] = None) -> int:
     """An autoreleased ``NLTagger`` over ``text`` for the tag ``schemes``, told the ``language`` (a code) when given."""
     tagger = _objc.send(_objc.cls("NLTagger"), "alloc")
@@ -109,7 +114,7 @@ def _tagger(text: str, schemes: Sequence[int], language: Optional[str] = None) -
     _objc.send(tagger, "autorelease")
     _objc.send(tagger, "setString:", _objc.nsstring(text), argtypes=(_objc.id,), restype=None)
     if language is not None:
-        whole = _files.NSRange(0, _objc.utf16_offsets(text)[-1])
+        whole = _files.NSRange(0, _utf16_length(text))
         _objc.send(
             tagger, "setLanguage:range:", _objc.nsstring(language), whole, argtypes=(_objc.id, _files.NSRange), restype=None
         )
@@ -136,7 +141,7 @@ def _words(tagger: int, text: str, scheme: int) -> Iterator[Tuple[int, int, int,
     where ``index`` is where the word was asked for and ``start``/``end`` where it is, all in UTF-16 units.
     Punctuation and spaces come too, with no tag; a word's tag is read at ``index`` again for another scheme.
     """
-    index, total = 0, _objc.utf16_offsets(text)[-1]
+    index, total = 0, _utf16_length(text)
     while index < total:
         token = _files.NSRange()
         tag = _tag(tagger, index, _WORD, scheme, token)

@@ -44,6 +44,8 @@ def is_allowed() -> Optional[bool]:
     require_macos()
     try:
         # Through CFPreferences, in this process: a ``defaults export`` would start a process for every notification.
+        # Synchronized first: a process that read them once would go on seeing its copy, not a switch turned since.
+        defaults._synchronize(_SETTINGS)
         apps = defaults.read(_SETTINGS, "apps")
     except (MacOSError, ValueError, OSError):
         return None  # best effort: an unreadable format must never break notify()

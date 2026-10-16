@@ -315,22 +315,23 @@ def _running_pids(bundle_id: Optional[str]) -> Sequence[int]:
         ]
 
 
-def _find_launched(path: str, bundle_id: Optional[str], *, running_before: Sequence[int] = ()) -> Optional[App]:
+def _find_launched(
+    path: str, bundle_id: Optional[str], *, running_before: Sequence[int] = (), in_front: bool = True
+) -> Optional[App]:
     """
     The running instance of the bundle at ``path``, if it is up yet.
 
     Failing that, a copy of the app (the same bundle id, another path) whose pid is in ``running_before``, once
     it's the active app: LaunchServices brings a copy that's already running to the front rather than launch
-    the one asked for. Until it's in front, the one at ``path`` may still be coming up, so the poll goes on.
+    the one asked for. Until it's in front, the one at ``path`` may still be coming up, so the poll goes on;
+    ``in_front=False`` takes it in the background too (``open -g``), once the poll has run out.
     """
     with _objc.autorelease_pool():
         if bundle_id is not None:
             # Only asks about this one bundle id, instead of listing every process on each poll.
             candidates = _handles_with_bundle_id(bundle_id)  # the live ones
         else:
-            candidates = [
-                handle for handle in _handles(include_background=True) if not _objc.send(handle, "isTerminated", restype=BOOL)
-            ]
+            candidates = list(_handles(include_background=True))
 
         copy = None
         for handle in candidates:
@@ -338,11 +339,13 @@ def _find_launched(path: str, bundle_id: Optional[str], *, running_before: Seque
             # is the one that was asked for. Comparing the path on the handle
             # also avoids building an App for every other process.
             if _bundle_path(handle) == path:
-                return _app(handle)
+                if not _objc.send(handle, "isTerminated", restype=BOOL):  # the bundle-id list holds live ones only
+                    return _app(handle)
+                continue
             if (
                 copy is None
                 and _objc.send(handle, "processIdentifier", restype=ctypes.c_int) in running_before
-                and _objc.send(handle, "isActive", restype=BOOL)
+                and (not in_front or _objc.send(handle, "isActive", restype=BOOL))
             ):
                 copy = handle
         return _app(copy) if copy is not None else None
@@ -393,6 +396,11 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
         if app is not None:
             return app
         if time.monotonic() >= deadline:
+            # Opened in the background (open -g), a copy already running from elsewhere stays there: not in
+            # front, it's still the one LaunchServices reopened, as nothing at `path` came up.
+            app = _find_launched(path, bundle_id, running_before=running_before, in_front=False)
+            if app is not None:
+                return app
             raise AppNotFoundError("{!r} was launched but did not show up within {}s".format(name, timeout))
         time.sleep(0.1)
 

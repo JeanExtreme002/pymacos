@@ -129,6 +129,13 @@ def keys(domain: str, *, current_host: bool = False) -> List[str]:
         return sorted(_cf.to_python(found) or [])
 
 
+def _synchronize(domain: str) -> None:
+    """Drop this process's copy of ``domain``'s values, so the next read sees what other processes wrote since."""
+    _check(domain)
+    with _cf.owned(_domain(domain)) as name:
+        _preferences().CFPreferencesAppSynchronize(name)
+
+
 def read(domain: str, key: Optional[str] = None, *, default: Any = None, current_host: bool = False) -> Any:
     """
     The value of ``key`` in ``domain`` (an app's bundle ID, or :data:`GLOBAL`), or ``default`` when it isn't set.

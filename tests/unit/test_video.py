@@ -230,7 +230,7 @@ def test_editing_keeps_the_videos_turn(monkeypatch):
     from macos import _media, _objc
 
     media, edited = 1, 2
-    source_a, source_b, copy_a, copy_b, segment_a, segment_b = 11, 12, 21, 22, 31, 32
+    source_a, source_b, copy_a, copy_b, segment_a, segment_b, gap = 11, 12, 21, 22, 31, 32, 33
     turns = {source_a: _objc.CGAffineTransform(0, 1, -1, 0, 480, 0), source_b: _objc.CGAffineTransform(-1, 0, 0, -1, 640, 480)}
     set_on = []
 
@@ -249,9 +249,11 @@ def test_editing_keeps_the_videos_turn(monkeypatch):
         if selector == "preferredTransform":
             return turns[receiver]
         if selector == "segments":
-            return {copy_a: [segment_a], copy_b: [segment_b]}[receiver]
+            return {copy_a: [gap, segment_a], copy_b: [segment_b]}[receiver]  # an empty edit first: no source
+        if selector == "isEmpty":
+            return receiver == gap
         if selector == "sourceTrackID":
-            return {segment_a: source_a, segment_b: source_b}[receiver]
+            return {gap: 0, segment_a: source_a, segment_b: source_b}[receiver]
         if selector == "setPreferredTransform:":
             set_on.append((receiver, (args[0].a, args[0].b, args[0].c, args[0].d, args[0].tx, args[0].ty)))
         return None
