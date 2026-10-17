@@ -255,6 +255,25 @@ def test_dock_tiles_tolerate_hand_edited_values(dock_settings):
     ]
 
 
+def test_dock_tiles_with_hand_edited_contents_read_as_no_app(dock_settings):
+    store, restarts, app = dock_settings
+    safari = store["persistent-apps"][0]
+    # Dictionaries, so tiles, but what they hold was edited into something else: skipped, and kept as they are.
+    odd = [
+        {"tile-data": "x", "tile-type": "file-tile"},
+        {"tile-data": {"file-data": []}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": 5}}, "tile-type": "file-tile"},
+    ]
+    store["persistent-apps"] = [*odd, safari]
+    store["persistent-others"] = [{"tile-data": "x", "tile-type": "directory-tile"}]
+    assert [entry.name for entry in macos.dock.apps()] == ["Safari"]
+    assert [(folder.name, folder.path, folder.view) for folder in macos.dock.folders()] == [("", None, "automatic")]
+    assert macos.dock.remove_app("Safari") is True and store["persistent-apps"] == odd
+    macos.dock.add_spacer()
+    assert macos.dock.add_app("Code").path == app and store["persistent-apps"][: len(odd)] == odd
+    assert len(restarts) == 3
+
+
 def test_dock_tiles_keep_file_urls_as_the_dock_writes_them(dock_settings):
     store, _, app = dock_settings
     folder = app.parent / "My Projects"

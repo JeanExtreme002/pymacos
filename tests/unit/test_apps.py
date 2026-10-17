@@ -162,13 +162,13 @@ def test_install_from_dmg_never_follows_a_link_named_like_an_app(monkeypatch, tm
     monkeypatch.setattr(system, "unmount_image", lambda mounted, force=False: None)
     monkeypatch.setattr(apps, "_run", copied.append)
 
-    with pytest.raises(macos.AppNotFoundError, match="has no app at its top"):
+    with pytest.raises(macos.AppNotFoundError, match=r"has no app at its top \(Tool.app is a symbolic link"):
         apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications")
     assert copied == []
 
     # Beside a real app, the link is left out: no warning about several apps, and app= can't pick it.
     (volume / "Real.app" / "Contents").mkdir(parents=True)
-    with pytest.raises(macos.AppNotFoundError):
+    with pytest.raises(macos.AppNotFoundError, match=r"it holds Real.app \(Tool.app is a symbolic link, not installed\)"):
         apps.install_from_dmg(tmp_path / "Tool.dmg", destination=tmp_path / "Applications", app="Tool")
     monkeypatch.setattr(apps, "_run", lambda args: (copied.append(args), Path(args[-1]).mkdir()))
     with warnings.catch_warnings():
@@ -349,7 +349,7 @@ def test_uninstall_moves_name_matches_only_when_asked(tmp_path, monkeypatch):
         (home / "Library" / entry).mkdir(parents=True)
     monkeypatch.setattr(apps, "require_macos", lambda: None)
     monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
-    monkeypatch.setattr(apps, "installed", lambda: [apps._installed_app(str(bundle))])
+    monkeypatch.setattr(apps, "_installed", lambda: [apps._installed_app(str(bundle))])
     monkeypatch.setattr(apps.Path, "home", lambda: home)
 
     assert apps.uninstall("Chat", dry_run=True) == [bundle, home / "Library/Caches/com.example.Chat"]
@@ -513,7 +513,7 @@ def test_uninstall_says_which_library_folders_it_could_not_look_in(tmp_path, mon
     monkeypatch.setattr(apps.os, "listdir", protected)
     monkeypatch.setattr(apps, "require_macos", lambda: None)
     monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
-    monkeypatch.setattr(apps, "installed", lambda: [apps._installed_app(str(bundle))])
+    monkeypatch.setattr(apps, "_installed", lambda: [apps._installed_app(str(bundle))])
     monkeypatch.setattr(apps.Path, "home", lambda: home)
 
     with pytest.warns(RuntimeWarning, match="Cookies couldn't be looked in.*Full Disk Access is missing") as caught:
@@ -546,9 +546,15 @@ def test_installed_gives_spotlight_a_timeout(tmp_path, monkeypatch):
         b'<plist version="1.0"><dict><key>CFBundleName</key><string>Tool</string></dict></plist>'
     )
 
-    with pytest.warns(RuntimeWarning, match="Spotlight couldn't be asked"):
+    with pytest.warns(RuntimeWarning, match="Spotlight couldn't be asked") as reported:
         assert [app.name for app in apps.installed()] == ["Tool"]
     assert queries and queries[0]["timeout"] == apps._SPOTLIGHT_TIMEOUT > 0
+    # uninstall() lists the installed apps too: its warning points at the call to it, not inside the package.
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps.Path, "home", lambda: tmp_path / "home")
+    with pytest.warns(RuntimeWarning, match="Spotlight couldn't be asked") as reported_too:
+        assert apps.uninstall("Tool", dry_run=True) == [bundle]
+    assert reported[0].filename == reported_too[0].filename == __file__
 
 
 def test_install_from_dmg_with_several_apps_warns_or_takes_the_one_named(monkeypatch, tmp_path):
@@ -753,6 +759,20 @@ def test_find_launched_skips_an_app_at_the_path_that_has_quit(monkeypatch):
     monkeypatch.setattr(apps, "_bundle_path", lambda handle: "/Applications/Tool.app")
     monkeypatch.setattr(apps, "_app", lambda handle: pytest.fail("a quit app was taken"))
     assert apps._find_launched("/Applications/Tool.app", None) is None
+
+
+def test_find_launched_prefers_the_app_asked_for_to_a_copy_listed_before_it(monkeypatch):
+    from macos import apps
+
+    asked = "/Volumes/Disk/Tool.app"
+    copy = apps.App("Tool", "com.example.tool", 7, "/Applications/Tool.app")
+    launched = apps.App("Tool", "com.example.tool", 8, asked)
+    monkeypatch.setattr(apps, "_objc", _FakeObjC([7, 8]))  # the copy first, active and running before the launch
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: copy.path if handle == 7 else asked)
+    monkeypatch.setattr(apps, "_app", lambda handle: {7: copy, 8: launched}[handle])
+    for in_front in (True, False):
+        assert apps._find_launched(asked, "com.example.tool", running_before=[7], in_front=in_front) == launched
 
 
 def test_open_in_the_background_takes_the_running_copy_after_a_moment_not_at_once(fake_run, monkeypatch):

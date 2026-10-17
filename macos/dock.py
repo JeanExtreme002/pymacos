@@ -203,9 +203,16 @@ def _tiles() -> List[Dict[str, Any]]:
     return _tile_list("persistent-apps")
 
 
+def _data(tile: Dict[str, Any]) -> Dict[str, Any]:
+    """The tile's ``tile-data``; a hand-edited one that isn't a dictionary reads as empty."""
+    data = tile.get("tile-data", {})
+    return data if isinstance(data, dict) else {}
+
+
 def _tile_path(tile: Dict[str, Any]) -> Optional[Path]:
-    url = tile.get("tile-data", {}).get("file-data", {}).get("_CFURLString", "")
-    if not url.startswith("file://"):
+    file_data = _data(tile).get("file-data", {})
+    url = file_data.get("_CFURLString", "") if isinstance(file_data, dict) else ""
+    if not isinstance(url, str) or not url.startswith("file://"):
         return None
     # Resolved, like the app paths it's compared with: /Applications/Safari.app is a link.
     return Path(os.path.realpath(_url_path(url).rstrip("/")))
@@ -214,7 +221,7 @@ def _tile_path(tile: Dict[str, Any]) -> Optional[Path]:
 def _is_app(tile: Dict[str, Any]) -> bool:
     if tile.get("tile-type") not in ("file-tile", None):
         return False
-    return _tile_path(tile) is not None or bool(tile.get("tile-data", {}).get("file-label"))
+    return _tile_path(tile) is not None or bool(_data(tile).get("file-label"))
 
 
 def apps() -> List[DockApp]:
@@ -228,7 +235,7 @@ def apps() -> List[DockApp]:
     for tile in _tiles():
         if not _is_app(tile):
             continue  # spacers and the like
-        data = tile.get("tile-data", {})
+        data = _data(tile)
         path = _tile_path(tile)
         name = data.get("file-label") or (path.stem if path else "")
         found.append(DockApp(name=name, path=path, bundle_id=data.get("bundle-identifier")))
@@ -237,7 +244,7 @@ def apps() -> List[DockApp]:
 
 def _matches(tile: Dict[str, Any], app: str) -> bool:
     """Whether ``app`` (a name, with or without ``.app``, a bundle ID or a path) names this tile."""
-    data = tile.get("tile-data", {})
+    data = _data(tile)
     path = _tile_path(tile)
     wanted = {app.casefold()}
     if app.casefold().endswith(".app"):  # "Safari.app", or a path: a bundle ID ending in .app is kept as is
@@ -282,7 +289,7 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
         if strays or len(kept_others) != len(others):
             defaults.write(_DOMAIN, "persistent-apps", tiles)
             restart()
-        data = kept.get("tile-data", {})
+        data = _data(kept)
         return DockApp(name=data.get("file-label") or path.stem, path=path, bundle_id=data.get("bundle-identifier"))
     bundle_id = _apps._bundle_id(str(path))
     name = path.stem
@@ -651,10 +658,10 @@ def _others() -> List[Dict[str, Any]]:
 
 
 def _folder(tile: Dict[str, Any]) -> DockFolder:
-    data = tile.get("tile-data", {})
+    data = _data(tile)
     path = _tile_path(tile)
     sorts = {number: name for name, number in _SORTS.items()}
-    # Hand-edited values (text, a list) read as the defaults, as the Dock's numbers do.
+    # Hand-edited values read as the number they spell ("2"), or as the defaults (a list, other text).
     view = defaults._as_int(data.get("showas", 0), 0)
     display = defaults._as_int(data.get("displayas", 0), 0)
     return DockFolder(

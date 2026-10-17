@@ -377,8 +377,9 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     When a copy of the app is already running from another path (an older
     version in another folder, say), macOS brings that one to the front
     rather than open the one asked for (with ``background=True``, it stays
-    behind), and that running copy is returned after a second, once the
-    one asked for hasn't come up: check its ``path``.
+    behind), and that running copy is returned after a second (or once
+    ``timeout`` ends, if sooner), when the one asked for hasn't come up:
+    check its ``path``. In front, the copy must then be the active app.
     """
     path = _locate(name)
     bundle_id = _bundle_id(path)
@@ -658,12 +659,15 @@ def install_from_dmg(
     succeeded = False
     try:
         # A link named like an app isn't one: ditto would copy whatever it points to, anywhere on the disk.
-        found = sorted(
-            entry for entry in mounted.iterdir() if entry.suffix == ".app" and entry.is_dir() and not entry.is_symlink()
-        )
+        entries = [entry for entry in mounted.iterdir() if entry.suffix == ".app"]
+        found = sorted(entry for entry in entries if entry.is_dir() and not entry.is_symlink())
+        links = sorted(entry.name for entry in entries if entry.is_symlink())
+        # Said when nothing fits, as Finder shows a link like the app it's named after.
+        skipped = " ({} {} a symbolic link, not installed)".format(", ".join(links), "is" if len(links) == 1 else "are")
+        skipped = skipped if links else ""
         if not found:
-            raise AppNotFoundError("{} has no app at its top".format(Path(image).name))
-        source = _chosen_app(found, app, Path(image).name)
+            raise AppNotFoundError("{} has no app at its top{}".format(Path(image).name, skipped))
+        source = _chosen_app(found, app, Path(image).name, skipped)
         target = target_folder / source.name
         if target.exists() and not replace:
             raise FileExistsError(str(target))
@@ -714,13 +718,14 @@ def install_from_dmg(
     return str(target)
 
 
-def _chosen_app(found: List[Path], app: Optional[str], image: str) -> Path:
+def _chosen_app(found: List[Path], app: Optional[str], image: str, skipped: str = "") -> Path:
     """
     The app to install from ``found``, the apps at the top of the disk image ``image``, sorted by name.
 
     ``app`` names one (with or without ``.app``, case aside); without it, the
     first, and a :class:`RuntimeWarning` says which others the image holds:
     installing one of several without a word would leave the user guessing.
+    ``skipped`` ends the error when ``app`` names none of them: the links left out.
     """
     names = ", ".join(entry.name for entry in found)
     if app is not None:
@@ -728,7 +733,7 @@ def _chosen_app(found: List[Path], app: Optional[str], image: str) -> Path:
         for entry in found:
             if entry.name.lower() == wanted:
                 return entry
-        raise AppNotFoundError("{} has no app named {!r}: it holds {}".format(image, app, names))
+        raise AppNotFoundError("{} has no app named {!r}: it holds {}{}".format(image, app, names, skipped))
     if len(found) > 1:
         warnings.warn(
             "{} holds several apps ({}): installing {}; pass app= to pick another".format(image, names, found[0].name),
@@ -959,10 +964,16 @@ def installed() -> List[InstalledApp]:
 
     It lists the Applications folders (yours, the Mac's and the system's),
     their subfolders included, and the apps Spotlight knows elsewhere. When
-    Spotlight is off, doesn't answer within a minute, or can't be asked
-    (a permission it lacks), only the folders are listed, with a
-    :class:`RuntimeWarning` saying why.
+    Spotlight doesn't answer within a minute, or can't be asked (a
+    permission it lacks), only the folders are listed, with a
+    :class:`RuntimeWarning` saying why. With Spotlight off, it finds
+    nothing more than the folders hold.
     """
+    return _installed()
+
+
+def _installed() -> List[InstalledApp]:
+    """:func:`installed`, called by it and by :func:`uninstall` alike: its warning points at the call to either."""
     require_macos()
     paths = set()
     for folder in _APP_FOLDERS:
@@ -984,7 +995,7 @@ def installed() -> List[InstalledApp]:
                 error
             ),
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,  # _installed, installed or uninstall, its caller
         )
     apps = [app for app in (_installed_app(path) for path in paths) if app]
     return sorted(apps, key=lambda app: (app.name.lower(), str(app.path)))
@@ -1143,7 +1154,7 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
         raise AppNotFoundError("{} isn't an app".format(path))
     if path.startswith(("/System/", "/usr/")):
         raise MacOSError("{} comes with macOS and can't be uninstalled".format(app.name))
-    names, others = _claims(app, installed())
+    names, others = _claims(app, _installed())  # not installed(): its warning points at the call to uninstall()
     if not include_name_matches:
         names = []  # by bundle ID only: a folder named after the app may be another's too
     unreadable: List[Tuple[Path, int]] = []

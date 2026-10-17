@@ -58,7 +58,8 @@ the app doesn't show up within `timeout` seconds (10 by default). When a copy
 of the app is already running from another path (an older version in another
 folder, say), macOS brings that one to the front rather than open the one
 asked for (with `background=True`, it stays behind), and that running copy is
-returned after a second, once the one asked for hasn't come up: check its `path`.
+returned after a second (or once `timeout` ends, if sooner), when the one asked
+for hasn't come up: check its `path`. In front, the copy must then be the active app.
 
 A name is only treated as a path when it contains a `/` (or starts with `~`),
 so `open("Notes")` finds the Notes app even if the current directory has a
@@ -229,9 +230,10 @@ version and bundle ID:
 ```
 
 It looks in the Applications folders (yours, the Mac's and the system's),
-and at the apps Spotlight knows elsewhere. When Spotlight is off, doesn't
-answer within a minute, or can't be asked (a permission it lacks), only the
-folders are listed, with a {class}`RuntimeWarning` saying why.
+and at the apps Spotlight knows elsewhere. When Spotlight doesn't answer
+within a minute, or can't be asked (a permission it lacks), only the folders
+are listed, with a {class}`RuntimeWarning` saying why. With Spotlight off,
+it finds nothing more than the folders hold.
 
 ## Uninstalling an app
 

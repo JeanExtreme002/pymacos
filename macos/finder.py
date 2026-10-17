@@ -1157,7 +1157,7 @@ def set_desktop_view(
     icon_size: Optional[int] = None,
     grid_spacing: Optional[int] = None,
     text_size: Optional[int] = None,
-    sort: object = _UNCHANGED,
+    sort: Union[str, None, bool, _Unchanged] = _UNCHANGED,
     show_item_info: Optional[bool] = None,
     labels_on_bottom: Optional[bool] = None,
 ) -> None:
@@ -1192,7 +1192,7 @@ def set_desktop_view(
                 raise ValueError("{} must be from {} to {}, not {}".format(name, low, high, value))
             changes[key] = float(value)
     if sort is _UNCHANGED or sort is False:
-        pass  # left out, or False, what the default was up to 1.27 and still means the same: the order stays
+        pass  # left out, or False, the default it replaced, which still means the same: the order stays
     elif (sort is None or isinstance(sort, str)) and sort in _DESKTOP_SORTS:
         changes["arrangeBy"] = _DESKTOP_SORTS[sort]
     else:
