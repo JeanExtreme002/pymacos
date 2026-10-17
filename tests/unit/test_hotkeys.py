@@ -1,6 +1,7 @@
 """Unit tests for :mod:`macos.hotkeys` and the event tap it shares with :mod:`macos.keyboard`. They run on any platform."""
 
 import threading
+import time
 
 import pytest
 
@@ -230,6 +231,7 @@ def test_a_shortcut_goes_to_every_wait_for_it_and_to_one_run(registered):
     assert list(waiting_j.pending) == [other]
 
 
+@pytest.mark.filterwarnings("ignore:no shortcut is registered")
 def test_stop_reaches_every_listener_and_is_kept_from_the_start(monkeypatch):
     started = threading.Event()
 
@@ -286,6 +288,7 @@ def test_the_tap_keeps_handling_keys_while_a_callback_runs(fake_tap, registered,
     assert k in hotkeys._registered
 
 
+@pytest.mark.filterwarnings("ignore:no shortcut is registered")
 def test_a_tap_macos_refuses_raises_on_the_callers_thread(monkeypatch):
     def refuse(*args, **kwargs):
         raise macos.PermissionDeniedError("no tap")
@@ -297,6 +300,7 @@ def test_a_tap_macos_refuses_raises_on_the_callers_thread(monkeypatch):
     assert hotkeys._listeners.active() == []
 
 
+@pytest.mark.filterwarnings("ignore:no shortcut is registered")
 def test_ctrl_c_while_the_tap_starts_stops_the_tap_too(monkeypatch):
     import threading
     from types import SimpleNamespace
@@ -383,14 +387,15 @@ def test_a_wait_ending_leaves_other_waits_and_registrations_alone(registered, mo
         gates[name].wait(5)
 
     monkeypatch.setattr(hotkeys, "_listen", listen)
+    deadline = time.monotonic() + 5
     first = threading.Thread(target=hotkeys.wait, args=("cmd+k",))
     first.start()
     while not listening:
-        pass
+        assert time.monotonic() < deadline, "the first wait() never started listening"
     second = threading.Thread(target=hotkeys.wait, args=("cmd+k",))
     second.start()
     while len(listening) < 2:
-        pass
+        assert time.monotonic() < deadline, "the second wait() never started listening"
     assert hotkeys._match(40, CMD) == k
     gates["first"].set()
     first.join()
@@ -404,6 +409,31 @@ def test_a_wait_ending_leaves_other_waits_and_registrations_alone(registered, mo
     finally:
         mine.unregister()
     assert hotkeys._match(40, CMD) is None
+
+
+def test_run_with_no_shortcut_registered_warns_and_still_listens(monkeypatch):
+    # Not an error (one may be registered from another thread meanwhile), but a forgotten register() would wait for good.
+    import warnings
+
+    monkeypatch.setattr(_events, "Tap", lambda *args, **kwargs: type("Tap", (), {"close": lambda self: None})())
+    monkeypatch.setattr(_events, "graphics", lambda: None)
+    monkeypatch.setattr(_events._objc, "spin", lambda seconds: None)
+    with pytest.warns(RuntimeWarning, match="no shortcut is registered: run\\(\\) waits until stop\\(\\) or the timeout"):
+        hotkeys.run(timeout=0)
+    registered = hotkeys.register("f19", lambda: None)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            hotkeys.run(timeout=0)
+    finally:
+        registered.unregister()
+
+
+def test_a_listener_dropped_at_shutdown_never_prints_an_ignored_exception(fake_tap, monkeypatch):
+    watching = _events.listen([KEY_DOWN], lambda kind, event: event, 1, "no")
+    monkeypatch.setattr(watching._tap, "close", lambda: (_ for _ in ()).throw(AttributeError("'NoneType' at exit")))
+    watching.__del__()  # what the collector does during the interpreter's teardown
+    assert watching._tap is None  # given up on, not retried by a later collection
 
 
 def test_has_permission_needs_accessibility_too(monkeypatch):

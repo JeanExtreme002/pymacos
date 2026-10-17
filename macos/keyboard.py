@@ -23,14 +23,14 @@ instead. The backlight and the layouts need no permission.
 import ctypes
 import json
 import re
-import threading
 import time
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from . import _cf, _events, _objc
+from . import _cf, _events, _files, _objc
 from ._system import framework, private_framework
 from .errors import AppNotFoundError, MacOSError, MainThreadError, NotSupportedError
 
@@ -253,7 +253,7 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
     it. Any other layout raises :class:`~macos.MainThreadError` there, rather than
     pressing the wrong keys (Cmd+A would be Cmd+Q on an AZERTY keyboard).
     """
-    if threading.current_thread() is not threading.main_thread():
+    if not _files.on_main_thread():
         current = _current_layout_id()
         if not current and _LAST_READ:
             current = _LAST_READ[0]  # never switched since the account was made: still the one the main thread read
@@ -369,7 +369,10 @@ def press(keys: str, *, times: int = 1) -> None:
     keyboard layout (so ``"cmd+z"`` is undo on an AZERTY keyboard too), or
     names: ``enter``, ``tab``, ``space``, ``delete`` (backspace),
     ``forward_delete``, ``escape``, ``left``, ``right``, ``up``, ``down``,
-    ``home``, ``end``, ``page_up``, ``page_down``, ``f1`` to ``f20``...
+    ``home``, ``end``, ``page_up``, ``page_down``, ``help``, ``f1`` to ``f20``...
+    On a layout with dead keys (US International's ``'``, ``"``, `````,
+    ``~`` and ``^``), one pressed on its own types nothing until the next
+    key, as on the real keyboard: use :func:`type` for the character.
 
     The keystrokes go to the app in front. Needs the Accessibility permission.
     """
@@ -568,8 +571,9 @@ def _tap_key(event: Callable[[bool], int]) -> None:
 
 def _require_main_thread(what: str) -> None:
     # Text Input Sources only work on the main thread: elsewhere macOS may
-    # answer wrong, or stop the process.
-    if threading.current_thread() is not threading.main_thread():
+    # answer wrong, or stop the process. The process's main thread, as pthread
+    # knows it: in an embedder, Python's own "main" thread may be another one.
+    if not _files.on_main_thread():
         raise MainThreadError("{} only works on the main thread, as macOS requires for keyboard layouts".format(what))
 
 
@@ -749,7 +753,7 @@ class KeyPress:
     key: str
     """The key, named as :func:`press` takes it: ``'a'``, ``'1'``, ``'enter'``, ``'f5'``, ``'left'``..."""
     modifiers: Tuple[str, ...]
-    """The modifiers held, among ``'cmd'``, ``'ctrl'``, ``'option'`` and ``'shift'``."""
+    """The modifiers held, among ``'fn'``, ``'cmd'``, ``'ctrl'``, ``'option'`` and ``'shift'``."""
     text: str
     """What the key typed, such as ``'A'`` with Shift; ``''`` for keys that type nothing."""
     code: int
@@ -768,7 +772,17 @@ _KEY_NAMES: Dict[int, str] = {}
 for _name, _code in _KEYS.items():
     _KEY_NAMES.setdefault(_code, _name)
 
-_WATCHED_MODIFIERS = (("cmd", 1 << 20), ("ctrl", 1 << 18), ("option", 1 << 19), ("shift", 1 << 17))
+_WATCHED_MODIFIERS = (("fn", 1 << 23), ("cmd", 1 << 20), ("ctrl", 1 << 18), ("option", 1 << 19), ("shift", 1 << 17))
+_FN = _MODIFIERS["fn"][0]
+_CONTROL = _MODIFIERS["ctrl"][0]
+# The keys macOS flags with Fn whether or not Fn is held: the F-keys, the arrows, and home, end,
+# page up, page down, forward delete and help. Shared with macos.hotkeys, which matches them either way.
+_FN_FLAGGED = frozenset(
+    code
+    for name, code in _KEYS.items()
+    if (name.startswith("f") and name[1:].isdigit())
+    or name in ("left", "right", "up", "down", "home", "end", "page_up", "page_down", "forward_delete", "help")
+)
 _KEY_DOWN = 10  # kCGEventKeyDown
 _AUTOREPEAT = 8  # kCGKeyboardEventAutorepeat
 _KEYCODE = 9  # kCGKeyboardEventKeycode
@@ -780,6 +794,16 @@ def _typed(event: int) -> str:
     _events.graphics().CGEventKeyboardGetUnicodeString(event, len(chars), ctypes.byref(length), chars)
     text = bytes(chars)[: length.value * 2].decode("utf-16-le", "replace")
     return text if text.isprintable() else ""
+
+
+def _control_letter(event: int) -> str:
+    """The letter a Ctrl+letter event stands for (``"k"`` for ``"\\x0b"``): what the key types, on any layout."""
+    length = ctypes.c_ulong()
+    chars = (ctypes.c_uint16 * 8)()
+    _events.graphics().CGEventKeyboardGetUnicodeString(event, len(chars), ctypes.byref(length), chars)
+    if length.value == 1 and 1 <= chars[0] <= 26:
+        return chr(ord("a") + chars[0] - 1)
+    return ""
 
 
 def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
@@ -804,19 +828,43 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
     thread's run loop.
     macOS hides the keys typed in password fields. A modifier pressed on its own
     (Shift, Cmd, Option, Ctrl, Fn) isn't a key press to macOS, and isn't
-    reported: it shows in the ``modifiers`` of the next key.
+    reported: it shows in the ``modifiers`` of the next key (``fn`` too, except
+    on the keys macOS flags with Fn by itself, F5 or an arrow). Off the main
+    thread, with a layout that isn't US-compatible and wasn't read there yet
+    (see :func:`layout`), it warns (:class:`RuntimeWarning`) and names the keys
+    by what they type instead: call :func:`layout` once from the main thread first.
     """
     try:
         unshifted = {code: char for char, (code, shifted) in _layout().items() if not shifted}
-    except MacOSError:  # off the main thread, on a layout not read there yet: name keys by what they type
+    except MainThreadError as problem:
+        # Off the main thread, on a layout not read there yet (the US table serves for a US-compatible
+        # one): the keys are named by what they type, which isn't always how press() spells them.
         unshifted = {}
+        warnings.warn(
+            "{}; until then, watch() names the keys by what they type (a letter with Option as the symbol it "
+            "makes, Ctrl+K as 'k')".format(problem),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    except MacOSError:
+        unshifted = {}  # no layout to read (outside macOS, graphics() below says so): named by what they type
     cg = _events.graphics()
 
     def convert(kind: int, event: int) -> KeyPress:
         code = int(cg.CGEventGetIntegerValueField(event, _KEYCODE))
         flags = cg.CGEventGetFlags(event)
         text = _typed(event)
-        key = _KEY_NAMES.get(code) or unshifted.get(code) or text.lower() or "key{}".format(code)
+        key = (
+            _KEY_NAMES.get(code)
+            or unshifted.get(code)
+            or text.lower()
+            # A control character names the letter only with Ctrl held, and on a letter's key: keypad Enter
+            # types one (\x03) with Ctrl or without, and isn't Ctrl+C.
+            or (_control_letter(event) if flags & _CONTROL and code not in _KEYPAD else "")
+            or "key{}".format(code)
+        )
+        if code in _FN_FLAGGED:
+            flags &= ~_FN  # macOS sets it on these keys by itself: press() and hotkeys spell them without "fn"
         return KeyPress(
             key=key,
             modifiers=tuple(name for name, flag in _WATCHED_MODIFIERS if flags & flag),
@@ -996,6 +1044,7 @@ _HID_USAGES = {
     "end": 0x4D,
     "page_up": 0x4B,
     "page_down": 0x4E,
+    "help": 0x75,
     "ctrl": 0xE0,
     "shift": 0xE1,
     "option": 0xE2,
@@ -1034,7 +1083,7 @@ def _hid_code(key: str) -> int:
         raise ValueError(
             "can't remap {!r}: use a letter, a digit, f1 to f20, a modifier (cmd, right_option...) "
             "or one of caps_lock, escape, enter, tab, space, delete, forward_delete, the arrows, "
-            "home, end, page_up, page_down, fn".format(key)
+            "home, end, page_up, page_down, help, fn".format(key)
         )
     return _HID_CODES[name]
 
@@ -1178,14 +1227,17 @@ _SHORTCUT_KEYS = {
     "escape": "\x1b",
     "esc": "\x1b",
     "space": " ",
+    "help": "\uf746",
     "plus": "+",
+    "minus": "-",
 }
 _SHORTCUT_KEYS.update({"f{}".format(number): chr(0xF704 + number - 1) for number in range(1, 21)})
 # The first name of each key, for reading shortcuts back.
 _SHORTCUT_KEY_NAMES: Dict[str, str] = {}
 for _name, _character in _SHORTCUT_KEYS.items():
     _SHORTCUT_KEY_NAMES.setdefault(_character, _name)
-_SHORTCUT_KEY_NAMES["+"] = "+"
+_SHORTCUT_KEY_NAMES["+"] = "+"  # read back as the characters, which press() takes too
+_SHORTCUT_KEY_NAMES["-"] = "-"
 _MENU_PATH = "\x1b"  # NSUserKeyEquivalents' separator between a menu and its item
 _MENU_SEPARATOR = " > "
 

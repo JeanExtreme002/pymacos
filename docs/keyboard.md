@@ -52,7 +52,12 @@ macos.keyboard.press("cmd+plus")       # zoom in
   add `shift` for Shift.
 - **Names**: `enter`, `tab`, `space`, `delete` (backspace), `forward_delete`,
   `escape`, `left`, `right`, `up`, `down`, `home`, `end`, `page_up`,
-  `page_down`, `f1` to `f20`, `plus` and `minus`.
+  `page_down`, `help`, `f1` to `f20`, `plus` and `minus`.
+
+On a layout with dead keys (US International's `'`, `"`, `` ` ``, `~` and
+`^`), one pressed on its own types nothing until the next key, as on the real
+keyboard: use {func}`~macos.keyboard.type` for the character. With Cmd or
+Ctrl they're ordinary shortcuts.
 
 The keystrokes go to the app in front: bring one forward first with
 {meth}`App.activate() <macos.apps.App.activate>` or {func}`macos.apps.open`.
@@ -93,9 +98,15 @@ for key in macos.keyboard.watch():
     print(key.shortcut, repr(key.text))   # cmd+shift+k 'K'
 ```
 
-A {class}`~macos.keyboard.KeyPress` also has the `key`, its `modifiers`, the
-virtual key `code` and whether it's a `repeat` from holding the key down. It
-goes on until you `break` out of the loop, or `timeout` seconds pass.
+A {class}`~macos.keyboard.KeyPress` also has the `key`, its `modifiers`
+(`fn`, `cmd`, `ctrl`, `option`, `shift`; the keys macOS flags with Fn on its
+own, F5 or an arrow, don't count it), the virtual key `code` and whether it's
+a `repeat` from holding the key down. It goes on until you `break` out of the
+loop, or `timeout` seconds pass. Off the main thread, with a layout that
+isn't US-compatible and wasn't read there yet (see [Keyboard
+layouts](#keyboard-layouts)), it warns (`RuntimeWarning`) and names the keys
+by what they type instead: call {func}`~macos.keyboard.layout` once from the
+main thread first.
 
 It only listens: the keys still reach the app in front. To take a shortcut for
 yourself, see [Hotkeys](hotkeys.md). It needs the [Input Monitoring
@@ -209,7 +220,9 @@ macos.keyboard.set_app_shortcut("Safari", "Export as PDF…", None)         # re
 
 The title must be exactly the menu's, in the system's language, the
 ellipsis (…) included. Keys are written as for
-{func}`~macos.keyboard.press`. Apps pick it up when they're reopened.
+{func}`~macos.keyboard.press` (`help` and `minus` included; `fn` and
+`caps_lock` can't be part of a menu shortcut). Apps pick it up when they're
+reopened.
 
 ## macOS's shortcuts
 

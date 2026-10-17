@@ -57,7 +57,10 @@ listens for every event, so a callback registered while it runs (from another
 callback, or from another thread) is called from the next event on. A system
 source it can't set up (the USB or network watcher, on a Mac that refuses it)
 fails the call when an event registered at the start needs it; otherwise it
-warns (`RuntimeWarning`), and those events don't come.
+warns (`RuntimeWarning`), and those events don't come. Listening for every
+event has a small, one-time cost at the start: the four system watchers are
+set up whatever the callbacks (the USB one lists the devices plugged in), and
+closed when it returns.
 {func}`~macos.events.stop` stops every {func}`~macos.events.run` and
 {func}`~macos.events.wait` in progress, including one still starting. Each
 has its own queue of events, so one never takes the events another is waiting
@@ -68,7 +71,8 @@ an event.
 
 ## Waiting for an event
 
-{func}`~macos.events.wait` blocks until an event happens, and returns it:
+{func}`~macos.events.wait` blocks until an event happens, and returns it, or
+`None` when `timeout` seconds pass first:
 
 ```python
 macos.events.wait("screen_unlocked")

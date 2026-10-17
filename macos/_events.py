@@ -379,18 +379,24 @@ class _Listening:
     def close(self) -> None:
         tap, self._tap = self._tap, None
         if tap is not None:
-            # The tap first: it's what intercepts the keys. Closing the generator can fail when it's
-            # running on another thread ("generator already executing"); then it ends on its own.
-            tap.close()
             if threading.get_ident() != self._thread:
                 # Closed from another thread (or dropped there): the owner's run loop may be entering
                 # the tap's callback right now, waiting for the GIL this thread holds. Freed, that
-                # callback's code would go from under it: keep it, as the blocks are kept.
+                # callback's code would go from under it: keep it, as the blocks are kept. Kept before
+                # closing, so a close that fails halfway (silenced in __del__) can't free it either.
                 _RETIRED.append(tap)
+            # The tap first: it's what intercepts the keys. Closing the generator can fail when it's
+            # running on another thread ("generator already executing"); then it ends on its own.
+            tap.close()
             try:
                 self._items.close()  # type: ignore[attr-defined]  # a generator: its finally runs now
             except ValueError:
                 pass
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Collected at interpreter shutdown, with CoreFoundation or the modules it needs already
+            # torn down: nothing left to close, and "Exception ignored in __del__" would only be noise.
+            pass

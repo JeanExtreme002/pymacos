@@ -20,6 +20,7 @@ IDE), and keeping the shortcut from the app in front needs *Accessibility*.
 """
 
 import threading
+import warnings
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from . import _events, _objc, keyboard
@@ -34,12 +35,7 @@ _FN = 1 << 23  # kCGEventFlagMaskSecondaryFn
 _MODIFIERS = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | _FN
 # The keys macOS flags with Fn whether or not Fn is held: the F-keys, the
 # arrows, and home, end, page up, page down, forward delete and help.
-_FN_FLAGGED = frozenset(
-    code
-    for name, code in keyboard._KEYS.items()
-    if (name.startswith("f") and name[1:].isdigit())
-    or name in ("left", "right", "up", "down", "home", "end", "page_up", "page_down", "forward_delete", "help")
-)
+_FN_FLAGGED = keyboard._FN_FLAGGED
 
 _DENIED = (
     "listening to the keyboard needs the Input Monitoring and Accessibility permissions: allow the app "
@@ -305,8 +301,22 @@ def run(*, timeout: Optional[float] = None) -> None:
     Callbacks run on this thread, one at a time; an exception in one stops
     :func:`run` and propagates. Ctrl-C stops it too. The keyboard is watched
     from another thread meanwhile, so a slow callback doesn't hold up the
-    keys typed in other apps, and may press keys itself.
+    keys typed in other apps, and may press keys itself. With no shortcut
+    registered it warns (:class:`RuntimeWarning`) and waits all the same:
+    shortcuts registered meanwhile, from another thread, are caught from
+    then on.
     """
+    with _lock:
+        registered = bool(_registered)
+    if not registered:
+        # Not an error: a shortcut may be registered from another thread while it runs. But a
+        # script that forgot to register any would wait for good, with nothing to tell it why.
+        warnings.warn(
+            "no shortcut is registered: run() waits until stop() or the timeout; register some with "
+            "macos.hotkeys.register() first",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def call(combination: Tuple[int, int]) -> bool:
         _call(combination)
