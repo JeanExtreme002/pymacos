@@ -52,7 +52,7 @@ macos.keyboard.press("cmd+plus")       # zoom in
   add `shift` for Shift.
 - **Names**: `enter`, `tab`, `space`, `delete` (backspace), `forward_delete`,
   `escape`, `left`, `right`, `up`, `down`, `home`, `end`, `page_up`,
-  `page_down`, `f1` to `f20`, `plus` and `minus`.
+  `page_down`, `help`, `f1` to `f20`, `plus` and `minus`.
 
 On a layout with dead keys (US International's `'`, `"`, `` ` ``, `~` and
 `^`), one pressed on its own types nothing until the next key, as on the real

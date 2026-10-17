@@ -49,8 +49,8 @@ are caught like the user's, so a script can press a registered shortcut to
 trigger it. To listen from a thread other than the main one with a non-US keyboard
 layout, see [Keyboard layouts](keyboard.md#keyboard-layouts).
 
-Function keys, arrows, Home, End, Page Up and Down and Forward Delete match
-whether or not macOS flags them with Fn, as it does on its own: `"f5"` is
+Function keys, arrows, Home, End, Page Up and Down, Forward Delete and Help
+match whether or not macOS flags them with Fn, as it does on its own: `"f5"` is
 F5 whenever the apps get an F5. On a Mac's keyboard, whose F-keys adjust the
 brightness and the volume unless *Use F1, F2... as standard function keys*
 is on ({func}`~macos.keyboard.set_standard_function_keys`), that means Fn+F5:

@@ -414,6 +414,11 @@ def test_watch_off_the_main_thread_warns_and_names_the_keys_by_what_they_type(mo
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # the layout known: nothing to warn about
         assert _watching(monkeypatch, lambda: {"k": (40, False)}, text="\x0b")(10, (40, ctrl)).key == "k"
+        # Keypad Enter types \x03 with Ctrl too: it isn't Ctrl+C, on any thread.
+        assert _watching(monkeypatch, lambda: {"c": (8, False)}, text="\x03")(10, (76, ctrl)).shortcut == "ctrl+key76"
+    with pytest.warns(RuntimeWarning):
+        convert = _watching(monkeypatch, unread, text="\x03")
+    assert convert(10, (76, ctrl)).key == "key76"
 
 
 def test_key_name_tables_agree_where_they_overlap():

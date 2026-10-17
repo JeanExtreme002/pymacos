@@ -369,7 +369,7 @@ def press(keys: str, *, times: int = 1) -> None:
     keyboard layout (so ``"cmd+z"`` is undo on an AZERTY keyboard too), or
     names: ``enter``, ``tab``, ``space``, ``delete`` (backspace),
     ``forward_delete``, ``escape``, ``left``, ``right``, ``up``, ``down``,
-    ``home``, ``end``, ``page_up``, ``page_down``, ``f1`` to ``f20``...
+    ``home``, ``end``, ``page_up``, ``page_down``, ``help``, ``f1`` to ``f20``...
     On a layout with dead keys (US International's ``'``, ``"``, `````,
     ``~`` and ``^``), one pressed on its own types nothing until the next
     key, as on the real keyboard: use :func:`type` for the character.
@@ -858,8 +858,9 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
             _KEY_NAMES.get(code)
             or unshifted.get(code)
             or text.lower()
-            # A control character names the letter only with Ctrl held: keypad Enter types one (\x03) by itself.
-            or (_control_letter(event) if flags & _CONTROL else "")
+            # A control character names the letter only with Ctrl held, and on a letter's key: keypad Enter
+            # types one (\x03) with Ctrl or without, and isn't Ctrl+C.
+            or (_control_letter(event) if flags & _CONTROL and code not in _KEYPAD else "")
             or "key{}".format(code)
         )
         if code in _FN_FLAGGED:
