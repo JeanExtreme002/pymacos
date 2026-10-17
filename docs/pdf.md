@@ -44,6 +44,11 @@ macos.pdf.rotate("scan.pdf", "scan.pdf", 90)               # every page, clockwi
 macos.pdf.rotate("scan.pdf", "fixed.pdf", -90, pages=[2])  # only page 2, counter-clockwise
 ```
 
+An empty `pages` (`[]`) means no page: {func}`~macos.pdf.text` gives `""`,
+{func}`~macos.pdf.rotate` saves the PDF as it is, and
+{func}`~macos.pdf.images` saves nothing; only {func}`~macos.pdf.extract`
+refuses it, since a PDF needs a page.
+
 Every function that writes a PDF takes the PDF first and the output second,
 as {mod}`macos.image` and {mod}`macos.video` do, then what to do to it.
 The output can be the input itself: it's replaced only once the new file is

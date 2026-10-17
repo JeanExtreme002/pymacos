@@ -32,11 +32,11 @@ def test_html_reading_options(tmp_path):
     page = tmp_path / "page.html"
     page.write_text("<p>hi</p>")
     with _objc.autorelease_pool():
-        options = macos.document._options(page)
+        options, _ = macos.document._options(page)
         assert _objc.send(options, "objectForKey:", _objc.nsstring("CharacterEncoding"), argtypes=(_objc.id,))
         notes = tmp_path / "notes.rtf"
         notes.write_text("{\\rtf1 hi}")
-        assert macos.document._options(notes) is None  # RTF says its own encoding and WebKit doesn't read it
+        assert macos.document._options(notes) == (None, None)  # RTF says its own encoding and WebKit doesn't read it
 
 
 def _in_a_thread(work):
@@ -90,3 +90,110 @@ def test_the_utf8_check_reads_a_piece_at_a_time(monkeypatch, tmp_path):
     assert not document._is_utf8(text)
     text.write_bytes("caf\xe9".encode("latin-1"))
     assert not document._is_utf8(text)
+
+
+def test_the_gatekeeper_lets_through_the_page_alone(monkeypatch, tmp_path):
+    """With resources=False, WebKit asks before each load: only the page being read, as a file, is answered."""
+    from macos import document
+
+    page = tmp_path / "page.html"
+    page.write_text("<p>Hi</p>")
+    link = tmp_path / "link.html"
+    link.symlink_to(page)
+    urls = {
+        1: ("file", str(page)),
+        2: ("file", str(link)),  # the same file, by another name
+        3: ("file", str(tmp_path / "style.css")),
+        4: ("http", "/style.css"),
+        5: ("https", str(page)),  # the page's path, not as a file
+        6: (None, None),  # a request with no URL
+        7: ("file", "/tmp/a\x00b.png"),  # realpath raises: refused, not raised into WebKit
+    }
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "URL":
+            return receiver if urls[receiver][0] else None
+        return (receiver, selector)
+
+    def pystring(answer):
+        receiver, selector = answer
+        return urls[receiver][0] if selector == "scheme" else urls[receiver][1]
+
+    monkeypatch.setattr(document._objc, "send", send)
+    monkeypatch.setattr(document._objc, "pystring", pystring)
+    monkeypatch.setitem(document._PAGES, 99, str(page.resolve()))
+
+    answered = {request: document._will_send(99, 0, 0, 0, request, 0, 0) for request in urls}
+    assert answered == {1: 1, 2: 2, 3: None, 4: None, 5: None, 6: None, 7: None}
+    assert document._will_send(98, 0, 0, 0, 1, 0, 0) is None  # another load's gatekeeper: not its page
+
+
+@pytest.mark.parametrize("name", ["page.shtml", "page.xhtml", "report.docx", "notes.rtf"])
+def test_resources_off_installs_the_gatekeeper_whatever_the_extension(monkeypatch, tmp_path, name):
+    from macos import document
+
+    source = tmp_path / name
+    source.write_text("x")
+    made = {}
+    monkeypatch.setattr(document, "_gatekeeper_class", lambda: 1)
+    monkeypatch.setattr(document._objc, "send", lambda receiver, selector, *args, **kwargs: 42)
+    monkeypatch.setattr(document._objc, "nsdictionary_of", lambda options: made.update(options) or 7)
+    monkeypatch.setattr(document, "_reads_as_utf8", lambda path: False)
+
+    options, gatekeeper = document._options(source, resources=False)
+    assert (options, gatekeeper) == (7, 42) and made == {"WebResourceLoadDelegate": 42}
+    assert document._PAGES.pop(42) == str(source.resolve())
+    assert document._options(source) == (None, None)  # resources on: nothing installed
+
+
+def test_every_html_extension_needs_the_main_thread(monkeypatch, tmp_path):
+    from macos import document
+
+    monkeypatch.setattr(document._files, "on_main_thread", lambda: False)
+    for name in ("page.html", "page.shtml", "page.xhtml", "saved.webarchive"):
+        page = tmp_path / name
+        page.write_text("<p>x</p>")
+        with pytest.raises(macos.MainThreadError):  # off it, WebKit would wait for the main thread for good
+            document._load(page)
+
+
+def test_resources_off_needs_the_main_thread_unless_webkit_cant_read_it(monkeypatch, tmp_path):
+    from macos import document
+
+    monkeypatch.setattr(document._files, "on_main_thread", lambda: False)
+    page = tmp_path / "page.foo"
+    page.write_text("<html><body><p>x</p></body></html>")
+    for name in ("page.foo", "page.docx", "page.odt", "page.text"):  # macOS reads HTML by content, not by name
+        disguised = tmp_path / name
+        disguised.write_text(page.read_text())
+        with pytest.raises(macos.MainThreadError):  # through WebKit, which asks the gatekeeper on the main thread
+            document._load(disguised, resources=False)
+
+    def loading(name):
+        raise RuntimeError("loading")
+
+    monkeypatch.setattr(document, "framework", loading)
+    with pytest.raises(RuntimeError, match="loading"):  # past the guard: resources on, or never WebKit
+        document._load(page)
+    notes = tmp_path / "notes.rtf"
+    notes.write_text("{\\rtf1 x}")
+    with pytest.raises(RuntimeError, match="loading"):
+        document._load(notes, resources=False)
+    package = tmp_path / "notes.rtfd"  # a folder: it can't be a page, whatever's in it
+    package.mkdir()
+    with pytest.raises(RuntimeError, match="loading"):
+        document._load(package, resources=False)
+
+
+@pytest.mark.parametrize("name", ["page.html", "page.shtml", "page.shtm", "page.xhtml", "page.xht", "notes.txt"])
+def test_every_html_extension_is_read_as_utf8(tmp_path, name):
+    from macos import document
+
+    source = tmp_path / name
+    source.write_text("<p>Olá</p>", encoding="utf-8")
+    assert document._reads_as_utf8(source)
+    source.write_text('<meta charset="latin-1"><p>Ol\xe1</p>', encoding="latin-1")
+    assert not document._reads_as_utf8(source)
+    if source.suffix != ".txt":  # a page may also name it in an XML declaration (XHTML)
+        source.write_bytes(b'<?xml version="1.0" encoding="ISO-8859-1"?><p>\xc3\xa9</p>')  # valid UTF-8 too
+        assert not document._reads_as_utf8(source)
