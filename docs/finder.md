@@ -140,6 +140,16 @@ macos.finder.extract(archive, "~/Desktop/copy")
 Unlike plain zip tools, they keep what macOS stores with files: tags, extended
 attributes and permissions.
 
+An archive already there is replaced only once the new one is complete. When
+unzipping would write over files already in the destination, say whether to
+replace them: `overwrite=False` raises `FileExistsError` before anything is
+unzipped, and `overwrite=True` replaces them. Left out, they're replaced with a
+`DeprecationWarning`, as pymacos 2.0 will refuse by default:
+
+```python
+macos.finder.extract(archive, "~/Desktop/copy", overwrite=False)
+```
+
 ## Quick Look
 
 {func}`~macos.finder.quick_look` shows a file in Quick Look, the preview Space

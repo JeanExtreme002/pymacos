@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import macos
-from macos import finder
+from macos import _system, finder
 
 
 def test_finder_reveal(fake_run, tmp_path):
@@ -128,18 +128,55 @@ def test_finder_settings(monkeypatch):
     assert finder.show_hidden_files() and finder.show_extensions() and not finder.show_path_bar() and len(restarts) == 4
 
 
-def test_finder_compress_and_extract_commands(fake_run, tmp_path):
+def test_finder_compress_and_extract_commands(fake_run, monkeypatch, tmp_path):
     folder = tmp_path / "Project"
     folder.mkdir()
 
-    assert macos.finder.compress(folder) == tmp_path / "Project.zip"
-    assert fake_run.args == ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(folder), str(tmp_path / "Project.zip")]
+    def ditto(args, **kwargs):
+        if args[1] == "-c":
+            Path(args[-1]).write_bytes(b"zip")  # the archive, written where it's staged
+        return fake_run(args, **kwargs)
+
+    monkeypatch.setattr(_system.subprocess, "run", ditto)
     archive = tmp_path / "Project.zip"
-    archive.write_bytes(b"zip")
+    assert macos.finder.compress(folder) == archive
+    assert fake_run.args[:-1] == ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(folder)]
+    # Written beside the archive, then moved over it: not where a failed ditto would leave a broken one.
+    assert Path(fake_run.args[-1]).parent.parent == tmp_path and fake_run.args[-1] != str(archive)
+    assert archive.read_bytes() == b"zip"
     assert macos.finder.extract(archive, tmp_path / "out") == tmp_path / "out"
     assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(tmp_path / "out")]
     with pytest.raises(ValueError, match="must end in .zip"):
         macos.finder.compress(folder, tmp_path / "Project.tar")
+
+
+def test_finder_extract_says_when_it_would_write_over_files(fake_run, tmp_path):
+    import warnings
+    import zipfile
+
+    archive = tmp_path / "Project.zip"
+    with zipfile.ZipFile(str(archive), "w") as made:
+        made.writestr("Project/", "")
+        made.writestr("Project/a.txt", "new")
+        made.writestr("__MACOSX/Project/._a.txt", "attributes")
+    out = tmp_path / "out"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # nothing taken yet: no warning
+        macos.finder.extract(archive, out)
+    (out / "Project").mkdir(parents=True)
+    (out / "Project" / "a.txt").write_text("old")
+
+    fake_run.calls.clear()
+    with pytest.raises(FileExistsError, match="a.txt"):
+        macos.finder.extract(archive, out, overwrite=False)
+    assert fake_run.calls == []  # refused before anything was unzipped
+    with pytest.warns(DeprecationWarning, match="overwrite=True"):
+        macos.finder.extract(archive, out)
+    assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(out)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.finder.extract(archive, out, overwrite=True)
 
 
 def test_quick_look_returns_at_once(fake_run, monkeypatch, tmp_path):

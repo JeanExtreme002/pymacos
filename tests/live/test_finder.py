@@ -162,6 +162,41 @@ def test_compress_and_extract_keep_the_tags(tmp_path):
     assert macos.finder.tags(out / "Project" / "a.txt") == ["Red"]
 
 
+def test_compress_keeps_the_old_archive_when_it_fails(tmp_path):
+    folder = tmp_path / "Project"
+    folder.mkdir()
+    (folder / "a.txt").write_text("hi")
+    archive = macos.finder.compress(folder)
+    before = archive.read_bytes()
+
+    unreadable = folder / "locked.txt"
+    unreadable.write_text("secret")
+    unreadable.chmod(0)
+    try:
+        with pytest.raises(macos.CommandError):
+            macos.finder.compress(folder)
+    finally:
+        unreadable.chmod(0o600)
+    assert archive.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Project", "Project.zip"]  # nothing left behind
+
+
+def test_extract_refuses_to_write_over_files_when_asked(tmp_path):
+    folder = tmp_path / "Project"
+    folder.mkdir()
+    (folder / "a.txt").write_text("new")
+    archive = macos.finder.compress(folder)
+    out = tmp_path / "out"
+    (out / "Project").mkdir(parents=True)
+    (out / "Project" / "a.txt").write_text("old")
+
+    with pytest.raises(FileExistsError):
+        macos.finder.extract(archive, out, overwrite=False)
+    assert (out / "Project" / "a.txt").read_text() == "old"
+    macos.finder.extract(archive, out, overwrite=True)
+    assert (out / "Project" / "a.txt").read_text() == "new"
+
+
 def test_finder_settings_are_read():
     for read in (macos.finder.show_hidden_files, macos.finder.show_extensions, macos.finder.show_path_bar):
         assert isinstance(read(), bool)

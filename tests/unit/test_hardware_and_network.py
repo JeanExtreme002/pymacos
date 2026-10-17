@@ -46,6 +46,11 @@ def test_startup_items(tmp_path, monkeypatch):
         {"Label": "com.example.helper", "Program": "/Library/Helper/helper", "KeepAlive": {"SuccessfulExit": False}}
     ))  # fmt: skip
     (agents / "broken.plist").write_text("not a plist")
+    # Malformed XML: plistlib lets out ExpatError and AttributeError there, not InvalidFileException.
+    (agents / "cut.plist").write_bytes(plistlib.dumps({"Label": "com.example.cut"})[:-20])
+    (agents / "date.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><date>nope</date></dict></plist>'
+    )
     monkeypatch.setattr(system, "_STARTUP_FOLDERS", ((str(agents), "agent", False), (str(daemons), "daemon", True)))
     monkeypatch.setattr(system, "require_macos", lambda: None)
     monkeypatch.setattr(system.os, "getuid", lambda: 501, raising=False)
@@ -60,7 +65,7 @@ def test_startup_items(tmp_path, monkeypatch):
     assert (sync.run_at_load, sync.keep_alive, sync.enabled, sync.running) == (True, False, True, True)
     assert (helper.kind, helper.program, helper.keep_alive) == ("daemon", "/Library/Helper/helper", True)
     assert (helper.enabled, helper.running) == (False, False)  # turned off by launchctl
-    assert len(found) == 2  # the broken file skipped
+    assert len(found) == 2  # the broken files skipped
 
 
 def test_largest_walks_a_folder_spotlight_skips(tmp_path, monkeypatch):

@@ -75,13 +75,15 @@ def _player(app: Optional[str], running: Optional[List[str]] = None) -> str:
     return (playing or running or ["Music"])[0]
 
 
+# Not "song": Music's dictionary has a constant of that name (a media kind), which can't be set,
+# and the script wouldn't compile.
 _TRACK = """
 tell application "{app}"
     if player state is stopped then return ""
     set sep to ASCII character 31
-    set song to current track
-    return (name of song) & sep & (artist of song) & sep & (album of song) & sep & ¬
-        (duration of song as string) & sep & (player position as string) & sep & (player state as string)
+    set theTrack to current track
+    return (name of theTrack) & sep & (artist of theTrack) & sep & (album of theTrack) & sep & ¬
+        (duration of theTrack as string) & sep & (player position as string) & sep & (player state as string)
 end tell
 """
 
