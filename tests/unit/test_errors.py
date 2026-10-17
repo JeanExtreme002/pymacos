@@ -100,4 +100,6 @@ def test_command_errors_still_cross_a_pickle(error):
     copy = pickle.loads(pickle.dumps(error))
 
     assert type(copy) is type(error) and copy.cmd == error.cmd
+    if isinstance(error, OSError):  # not the command and its time limit taken for an errno and its message
+        assert (error.errno, error.strerror, copy.errno, copy.strerror) == (None, None, None, None)
     assert (str(copy), repr(copy)) == (str(error), repr(error))

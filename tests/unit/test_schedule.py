@@ -448,6 +448,61 @@ def test_schedule_goes_by_the_file_name_not_the_label(fake_run, home):
     assert macos.schedule.get("backup").every is None
 
 
+def test_schedule_doesnt_take_a_name_spelled_otherwise_for_a_job(fake_run, home):
+    macos.schedule.add("Backup", home / "backup.py", every=60)
+    agents = home / "Library" / "LaunchAgents"
+    # By the disk, not sys.platform, which fake_run sets to darwin: Linux's disks tell case apart.
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    fake_run.calls.clear()
+
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.run_now("backup")
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.pause("backup")
+    assert macos.schedule.get("backup") is None
+    assert fake_run.calls == []  # launchctl wasn't told about either name
+    # remove() would delete Backup's file and leave the job pymacos.Backup loaded, out of jobs()' sight.
+    # It only unloads a pymacos.backup an older version may have left loaded without a file.
+    assert macos.schedule.remove("backup") is False
+    told = [call["args"] for call in fake_run.calls if call["args"][1] != "print-disabled"]
+    assert told == [["launchctl", "bootout", "gui/501/pymacos.backup"]]
+    assert [job.name for job in macos.schedule.jobs()] == ["Backup"]
+    assert macos.schedule.remove("Backup") is True
+
+
+def test_schedule_remove_unloads_a_job_an_older_version_left_without_a_file(fake_run, home, monkeypatch):
+    agents = home / "Library" / "LaunchAgents"
+    # What adding "backup", then "Backup" did before: Backup's file (pymacos.Backup.plist, its label
+    # pymacos.Backup) where backup's was, and pymacos.backup still loaded, here paused too.
+    macos.schedule.add("Backup", home / "backup.py", every=60)
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    monkeypatch.setattr(macos.schedule, "_paused", lambda **kwargs: ["backup"])
+    fake_run.calls.clear()
+
+    assert macos.schedule.remove("backup") is False
+    # Unloaded and its pause lifted, as remove() does for any job; Backup's file is left alone.
+    assert [call["args"] for call in fake_run.calls] == [
+        ["launchctl", "bootout", "gui/501/pymacos.backup"],
+        ["launchctl", "enable", "gui/501/pymacos.backup"],
+    ]
+    assert [path.name for path in agents.iterdir()] == ["pymacos.Backup.plist"]
+
+
+def test_schedule_doesnt_take_a_prefix_or_extension_spelled_otherwise_for_another_name(fake_run, home):
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "pymacos.backup.PLIST").write_bytes(b"renamed by hand")
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    # Not "a job named 'backup' exists: use 'backup'": the file is replaced, as before.
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    assert macos.schedule.get("backup").every == 60
+
+
 def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     listings = [call["args"] for call in fake_run.calls if call["args"][:2] == ["launchctl", "print-disabled"]]

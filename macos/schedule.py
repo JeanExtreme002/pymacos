@@ -87,6 +87,41 @@ def _plist(name: str) -> Path:
     return _agents() / "{}{}.plist".format(_PREFIX, name)
 
 
+def _spelled_otherwise(name: str) -> Optional[str]:
+    """
+    The name of the job whose file is ``name``'s under another spelling, or ``None``.
+
+    The Mac's disk ignores case by default, so "Backup" and "backup" share one plist while launchd
+    keeps their labels apart: acting on one through the other's file would delete the job's file
+    and leave it loaded, out of sight of :func:`jobs`, until the next logout.
+    """
+    path = _plist(name)
+    try:
+        if not path.exists():
+            return None
+        entries = os.listdir(str(path.parent))
+    except OSError:
+        return None
+    if path.name in entries:
+        return None
+    wanted = path.name.casefold()
+    for entry in entries:
+        # The name's case only: a file whose prefix or extension is spelled otherwise was renamed by hand.
+        if entry.startswith(_PREFIX) and entry.endswith(".plist") and entry.casefold() == wanted:
+            return entry[len(_PREFIX):-len(".plist")]
+    return None
+
+
+def _check_spelling(name: str) -> None:
+    """Refuse ``name`` when a job spelled otherwise has its file: see :func:`_spelled_otherwise`."""
+    other = _spelled_otherwise(name)
+    if other is not None:
+        raise ValueError(
+            "a job named {!r} exists, and names that differ only in case share its file on this disk: "
+            "use {!r}, or remove it first".format(other, other)
+        )
+
+
 def _log(name: str) -> Path:
     return Path.home() / "Library" / "Logs" / "pymacos" / "{}.log".format(name)
 
@@ -204,7 +239,10 @@ def add(
     says so when other users could change it (a shared folder, a file
     others may write), as they could then run their code as you.
     Adding a name again replaces that job; if launchd refuses the new one,
-    the old one is put back and the error raised. macOS shows a "Background Items Added" notification
+    the old one is put back and the error raised. Names that differ only in
+    case share a file on the Mac's disk, so one spelled otherwise than an
+    existing job's (``"Backup"`` for ``"backup"``) raises :class:`ValueError`.
+    macOS shows a "Background Items Added" notification
     the first time, and lists the job in System Settings › General › Login
     Items & Extensions.
 
@@ -225,6 +263,7 @@ def add(
     if interval is None and not times and not at_login and not watched and not at_mount:
         raise ValueError("say when to run it: every=, at=, at_login=True, when_changed= or at_mount=True")
     require_macos()
+    _check_spelling(name)
     source = Path(script).expanduser().absolute()
     if not source.is_file():
         raise FileNotFoundError(str(source))
@@ -358,14 +397,23 @@ def remove(name: str) -> bool:
     """Stop and delete the job ``name`` (and a run in progress); return whether there was one. Its log stays."""
     _check_name(name)
     require_macos()
+    if _spelled_otherwise(name) is not None:
+        # The file is another job's: there's none by this name. But a job of this name an older version
+        # left loaded without a file (adding "Backup" over "backup" deleted backup's) is unloaded.
+        _unload(name, _paused())
+        return False
     return _remove(name, _paused())
+
+
+def _unload(name: str, paused: Sequence[str]) -> None:
+    _bootout(name)
+    if name in paused:
+        _run(["launchctl", "enable", _target(name)])  # a paused job's name is free again
 
 
 def _remove(name: str, paused: Sequence[str]) -> bool:
     path = _plist(name)
-    _bootout(name)
-    if name in paused:
-        _run(["launchctl", "enable", _target(name)])  # a paused job's name is free again
+    _unload(name, paused)
     if path.exists():
         path.unlink()
         return True
@@ -503,7 +551,9 @@ def get(name: str) -> Optional[Job]:
     _check_name(name)
     require_macos()
     path = _plist(name)
-    return _job(path, _paused()) if path.exists() else None
+    if not path.exists() or _spelled_otherwise(name) is not None:
+        return None
+    return _job(path, _paused())
 
 
 def run_now(name: str) -> None:
@@ -616,4 +666,5 @@ def _existing_job(name: str) -> Path:
     path = _plist(name)
     if not path.exists():
         raise ValueError("no job named {!r}".format(name))
+    _check_spelling(name)
     return path

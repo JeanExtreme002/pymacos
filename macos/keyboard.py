@@ -647,7 +647,8 @@ def set_layout(name: str) -> str:
         if not chosen:
             raise ValueError("no enabled keyboard layout matches {!r}; enabled: {}".format(name, names))
         if len(chosen) > 1:
-            raise ValueError("{!r} matches several keyboard layouts ({}); use the full name".format(name, names))
+            matched = ", ".join(repr(entry[1]) for entry in chosen)
+            raise ValueError("{!r} matches several keyboard layouts ({}); use the full name".format(name, matched))
         source, found, _ = chosen[0]
         status = _text_input().TISSelectInputSource(source)
     if status != 0:

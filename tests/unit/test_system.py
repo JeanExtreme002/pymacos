@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -685,3 +686,274 @@ def test_open_files_are_read_from_the_descriptors_the_folders_and_the_executable
         system._Opened("/Users/me/project", (1, 200)),  # the working folder, not the root
         system._Opened("/usr/bin/python3", None),
     ]
+
+
+# --- Parsing what the commands answer ------------------------------------------------------
+
+
+def test_update_fields_start_only_at_known_names():
+    fields = macos.system._update_fields(
+        "Title: Command Line Tools for Xcode, 26.1, Version: 26.1, Size: 900KiB, Recommended: NO, Action: none, Build: 17B55,"
+    )
+    assert fields == {
+        "Title": "Command Line Tools for Xcode, 26.1", "Version": "26.1", "Size": "900KiB",
+        "Recommended": "NO", "Action": "none", "Build": "17B55",
+    }  # fmt: skip
+    # A field's name inside a value ("MyVersion:") doesn't start a field: it isn't after a comma.
+    assert macos.system._update_fields("Title: MyVersion: Pro, Version: 2") == {"Title": "MyVersion: Pro", "Version": "2"}
+    assert macos.system._update_fields("") == {}
+    assert macos.system._update_fields("no fields here") == {}
+
+
+def test_updates_without_a_size_or_a_restart():
+    output = (
+        "Software Update found the following new or updated software:\n"
+        "* Label: Résumé Helper-1.0\n"
+        "\tTitle: R\xe9sum\xe9\xa0Helper, Version: 1.0, Size: about 3MB, Recommended: no, Action: shut down,\n"
+        "* Label: Bare-2\n"
+        "\tSize: 10KiB\n"
+    )
+    helper, bare = macos.system._updates(output)
+    assert helper == macos.system.Update("Résumé Helper-1.0", "Résumé Helper", "1.0", None, False, False)
+    # Fields missing: the title is the label, the version empty.
+    assert bare == macos.system.Update("Bare-2", "Bare-2", "", 10 * 1024, False, False)
+    assert macos.system._updates("") == []
+
+
+def test_nettop_rows_skip_lines_that_are_not_a_process():
+    output = (
+        "time,,bytes_in,bytes_out,\n"
+        "00:05:00.63,com.apple.WebKit.Networking.412,10,20,\n"  # dots in the name: the pid is after the last one
+        "00:05:00.63,Caf\xe9 ☕.77,1,2,\n"
+        "00:05:00.63,nopid,1,2,\n"  # no pid
+        "00:05:00.63,launchd.x1,1,2,\n"  # a pid that isn't a number
+        "00:05:00.63,.9,1,2,\n"  # no name
+        "00:05:00.63,mds.88,-,2,\n"  # a count that isn't one
+        "short,\n"
+        "\n"
+    )
+    assert macos.system._nettop_rows(output) == [(412, "com.apple.WebKit.Networking", 10, 20), (77, "Caf\xe9 ☕", 1, 2)]
+    assert macos.system._nettop_rows("syslogd.375,0,43115,\n") == []  # no header: not a sample
+    assert macos.system._nettop_rows("time,,bytes_in,bytes_out,\n") == []
+
+
+def _ips(path, header, body=None):
+    import json
+
+    path.write_text(json.dumps(header) + "\n" + (body if isinstance(body, str) else json.dumps(body or {})), encoding="utf-8")
+    return path
+
+
+_CRASH = {"app_name": "Safari", "app_version": "18.6", "bug_type": "309", "timestamp": "2026-09-29 13:55:00.12 -0300"}
+
+
+def test_crash_report_reads_the_header_and_the_body(tmp_path):
+    from datetime import timedelta, timezone
+
+    path = _ips(tmp_path / "Safari-1.ips", _CRASH, {"exception": {"type": "EXC_BAD_ACCESS", "signal": "SIGSEGV"}})
+    report = macos.system._crash_report(path)
+    assert report == macos.system.CrashReport(
+        app="Safari",
+        version="18.6",
+        date=datetime(2026, 9, 29, 13, 55, 0, 120000, tzinfo=timezone(timedelta(hours=-3))),
+        reason="EXC_BAD_ACCESS (SIGSEGV)",
+        path=path,
+    )
+    # The old format's bug_type, as a number; an exception with no signal.
+    path = _ips(tmp_path / "old.ips", dict(_CRASH, bug_type=109), {"exception": {"type": "EXC_CRASH"}})
+    assert macos.system._crash_report(path).reason == "EXC_CRASH"
+
+
+def test_crash_report_keeps_what_it_can_of_a_broken_report(tmp_path):
+    # A body that isn't JSON (cut short as it was written) and a timestamp in another shape: the rest is kept.
+    path = _ips(tmp_path / "Mail.ips", dict(_CRASH, app_name="Mail", timestamp="yesterday", app_version=""), '{"exception": {')
+    assert macos.system._crash_report(path) == macos.system.CrashReport("Mail", None, None, None, path)
+    # A signal without an exception type: what ended it comes from the termination instead.
+    body = {"exception": {"signal": "SIGABRT"}, "termination": {"indicator": "Abort trap: 6"}}
+    path = _ips(tmp_path / "x.ips", dict(_CRASH), body)
+    assert macos.system._crash_report(path).reason == "Abort trap: 6"
+
+
+def test_crash_report_names_the_app_from_whatever_says_it(tmp_path):
+    header = {"bug_type": "309"}
+    assert macos.system._crash_report(_ips(tmp_path / "a.ips", dict(header, name="mdworker"))).app == "mdworker"
+    assert macos.system._crash_report(_ips(tmp_path / "b.ips", header, {"procName": "bird"})).app == "bird"
+    assert macos.system._crash_report(_ips(tmp_path / "Finder-2026.ips", header)).app == "Finder-2026"  # the file's name
+
+
+def test_crash_report_skips_other_reports(tmp_path):
+    assert macos.system._crash_report(_ips(tmp_path / "a.ips", dict(_CRASH, bug_type="211"))) is None  # analytics
+    assert macos.system._crash_report(_ips(tmp_path / "b.ips", dict(_CRASH)), app="Notes") is None  # another app's
+    assert macos.system._crash_report(_ips(tmp_path / "c.ips", dict(_CRASH)), app="SAFARI").app == "Safari"
+    (tmp_path / "empty.ips").write_text("")
+    assert macos.system._crash_report(tmp_path / "empty.ips") is None
+    (tmp_path / "binary.ips").write_bytes(b"\xff\xfe\x00garbage\n")
+    assert macos.system._crash_report(tmp_path / "binary.ips") is None
+    assert macos.system._crash_report(tmp_path / "missing.ips") is None
+    (tmp_path / "string.ips").write_text('"309"\n{}')
+    assert macos.system._crash_report(tmp_path / "string.ips") is None  # a header that isn't an object
+
+
+@pytest.fixture
+def tokyo(monkeypatch):
+    """This Mac's clock set to Tokyo (UTC+9, no daylight saving): local times are known in advance."""
+    import time
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("needs time.tzset")
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_crash_dates_compared_on_the_local_clock_without_a_zone(tokyo):
+    from datetime import timedelta, timezone
+
+    crashed = datetime(2026, 9, 29, 13, 55, tzinfo=timezone(timedelta(hours=-3)))  # 16:55 UTC, 01:55 the 30th in Tokyo
+    assert macos.system._before(crashed, datetime(2026, 9, 30, 2, 0))
+    assert not macos.system._before(crashed, datetime(2026, 9, 30, 1, 0))
+    assert not macos.system._before(crashed, datetime(2026, 9, 29, 14, 0))  # the report's own clock isn't the Mac's
+    # A cutoff with a zone is compared as an instant, whatever the Mac's clock.
+    assert macos.system._before(crashed, datetime(2026, 9, 29, 17, 0, tzinfo=timezone.utc))
+    assert not macos.system._before(crashed, datetime(2026, 9, 29, 13, 55, tzinfo=timezone(timedelta(hours=-3))))
+
+
+def test_crash_reports_skip_an_unreadable_folder_and_list_undated_ones_last(tmp_path, monkeypatch):
+    readable, unreadable = tmp_path / "mine", tmp_path / "system"
+    readable.mkdir()
+    _ips(readable / "dated.ips", dict(_CRASH, app_name="Dated"))
+    _ips(readable / "undated.ips", dict(_CRASH, app_name="Undated", timestamp=""))
+    real_glob = Path.glob
+
+    def glob(self, pattern):
+        if self == unreadable:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(macos.system, "_REPORT_FOLDERS", (str(unreadable), str(readable)))
+    monkeypatch.setattr(macos.system, "require_macos", lambda: None)
+    assert [crash.app for crash in macos.system.crash_reports()] == ["Dated", "Undated"]
+    # With a cutoff, a report without a date is kept: when it crashed isn't known.
+    assert [crash.app for crash in macos.system.crash_reports(since=datetime(2027, 1, 1))] == ["Undated"]
+
+
+def test_log_entry_from_log_shows_ndjson():
+    import json
+    from datetime import timedelta, timezone
+
+    line = json.dumps(
+        {
+            "traceID": 1, "eventType": "logEvent", "timestamp": "2026-10-13 09:41:05.123456-0300",
+            "processImagePath": "/usr/sbin/bluetoothd", "processID": 123, "subsystem": "com.apple.bluetooth",
+            "category": "Server", "messageType": "Fault", "eventMessage": "Ação 💡 <private>", "timezoneName": "",
+        }
+    )  # fmt: skip
+    entry = macos.system._log_entry(line)
+    assert entry == macos.system.LogEntry(
+        date=datetime(2026, 10, 13, 9, 41, 5, 123456, tzinfo=timezone(timedelta(hours=-3))),
+        process="bluetoothd",
+        pid=123,
+        subsystem="com.apple.bluetooth",
+        category="Server",
+        level="fault",
+        message="Ação 💡 <private>",
+    )
+
+
+def test_log_entry_with_fields_missing_or_empty():
+    import json
+
+    entry = macos.system._log_entry(
+        json.dumps({"eventType": "logEvent", "processID": -1, "subsystem": "", "category": None, "eventMessage": None})
+    )
+    assert entry == macos.system.LogEntry(None, "?", None, None, None, "default", "")
+    assert macos.system._log_entry('{"eventType": "logEvent", "timestamp": "2026-10-13"}').date is None  # no time
+    assert macos.system._log_entry('{"eventType": "logEvent", "eventMessage": "cut') is None  # a line cut short
+    assert macos.system._log_entry("") is None
+    assert macos.system._log_entry('{"count": 12, "finished": 1}') is None  # log show's last line: no event
+
+
+def test_launchd_state_of_one_job(fake_run):
+    fake_run.stdout = "gui/501/com.example.job = {\n\tactive count = 1\n\tstate = running\n\tprogram = /bin/sleep\n}\n"
+    assert macos.system._launchd_state("gui/501", "com.example.job") is True
+    assert fake_run.args == ["launchctl", "print", "gui/501/com.example.job"]
+    fake_run.stdout = "gui/501/com.example.job = {\n\tstate = not running\n}\n"
+    assert macos.system._launchd_state("gui/501", "com.example.job") is False
+    fake_run.returncode, fake_run.stdout = 113, ""
+    fake_run.stderr = 'Bad request.\nCould not find service "com.example.job" in domain for user gui: 501\n'
+    assert macos.system._launchd_state("gui/501", "com.example.job") is False  # not loaded: not running
+    fake_run.stderr = "Operation not permitted\n"
+    assert macos.system._launchd_state("system", "com.example.job") is None  # launchd won't say
+
+
+def test_launchd_running_keeps_odd_lines_for_asking_alone(fake_run):
+    fake_run.stdout = (
+        "system = {\n\tservices = {\n"
+        "\t\t     123      - \tcom.example.up\n"
+        "\t\t       -     78 \tcom.example.odd\n"  # no pid column as expected: asked alone later
+        "\t\tcom.example.bare\n"
+        "\t}\n}\n"
+    )
+    listed = macos.system._launchd_running("system")
+    assert listed == {"com.example.up": True, "com.example.odd": None, "com.example.bare": None}
+    fake_run.stdout = "system = {\n\tservices = {\n\t}\n}\n"
+    assert macos.system._launchd_running("system") == {}  # nothing loaded, rather than nothing known
+    fake_run.returncode, fake_run.stderr = 1, "Operation not permitted\n"
+    assert macos.system._launchd_running("system") is None
+
+
+def test_running_state_asks_alone_only_what_the_listing_didnt_say(monkeypatch):
+    asked = []
+    monkeypatch.setattr(macos.system, "_launchd_state", lambda domain, label: asked.append(label) or True)
+    listed = {"com.example.up": True, "com.example.down": False, "com.example.odd": None}
+    assert macos.system._running_state(listed, "gui/501", "com.example.up") is True
+    assert macos.system._running_state(listed, "gui/501", "com.example.down") is False
+    assert macos.system._running_state(listed, "gui/501", "com.example.unloaded") is False  # not listed: not loaded
+    assert asked == []
+    assert macos.system._running_state(listed, "gui/501", "com.example.odd") is True
+    assert asked == ["com.example.odd"]
+
+
+_PLIST = '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0">{}</plist>'
+
+
+def test_mount_image_takes_the_first_volume_and_skips_odd_entities(fake_run, tmp_path):
+    image = tmp_path / "Two.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = _PLIST.format(
+        "<dict><key>system-entities</key><array><string>junk</string>"
+        "<dict><key>mount-point</key><string></string></dict>"  # an empty mount point is no volume
+        "<dict><key>mount-point</key><string>/Volumes/Två</string></dict>"
+        "<dict><key>mount-point</key><string>/Volumes/Two 1</string></dict></array></dict>"
+    )
+    assert macos.system.mount_image(image) == Path("/Volumes/Två")
+    assert len(fake_run.calls) == 1  # nothing detached
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _PLIST.format("<array><string>/dev/disk5</string></array>"),  # a plist, but not the dictionary expected
+        _PLIST.format("<dict><key>system-entities</key><string>/dev/disk5</string></dict>"),
+        "/dev/disk5s1 \tApple_HFS\t/Volumes/Tool\n/dev/disk5 \tGUID_partition_scheme\n" + _PLIST.format("<dict>"),
+    ],
+)
+def test_mount_image_detaches_the_whole_disk_its_odd_answer_names(fake_run, tmp_path, answer):
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = answer
+    with pytest.raises(macos.MacOSError, match=r"can't be read \(it was detached\)"):
+        macos.system.mount_image(image)
+    assert fake_run.args == ["hdiutil", "detach", "/dev/disk5", "-force"]  # the shortest name: the whole disk
+
+
+def test_mount_image_without_entities_detaches_nothing(fake_run, tmp_path):
+    image = tmp_path / "Empty.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = _PLIST.format("<dict><key>system-entities</key><array/></dict>")
+    with pytest.raises(macos.MacOSError, match=r"no volume to mount$"):
+        macos.system.mount_image(image)
+    assert [call["args"][1] for call in fake_run.calls] == ["attach"]

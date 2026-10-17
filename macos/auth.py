@@ -146,11 +146,12 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     The user can place their finger on Touch ID, or type their login password
     (or approve on their Apple Watch); ``only_touch_id=True`` accepts only the
     fingerprint. Cancelling, failing, or ``timeout`` seconds without an answer
-    return ``False``. Raises :class:`~macos.errors.NotSupportedError` when
+    return ``False``, as does macOS taking the prompt away (another app came
+    to the front, the Mac slept). Raises :class:`~macos.errors.NotSupportedError` when
     ``only_touch_id=True`` and Touch ID isn't available, and when macOS can't
     ask at all: no password set, biometry locked out, or no user session to
     show the prompt in (over SSH, in a service), so a "no" always means the
-    user declined.
+    prompt was shown and not confirmed.
 
     One prompt at a time: calls from other threads wait their turn. A call
     made while this thread is already waiting for an answer (from a menu

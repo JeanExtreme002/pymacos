@@ -18,11 +18,12 @@ import platform
 import threading
 import time
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, partial, wraps
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from . import _cf
 from ._system import framework, require_macos
+from .errors import MacOSError
 
 id = ctypes.c_void_p
 SEL = ctypes.c_void_p
@@ -218,7 +219,13 @@ def nsdictionary_of(items: Dict[str, int]) -> int:
 
 def file_url(path: "os.PathLike[str] | str") -> int:
     """Create an autoreleased file ``NSURL`` for ``path``."""
-    return send(cls("NSURL"), "fileURLWithPath:", nsstring(os.fspath(path)), argtypes=(id,))
+    text = os.fspath(path)
+    try:
+        return send(cls("NSURL"), "fileURLWithPath:", nsstring(text), argtypes=(id,))
+    except UnicodeEncodeError:
+        # A name that isn't UTF-8 (a network volume's), which an NSString can't hold: by its bytes,
+        # as a CFURL, which is an NSURL too.
+        return send(_cf.file_url(os.path.abspath(text), directory=os.path.isdir(text)), "autorelease")
 
 
 def error_message(error: ctypes.c_void_p, default: Optional[str] = "unknown error") -> Optional[str]:
@@ -232,15 +239,18 @@ def error_message(error: ctypes.c_void_p, default: Optional[str] = "unknown erro
 
 
 def png(rep: int) -> bytes:
-    """Encode an ``NSBitmapImageRep`` as PNG bytes."""
+    """Encode an ``NSBitmapImageRep`` as PNG bytes; :class:`~macos.errors.MacOSError` when macOS can't."""
     data = send(
         rep,
         "representationUsingType:properties:",
         4,  # NSBitmapImageFileTypePNG
         send(cls("NSDictionary"), "dictionary"),
         argtypes=(NSUInteger, id),
-    )
-    return pybytes(data) or b""
+    ) if rep else None
+    encoded = pybytes(data)
+    if not encoded:  # not empty bytes handed on as a picture: every caller promises PNG
+        raise MacOSError("macOS couldn't encode the image as PNG")
+    return encoded
 
 
 def new(class_name: str) -> int:
@@ -425,7 +435,10 @@ def define_class(name: str, methods: Any, protocols: Sequence[str] = ()) -> int:
 
     ``methods`` maps a selector to ``(type encoding, ctypes function type,
     function)``; each function gets ``(self, _cmd, *arguments)``. Used for
-    the delegates the camera and microphone APIs call back.
+    the delegates the camera and microphone APIs call back. A method that
+    returns something answers nil (or 0) when its function raises, which is
+    reported as ctypes reports a callback's error, rather than a garbage
+    pointer that crashes the process.
     """
     with _CLASSES_LOCK:
         return _define_class(name, methods, protocols)
@@ -453,7 +466,10 @@ def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
         return int(existing)
     implementations = []
     for selector, (types, function_type, function) in methods.items():
-        implementation = function_type(_cf.callback(function))  # a Ctrl-C inside it isn't lost
+        # A Ctrl-C inside it isn't lost, and neither an error nor (on the main thread) a Ctrl-C answers garbage.
+        empty = _empty_answer(function_type)
+        answer = partial(_constant, empty)  # this method's, bound now: not the loop's last
+        implementation = function_type(_cf.callback(_answering_empty_on_error(function, function_type, empty), answer))
         implementations.append(implementation)
         lib.class_addMethod(new_class, sel(selector), ctypes.cast(implementation, ctypes.c_void_p), types.encode())
     for protocol in protocols:
@@ -463,6 +479,54 @@ def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
     lib.objc_registerClassPair(new_class)
     _CLASSES[name] = (new_class, implementations)
     return int(new_class)
+
+
+def _constant(value: Any, *_arguments: Any) -> Any:
+    return value
+
+
+def _a_method_raised(error: BaseException) -> None:
+    raise error
+
+
+# Called through C, so ctypes reports what it raises as it reports any callback's error: through
+# sys.unraisablehook ("Exception ignored on calling ctypes callback function"), which pytest collects.
+_Report = ctypes.CFUNCTYPE(None, ctypes.py_object)
+_REPORT = _Report(_cf.callback(_a_method_raised))
+_report = ctypes.cast(_REPORT, _Report)  # the same function, called as C calls it
+
+
+def _empty_answer(function_type: Any) -> Any:
+    """What a method of ``function_type`` answers when it can't answer: nil, 0 or ``NO`` (``None`` for ``void``)."""
+    restype = getattr(function_type, "_restype_", None)
+    if restype is None:
+        return None
+    try:
+        return getattr(restype(), "value", None)  # None for a pointer: nil
+    except ValueError:  # py_object: an empty one has no value to read
+        return None
+
+
+def _answering_empty_on_error(function: Any, function_type: Any, empty: Any) -> Any:
+    """
+    ``function``, answering ``empty`` (see :func:`_empty_answer`) when it raises, after reporting the error.
+
+    ctypes reports an error a callback raises, but answers whatever the register held: for a method
+    that returns an object, the caller gets a garbage pointer and the process crashes. A method
+    returning ``void`` is called as it is: there's nothing to answer, and ctypes reports the error itself.
+    """
+    if getattr(function_type, "_restype_", None) is None:
+        return function
+
+    @wraps(function)
+    def answering(*arguments: Any) -> Any:
+        try:
+            return function(*arguments)
+        except Exception as error:
+            _report(error)
+            return empty
+
+    return answering
 
 
 def spin(seconds: float) -> None:

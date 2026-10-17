@@ -259,6 +259,8 @@ def paste_image() -> Optional[bytes]:
     """
     Return the image on the clipboard as PNG bytes, or ``None`` if it holds no image.
 
+    An image macOS can't convert to PNG raises :class:`~macos.errors.MacOSError`.
+
     Save it with ``Path("pasted.png").write_bytes(macos.clipboard.paste_image())``.
     """
     with _objc.autorelease_pool():

@@ -37,6 +37,60 @@ def test_objc_blocks_and_classes():
     assert _objc.run_until(lambda: False, 0.1) is False
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_objc_method_that_raises_answers_nil_and_reports_the_error():
+    import ctypes
+
+    from macos import _objc
+
+    def fail(self, cmd, value):
+        raise ValueError("boom")
+
+    reported = []
+    hook, sys.unraisablehook = sys.unraisablehook, reported.append
+    try:
+        answer = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        counted = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        _objc.define_class("PymacosTestFailing", {"answer:": ("@@:@", answer, fail), "count:": ("q@:@", counted, fail)})
+        with _objc.autorelease_pool():
+            probe = _objc.new("PymacosTestFailing")
+            # Without the guard, ctypes answers what the register held: a garbage object, or a stray number.
+            for _ in range(3):
+                assert _objc.send(probe, "answer:", probe, argtypes=(_objc.id,)) is None
+                assert _objc.send(probe, "count:", probe, argtypes=(_objc.id,), restype=ctypes.c_long) == 0
+    finally:
+        sys.unraisablehook = hook
+    assert len(reported) == 6 and all(isinstance(each.exc_value, ValueError) for each in reported)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_objc_method_interrupted_answers_zero_and_keeps_the_ctrl_c():
+    import ctypes
+
+    from macos import _cf, _objc
+
+    def interrupt(self, cmd, value):
+        raise KeyboardInterrupt
+
+    counted = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    flagged = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    _objc.define_class("PymacosTestInterrupted", {"count:": ("q@:@", counted, interrupt), "flag:": ("c@:@", flagged, interrupt)})
+    reported = []
+    hook, sys.unraisablehook = sys.unraisablehook, reported.append
+    try:
+        with _objc.autorelease_pool():
+            probe = _objc.new("PymacosTestInterrupted")
+            for selector, restype in (("count:", ctypes.c_long), ("flag:", ctypes.c_bool)) * 3:
+                # Kept for the caller to raise; the method answers 0 meanwhile, not a None ctypes can't convert.
+                assert not _objc.send(probe, selector, probe, argtypes=(_objc.id,), restype=restype)
+                with pytest.raises(KeyboardInterrupt):
+                    _cf.raise_interrupt()
+    finally:
+        sys.unraisablehook = hook
+        _cf._interrupt.error = None  # a failed assert above mustn't leave a Ctrl-C for the next test to get
+    assert reported == []  # ctypes reports an answer it can't convert ("Exception ignored on converting result")
+
+
 def test_one_cicontext_is_made_even_for_first_renders_at_once(monkeypatch):
     import threading
     import time
@@ -335,3 +389,28 @@ def test_a_class_the_runtime_doesnt_have_is_not_supported_and_still_a_lookup_err
     with pytest.raises(macos.NotSupportedError, match="'VNSomethingNewer' is not loaded") as missing:
         _objc.cls.__wrapped__("VNSomethingNewer")  # under the cache, which would keep a real lookup
     assert isinstance(missing.value, LookupError)  # what the callers that turn it into "needs macOS N" catch
+
+
+def test_png_raises_rather_than_return_empty_bytes(monkeypatch):
+    from macos import _objc
+
+    monkeypatch.setattr(_objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_objc, "send", lambda *args, **kwargs: 0)  # representationUsingType: answered nil
+    with pytest.raises(macos.MacOSError, match="PNG"):
+        _objc.png(2)
+    with pytest.raises(macos.MacOSError, match="PNG"):
+        _objc.png(0)  # initWithCGImage: answered nil
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_file_url_takes_a_name_that_isnt_utf8():
+    import unicodedata
+
+    from macos import _objc
+
+    # As os.listdir gives a network volume's name that isn't UTF-8: an NSString can't hold it.
+    with _objc.autorelease_pool():
+        url = _objc.file_url("/Volumes/share/caf\udce9.mov")
+        assert _objc.pystring(_objc.send(url, "absoluteString")) == "file:///Volumes/share/caf%E9.mov"
+        url = _objc.file_url("/tmp/café.mov")  # a UTF-8 name, as before (decomposed, as the file system keeps it)
+        assert unicodedata.normalize("NFC", _objc.pystring(_objc.send(url, "path"))) == "/tmp/café.mov"

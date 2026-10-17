@@ -622,7 +622,14 @@ def rotate(source: PathLike, output: PathLike, degrees: int) -> Path:
     The frames aren't re-encoded: the video is marked to play turned, as
     phones do, so it's fast and lossless.
     """
-    if degrees % 90:
+    # A string would be formatted with 90 ("%d" % 90 is "90"), or fail to be ("not all arguments converted").
+    if isinstance(degrees, (str, bytes, bytearray)):
+        raise TypeError("degrees must be a number, a multiple of 90, not {!r}".format(degrees))
+    try:
+        uneven = degrees % 90
+    except TypeError:
+        raise TypeError("degrees must be a number, a multiple of 90, not {!r}".format(degrees)) from None
+    if uneven:
         raise ValueError("degrees must be a multiple of 90, not {}".format(degrees))
     target = _target(output)
     turns = (degrees // 90) % 4

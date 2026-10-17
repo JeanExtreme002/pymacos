@@ -12,6 +12,7 @@ to :func:`release`; :func:`owned` does that automatically at the end of a
 import ctypes
 from contextlib import contextmanager
 from functools import lru_cache, wraps
+import os
 import plistlib
 import signal
 import threading
@@ -247,10 +248,10 @@ def number(value: float) -> int:
     return lib().CFNumberCreate(None, kCFNumberDoubleType, ctypes.byref(real))
 
 
-def file_url(path: str) -> int:
-    """Create a file ``CFURL`` for ``path`` (caller owns it)."""
-    raw = path.encode("utf-8")
-    return lib().CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), False)
+def file_url(path: str, *, directory: bool = False) -> int:
+    """Create a file ``CFURL`` for ``path`` (caller owns it); a ``directory`` one ends with a slash."""
+    raw = os.fsencode(path)  # a name that isn't UTF-8 (a network volume's) comes back as its bytes, as os.listdir gave it
+    return lib().CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), directory)
 
 
 def to_int(ref: Optional[int]) -> Optional[int]:
