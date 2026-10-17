@@ -458,16 +458,41 @@ def test_schedule_doesnt_take_a_name_spelled_otherwise_for_a_job(fake_run, home)
 
     with pytest.raises(ValueError, match="'Backup'"):
         macos.schedule.add("backup", home / "backup.py", every=60)
-    # remove() would delete Backup's file and leave the job pymacos.Backup loaded, out of jobs()' sight.
-    assert macos.schedule.remove("backup") is False
     with pytest.raises(ValueError, match="'Backup'"):
         macos.schedule.run_now("backup")
     with pytest.raises(ValueError, match="'Backup'"):
         macos.schedule.pause("backup")
     assert macos.schedule.get("backup") is None
     assert fake_run.calls == []  # launchctl wasn't told about either name
+    # remove() would delete Backup's file and leave the job pymacos.Backup loaded, out of jobs()' sight.
+    # It only unloads a pymacos.backup an older version may have left loaded without a file.
+    assert macos.schedule.remove("backup") is False
+    assert [call["args"] for call in fake_run.calls] == [["launchctl", "bootout", "gui/501/pymacos.backup"]]
     assert [job.name for job in macos.schedule.jobs()] == ["Backup"]
     assert macos.schedule.remove("Backup") is True
+
+
+def test_schedule_takes_a_file_spelled_otherwise_with_its_label_for_its_own(fake_run, home):
+    agents = home / "Library" / "LaunchAgents"
+    macos.schedule.add("Backup", home / "backup.py", every=60)
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    # As an older version could leave it: the file spelled "backup", its label "pymacos.Backup".
+    (agents / "pymacos.Backup.plist").rename(agents / "pymacos.backup.plist")
+    assert macos.schedule.get("Backup").name == "Backup"
+    assert macos.schedule.remove("Backup") is True
+    assert not list(agents.iterdir())
+
+
+def test_schedule_doesnt_take_a_prefix_or_extension_spelled_otherwise_for_another_name(fake_run, home):
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "pymacos.backup.PLIST").write_bytes(b"renamed by hand")
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    # Not "a job named 'backup' exists: use 'backup'": the file is replaced, as before.
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    assert macos.schedule.get("backup").every == 60
 
 
 def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):

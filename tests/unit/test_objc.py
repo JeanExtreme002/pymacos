@@ -63,6 +63,33 @@ def test_objc_method_that_raises_answers_nil_and_reports_the_error():
     assert len(reported) == 6 and all(isinstance(each.exc_value, ValueError) for each in reported)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_objc_method_interrupted_answers_zero_and_keeps_the_ctrl_c():
+    import ctypes
+
+    from macos import _cf, _objc
+
+    def interrupt(self, cmd, value):
+        raise KeyboardInterrupt
+
+    counted = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    flagged = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    _objc.define_class("PymacosTestInterrupted", {"count:": ("q@:@", counted, interrupt), "flag:": ("c@:@", flagged, interrupt)})
+    reported = []
+    hook, sys.unraisablehook = sys.unraisablehook, reported.append
+    try:
+        with _objc.autorelease_pool():
+            probe = _objc.new("PymacosTestInterrupted")
+            for selector, restype in (("count:", ctypes.c_long), ("flag:", ctypes.c_bool)) * 3:
+                # Kept for the caller to raise; the method answers 0 meanwhile, not a None ctypes can't convert.
+                assert not _objc.send(probe, selector, probe, argtypes=(_objc.id,), restype=restype)
+                with pytest.raises(KeyboardInterrupt):
+                    _cf.raise_interrupt()
+    finally:
+        sys.unraisablehook = hook
+    assert reported == []  # ctypes reports an answer it can't convert ("Exception ignored on converting result")
+
+
 def test_one_cicontext_is_made_even_for_first_renders_at_once(monkeypatch):
     import threading
     import time
@@ -372,3 +399,17 @@ def test_png_raises_rather_than_return_empty_bytes(monkeypatch):
         _objc.png(2)
     with pytest.raises(macos.MacOSError, match="PNG"):
         _objc.png(0)  # initWithCGImage: answered nil
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_file_url_takes_a_name_that_isnt_utf8():
+    import unicodedata
+
+    from macos import _objc
+
+    # As os.listdir gives a network volume's name that isn't UTF-8: an NSString can't hold it.
+    with _objc.autorelease_pool():
+        url = _objc.file_url("/Volumes/share/caf\udce9.mov")
+        assert _objc.pystring(_objc.send(url, "absoluteString")) == "file:///Volumes/share/caf%E9.mov"
+        url = _objc.file_url("/tmp/café.mov")  # a UTF-8 name, as before (decomposed, as the file system keeps it)
+        assert unicodedata.normalize("NFC", _objc.pystring(_objc.send(url, "path"))) == "/tmp/café.mov"

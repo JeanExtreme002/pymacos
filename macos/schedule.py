@@ -93,7 +93,8 @@ def _spelled_otherwise(name: str) -> Optional[str]:
 
     The Mac's disk ignores case by default, so "Backup" and "backup" share one plist while launchd
     keeps their labels apart: acting on one through the other's file would delete the job's file
-    and leave it loaded, out of sight of :func:`jobs`, until the next logout.
+    and leave it loaded, out of sight of :func:`jobs`, until the next logout. A file spelled
+    otherwise whose label is ``name``'s is this job's own, as an older version may have left it.
     """
     path = _plist(name)
     try:
@@ -106,9 +107,22 @@ def _spelled_otherwise(name: str) -> Optional[str]:
         return None
     wanted = path.name.casefold()
     for entry in entries:
-        if entry.casefold() == wanted:
+        # The name's case only: a file whose prefix or extension is spelled otherwise was renamed by hand.
+        if entry.startswith(_PREFIX) and entry.endswith(".plist") and entry.casefold() == wanted:
+            if _label(path.parent / entry) == _PREFIX + name:
+                return None
             return entry[len(_PREFIX):-len(".plist")]
     return None
+
+
+def _label(path: Path) -> Optional[str]:
+    """The ``Label`` of the launch agent at ``path``, or ``None`` when it can't be read."""
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except Exception:  # unreadable or malformed: see _job
+        return None
+    label = data.get("Label") if isinstance(data, dict) else None
+    return label if isinstance(label, str) else None
 
 
 def _check_spelling(name: str) -> None:
@@ -397,7 +411,10 @@ def remove(name: str) -> bool:
     _check_name(name)
     require_macos()
     if _spelled_otherwise(name) is not None:
-        return False  # another job's file: there's none by this name
+        # The file is another job's: there's none by this name. But a job of this name an older version
+        # left loaded without a file (adding "Backup" over "backup" deleted backup's) is unloaded.
+        _bootout(name)
+        return False
     return _remove(name, _paused())
 
 

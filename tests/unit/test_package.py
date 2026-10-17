@@ -245,25 +245,26 @@ def test_each_native_function_is_declared_in_one_module():
     declared = defaultdict(set)
     for path in sorted(Path(macos.__file__).parent.glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            # lib.CGImageRelease.argtypes = ... / .restype = ...
-            if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                target = node.targets[0]
-                if (
-                    isinstance(target, ast.Attribute)
-                    and target.attr in ("argtypes", "restype")
-                    and isinstance(target.value, ast.Attribute)
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            # lib.CGImageRelease.argtypes = ..., and getattr(lib, "CGImageRelease").restype = ...
+            if isinstance(target, ast.Attribute) and target.attr in ("argtypes", "restype"):
+                function = target.value
+                if isinstance(function, ast.Attribute):
+                    declared[function.attr].add(path.name)
+                elif (
+                    isinstance(function, ast.Call)
+                    and isinstance(function.func, ast.Name)
+                    and function.func.id == "getattr"
+                    and len(function.args) == 2
+                    and isinstance(function.args[1], ast.Constant)
                 ):
-                    declared[target.value.attr].add(path.name)
-            # The signature tables: {"CGImageRelease": ((pointer,), None), ...}
-            if isinstance(node, ast.Dict):
-                for key, value in zip(node.keys, node.values):
-                    if (
-                        isinstance(key, ast.Constant)
-                        and isinstance(key.value, str)
-                        and key.value[:2] in ("CF", "CG", "CV", "CM", "CT", "IO", "AX", "TI", "LS", "Se")
-                        and isinstance(value, ast.Tuple)
-                        and len(value.elts) == 2
-                    ):
+                    declared[function.args[1].value].add(path.name)
+            # The signature tables: signatures = {"CGImageRelease": ((pointer,), None), ...}
+            if isinstance(target, ast.Name) and target.id == "signatures" and isinstance(node.value, ast.Dict):
+                for key in node.value.keys:
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
                         declared[key.value].add(path.name)
     assert declared  # the scan found what it looks for
     assert {name: sorted(files) for name, files in declared.items() if len(files) > 1} == {}

@@ -107,8 +107,9 @@ def test_video_argument_checks(tmp_path):
         macos.video.speed(__file__, tmp_path / "out.mov", -1)
     with pytest.raises(ValueError, match="multiple of 90"):
         macos.video.rotate(__file__, tmp_path / "out.mov", 45)
-    with pytest.raises(TypeError, match="must be a number"):
-        macos.video.rotate(__file__, tmp_path / "out.mov", "90")
+    for degrees in ("90", "%d", "90%", None):
+        with pytest.raises(TypeError, match="must be a number"):
+            macos.video.rotate(__file__, tmp_path / "out.mov", degrees)
     with pytest.raises(ValueError, match="at least 2 x 2"):
         macos.video.crop(__file__, tmp_path / "out.mov", (0, 0, 0, 10))
     with pytest.raises(ValueError, match="at least 2 x 2"):
