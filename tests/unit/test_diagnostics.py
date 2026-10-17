@@ -267,3 +267,73 @@ def test_logs_asks_for_info_and_debug_messages(monkeypatch):
         system.logs(level=level, last="1m", limit=1)
     flags = [[flag for flag in args if flag in ("--info", "--debug")] for args in seen]
     assert flags == [["--info"], ["--info", "--debug"], []]  # --debug alone leaves the info messages out
+
+
+def test_logs_read_whole_arent_out_of_time_when_the_timer_fires_as_they_end(monkeypatch):
+    import io
+    import subprocess
+    import threading
+
+    killed = []
+
+    class Done:
+        """A ``log show`` that wrote two entries and ended by itself."""
+
+        def __init__(self, args, **kwargs):
+            lines = [json.dumps({"eventType": "logEvent", "timestamp": None, "eventMessage": message}) for message in ("a", "b")]
+            self.stdout, self.returncode = io.StringIO("\n".join(lines) + "\n"), None
+
+        def kill(self):
+            killed.append(True)
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+
+    class Racing(threading.Timer):
+        """The timer going off just as the loop ended: before cancel() could stop it."""
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.function(*self.args, **self.kwargs)
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
+    monkeypatch.setattr(subprocess, "Popen", Done)
+    monkeypatch.setattr(threading, "Timer", Racing)
+
+    entries = system.logs(timeout=30, limit=None)
+
+    assert [entry.message for entry in entries] == ["a", "b"]  # all read: neither a timeout, nor a kill
+    assert killed == []
+
+
+def test_logs_arent_out_of_time_when_the_kill_came_after_log_show_had_exited(monkeypatch):
+    import io
+    import subprocess
+    import threading
+
+    class Exited:
+        """A ``log show`` that wrote its entry and exited before the timer fired: the kill does nothing."""
+
+        def __init__(self, args, **kwargs):
+            line = json.dumps({"eventType": "logEvent", "timestamp": None, "eventMessage": "a"})
+            self.stdout, self.returncode = io.StringIO(line + "\n"), None
+
+        def kill(self):
+            pass  # Popen.kill() on a process that has exited
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+
+    class Early(threading.Timer):
+        """The timer going off while its entries are still to be read (here, before the first), after log show exited."""
+
+        def start(self):
+            self.function(*self.args, **self.kwargs)
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
+    monkeypatch.setattr(subprocess, "Popen", Exited)
+    monkeypatch.setattr(threading, "Timer", Early)
+
+    assert [entry.message for entry in system.logs(timeout=30, limit=None)] == ["a"]  # exited 0: not killed

@@ -152,7 +152,13 @@ def ignore_completion() -> int:
 
 
 def editable(media: int) -> int:
-    """An autoreleased ``AVMutableComposition`` with every track of an asset, to edit."""
+    """
+    An autoreleased ``AVMutableComposition`` with every track of an asset, to edit.
+
+    The video tracks keep the asset's ``preferredTransform``: a video marked
+    to play turned (a portrait phone video, :func:`macos.video.rotate`'s
+    output) still does, and what's done to the composition composes with it.
+    """
     edited = composition()
     error = ctypes.c_void_p()
     ok = _objc.send(
@@ -167,6 +173,23 @@ def editable(media: int) -> int:
     )
     if not ok:
         raise MacOSError("could not read the media: {}".format(_objc.error_message(error)))
+    # The new tracks get an identity transform, whatever the source's: copied over, each from the track
+    # its segment came from (the order isn't promised to match).
+    turns = {
+        _objc.send(track, "trackID", restype=ctypes.c_int32): _objc.send(
+            track, "preferredTransform", restype=_objc.CGAffineTransform
+        )
+        for track in tracks(media, "vide")
+    }
+    for copy in tracks(edited, "vide"):
+        segments = [
+            segment
+            for segment in _objc.nsarray(_objc.send(copy, "segments"))
+            if not _objc.send(segment, "isEmpty", restype=_objc.BOOL)  # an empty edit (a gap) has no source track
+        ]
+        source = _objc.send(segments[0], "sourceTrackID", restype=ctypes.c_int32) if segments else None
+        if source in turns:
+            _objc.send(copy, "setPreferredTransform:", turns[source], argtypes=(_objc.CGAffineTransform,), restype=None)
     return edited
 
 

@@ -530,6 +530,24 @@ def _windows_of(app: apps.App) -> "builtins.list[Window]":
         _cf.release(element)
 
 
+def _targets(app: Union[str, apps.App, None]) -> "builtins.list[apps.App]":
+    """The apps :func:`list` looks at for ``app``: every app that can have windows, or the one named, if it's running."""
+    if app is None:
+        return _apps_with_windows()
+    if isinstance(app, apps.App):
+        return [app]
+    found = apps.get(app)
+    return [found] if found is not None else []
+
+
+def _list(targets: Sequence[apps.App], title: Optional[str]) -> "builtins.list[Window]":
+    windows = [window for target in targets for window in _windows_of(target)]
+    if title is not None:
+        wanted = title.casefold()
+        windows = [window for window in windows if wanted in window.title.casefold()]
+    return windows
+
+
 def list(app: Union[str, apps.App, None] = None, *, title: Optional[str] = None) -> "builtins.list[Window]":
     """
     Return the windows of the running apps (menu bar apps included), or only of ``app``, front to back within each app.
@@ -538,22 +556,13 @@ def list(app: Union[str, apps.App, None] = None, *, title: Optional[str] = None)
     ``title`` keeps the windows whose title contains it, ignoring case.
     Minimized windows are included; check :attr:`Window.minimized`. An app
     that doesn't answer within two seconds (busy, or still starting) counts
-    as having no windows: ask again, or use :func:`wait_for`.
+    as having no windows: ask again, or use :func:`wait_for`. So does a name
+    no running app goes by (not open, or misspelt): :func:`macos.apps.get`
+    tells the two apart.
     """
     if not has_permission():
         _check(_API_DISABLED, "list the windows")
-    if app is None:
-        targets = _apps_with_windows()
-    elif isinstance(app, apps.App):
-        targets = [app]
-    else:
-        found = apps.get(app)
-        targets = [found] if found is not None else []
-    windows = [window for target in targets for window in _windows_of(target)]
-    if title is not None:
-        wanted = title.casefold()
-        windows = [window for window in windows if wanted in window.title.casefold()]
-    return windows
+    return _list(_targets(app), title)
 
 
 def wait_for(
@@ -566,8 +575,9 @@ def wait_for(
     """
     Wait until a window shows up, and return it; ``None`` if ``timeout`` seconds pass first.
 
-    ``app`` and ``title`` work as in :func:`list`. Handy after an action that
-    opens a window::
+    ``app`` and ``title`` work as in :func:`list`, which is asked again every
+    ``interval`` seconds; a name no running app goes by waits out the
+    ``timeout``. Handy after an action that opens a window::
 
         macos.keyboard.press("cmd+s")
         dialog = macos.windows.wait_for("TextEdit", title="Save")
@@ -770,15 +780,20 @@ def tile_all(
     app's, as in :func:`list`; ``display``, ``columns`` and ``gap`` work as
     in :func:`tile`.
     """
+    if not has_permission():
+        _check(_API_DISABLED, "list the windows")
+    # One scan of the processes, for the apps and their windows both: is_hidden asks LaunchServices
+    # about each of these apps alone, not about every process again.
+    targets = _targets(app)
     hidden = set()
-    for running in apps.running(include_background=True):
+    for running in targets:
         try:
             if running.is_hidden:
                 hidden.add(running.pid)
         except MacOSError:
             continue  # quit meanwhile
     chosen = []
-    for window in list(app):
+    for window in _list(targets, None):
         try:
             if window.pid not in hidden and window._standard and not window.minimized and not window.fullscreen:
                 chosen.append(window)

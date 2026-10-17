@@ -47,7 +47,7 @@ _ASSERTION_ON = 255  # kIOPMAssertionLevelOn
 def _battery_registry(*names: str) -> Dict[str, Optional[int]]:
     """Integer properties of the AppleSmartBattery service (``None`` when missing)."""
     io = _iokit.lib()
-    service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"AppleSmartBattery"))
+    service = io.IOServiceGetMatchingService(_iokit.MAIN_PORT, io.IOServiceMatching(b"AppleSmartBattery"))
     values: Dict[str, Optional[int]] = {name: None for name in names}
     if not service:
         return values
