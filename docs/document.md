@@ -41,8 +41,9 @@ HTML is read by WebKit, as a browser reads it: a page's pictures, style
 sheets and frames are fetched while it's read, from the web and from the files
 of this Mac (`file://`) alike, which lets a page make the Mac fetch addresses of
 its choosing, or pull local files into the document. For HTML you don't trust,
-`resources=False` reads the page alone, fetching nothing it refers to (its
-pictures are then left out of a conversion):
+`resources=False` reads the page alone, fetching nothing it refers to: its
+pictures and attachments are left out, a web archive's own ones too, so no
+file of this Mac gets into the text or a conversion:
 
 ```python
 macos.document.text("mail.html", resources=False)
@@ -52,6 +53,9 @@ macos.document.convert("mail.html", "mail.pdf", resources=False)
 Reading HTML or web archives, and writing PDFs, use AppKit's text views and
 printing, which work only on the main thread: called from another thread, they
 raise {class}`~macos.MainThreadError` (a {class}`~macos.MacOSError`) instead of hanging.
+So does `resources=False` for any file but `.txt` and `.rtf` ones, Word
+documents included: macOS reads a file through WebKit when it holds HTML,
+whatever its extension.
 
 ## Reading the text
 

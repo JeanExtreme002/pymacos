@@ -49,9 +49,16 @@ _PAPERS = {"a4": (595.28, 841.89), "letter": (612.0, 792.0), "legal": (612.0, 10
 _UTF8 = 4  # NSUTF8StringEncoding
 _CHARSET = re.compile(rb"charset\s*=", re.I)
 _CHUNK = 1 << 20  # bytes read at a time to check a file is UTF-8
-# Read through WebKit, which AppKit only runs on the main thread.
 # What macOS reads through WebKit, as public.html (and a web archive): only on the main thread.
-_WEB_FORMATS = (".html", ".htm", ".shtml", ".shtm", ".xhtml", ".xht", ".webarchive")
+_HTML_FORMATS = (".html", ".htm", ".shtml", ".shtm", ".xhtml", ".xht")
+_WEB_FORMATS = _HTML_FORMATS + (".webarchive",)
+# What macOS never reads through WebKit, whatever the file holds. It goes by the content, not the name:
+# a page named .docx, .doc, .odt, .text or .rtfd is read as HTML (checked).
+_NOT_WEB_FORMATS = (".txt", ".rtf")
+# The NSDocumentTypeDocumentAttribute of what AppKit reads itself, without WebKit.
+_APPKIT_TYPES = (
+    "NSPlainText", "NSRTF", "NSRTFD", "NSMacSimpleText", "NSDocFormat", "NSWordML", "NSOfficeOpenXML", "NSOpenDocument"
+)
 
 
 def _existing(path: PathLike) -> Path:
@@ -80,26 +87,35 @@ def _is_utf8(source: Path) -> bool:
 
 def _reads_as_utf8(source: Path) -> bool:
     """Whether to read a text or HTML file as UTF-8: it is, and an HTML page doesn't name its own encoding."""
-    if source.suffix.lower() not in (".txt", ".text", ".html", ".htm"):
+    if source.suffix.lower() not in (".txt", ".text") + _HTML_FORMATS:
         return False  # the other formats say their encoding themselves
-    if source.suffix.lower() in (".html", ".htm"):
+    if source.suffix.lower() in _HTML_FORMATS:
         with open(str(source), "rb") as handle:
             if _CHARSET.search(handle.read(4096)):
                 return False
     return _is_utf8(source)
 
 
-# The page each gatekeeper (see _page_only) lets WebKit load, by the gatekeeper: set for the load, gone after.
+# The page each gatekeeper (see _gatekeeper_class) lets WebKit load, by the gatekeeper: set for the load, gone after.
 _PAGES: Dict[int, str] = {}
 
 
 def _will_send(gatekeeper: int, _command: int, _view: int, _resource: int, request: int, *_rest: int) -> Optional[int]:
-    """WebKit's ``willSendRequest:``: the request to make, or ``None`` for none. Only the page itself gets through."""
-    url = _objc.send(request, "URL")
-    scheme = (_objc.pystring(_objc.send(url, "scheme")) if url else None) or ""
-    path = (_objc.pystring(_objc.send(url, "path")) if url else None) or ""
-    if scheme.lower() == "file" and path and os.path.realpath(path) == _PAGES.get(gatekeeper):
-        return request
+    """
+    WebKit's ``willSendRequest:``: the request to make, or ``None`` for none. Only the page itself gets through.
+
+    Never raises: an exception in a ctypes callback answers WebKit garbage, which crashes the process, and the
+    page picks the URLs (``file:///a%00b`` makes ``realpath`` raise). Whatever goes wrong refuses the load,
+    a Ctrl-C landing here included: losing it beats the crash.
+    """
+    try:
+        url = _objc.send(request, "URL")
+        scheme = (_objc.pystring(_objc.send(url, "scheme")) if url else None) or ""
+        path = (_objc.pystring(_objc.send(url, "path")) if url else None) or ""
+        if scheme.lower() == "file" and path and os.path.realpath(path) == _PAGES.get(gatekeeper):
+            return request
+    except BaseException:
+        pass
     return None
 
 
@@ -140,17 +156,52 @@ def _options(source: Path, resources: bool = True) -> Tuple[Optional[int], Optio
         )
     if not resources:  # whatever the extension: should macOS read another one through WebKit, it's guarded too
         gatekeeper = _objc.send(_objc.send(_objc.send(_gatekeeper_class(), "alloc"), "init"), "autorelease")
-        _PAGES[gatekeeper] = os.path.realpath(str(source))
         options["WebResourceLoadDelegate"] = gatekeeper  # NSWebResourceLoadDelegateDocumentOption
-    return (_objc.nsdictionary_of(options) if options else None), gatekeeper
+    dictionary = _objc.nsdictionary_of(options) if options else None
+    if gatekeeper is not None:  # noted last: nothing can raise between this and the load's `finally`
+        _PAGES[gatekeeper] = os.path.realpath(str(source))
+    return dictionary, gatekeeper
+
+
+def _without_attachments(document: int) -> int:
+    """
+    A copy of ``document`` (autoreleased) without its attachments: the pictures and files it holds.
+
+    What a page refers to and the gatekeeper refused isn't fetched, but AppKit then reads a ``file://``
+    target itself, whatever it is, and attaches it: written out to a web archive (or printed, for a
+    picture), it would pull this Mac's files into the output. A web archive's own pictures go too.
+    """
+    copy = _objc.send(_objc.send(document, "mutableCopy"), "autorelease")
+    key = _objc.nsstring("NSAttachment")  # NSAttachmentAttributeName
+    index = 0
+    while index < int(_objc.send(copy, "length", restype=ctypes.c_ulong)):
+        found = _files.NSRange()
+        attachment = _objc.send(
+            copy,
+            "attribute:atIndex:effectiveRange:",
+            key,
+            index,
+            ctypes.byref(found),
+            argtypes=(_objc.id, ctypes.c_ulong, ctypes.c_void_p),
+        )
+        if attachment:  # the attachment characters go with it: what follows comes to `index`
+            _objc.send(copy, "deleteCharactersInRange:", found, argtypes=(_files.NSRange,), restype=None)
+        else:
+            index = found.location + found.length
+    return copy
 
 
 def _load(source: Path, resources: bool = True) -> int:
     """The document as an ``NSAttributedString`` (autoreleased); see :func:`text` for ``resources``."""
     if source.suffix.lower() in _WEB_FORMATS:
         _files.require_main_thread("reading an HTML page or a web archive")
+    elif not resources and source.suffix.lower() not in _NOT_WEB_FORMATS:
+        # macOS may read it through WebKit (it goes by what the file holds), and WebKit asks the gatekeeper
+        # on the main thread: from another thread, while that one waits, the load would never end.
+        _files.require_main_thread("reading a file that may be an HTML page with resources=False")
     framework("AppKit")
     error = ctypes.c_void_p()
+    attributes = ctypes.c_void_p()
     options, gatekeeper = _options(source, resources)
     try:
         loaded = _objc.send(
@@ -158,7 +209,7 @@ def _load(source: Path, resources: bool = True) -> int:
             "initWithURL:options:documentAttributes:error:",
             _objc.file_url(source),
             options,
-            None,
+            ctypes.byref(attributes),
             ctypes.byref(error),
             argtypes=(_objc.id, _objc.id, ctypes.c_void_p, ctypes.c_void_p),
         )
@@ -167,7 +218,15 @@ def _load(source: Path, resources: bool = True) -> int:
             _PAGES.pop(gatekeeper, None)
     if not loaded:
         raise MacOSError("could not read {}: {}".format(source, _objc.error_message(error, "unknown format")))
-    return _objc.send(loaded, "autorelease")
+    loaded = _objc.send(loaded, "autorelease")
+    if gatekeeper is not None:
+        kind = attributes.value and _objc.send(
+            attributes.value, "objectForKey:", _objc.nsstring("DocumentType"), argtypes=(_objc.id,)
+        )
+        # What AppKit says it read, not the extension: anything it didn't read itself may have been WebKit.
+        if (_objc.pystring(kind) if kind else None) not in _APPKIT_TYPES:
+            return _without_attachments(loaded)
+    return loaded
 
 
 def text(path: PathLike, *, resources: bool = True) -> str:
@@ -184,9 +243,11 @@ def text(path: PathLike, *, resources: bool = True) -> str:
     it's read, from the web and from files on this Mac (``file://``) alike,
     which lets a page make this Mac fetch addresses of its choosing, or read
     local files. ``resources=False`` reads the page alone, fetching nothing it
-    refers to: use it for HTML you don't trust. HTML pages and web archives
-    need the main thread: from another thread they raise
-    :class:`~macos.MainThreadError`.
+    refers to, and leaves its pictures and attachments out: use it for HTML
+    you don't trust. HTML pages and web archives need the main thread, as
+    does ``resources=False`` for anything but ``.txt`` and ``.rtf`` files
+    (macOS reads HTML whatever the extension): from another thread they
+    raise :class:`~macos.MainThreadError`.
     """
     source = _existing(path)
     with _objc.autorelease_pool():
@@ -298,10 +359,12 @@ def convert(
     sheets and frames are fetched while it's read, from the web and from files
     on this Mac (``file://``) alike, which lets a page make this Mac fetch
     addresses of its choosing, or pull local files into the document.
-    ``resources=False`` reads the page alone, fetching nothing it refers to
-    (its pictures are then left out): use it for HTML you don't trust. HTML
-    pages, web archives and PDF output need the main thread (AppKit lays out
-    and prints only there): from another thread they raise
+    ``resources=False`` reads the page alone, fetching nothing it refers to,
+    and leaves its pictures and attachments out (a web archive's own ones
+    too): use it for HTML you don't trust. HTML pages, web archives and PDF
+    output need the main thread (AppKit lays out and prints only there), as
+    does ``resources=False`` for anything but ``.txt`` and ``.rtf`` files:
+    from another thread they raise
     :class:`~macos.MainThreadError`.
     """
     origin = _existing(source)

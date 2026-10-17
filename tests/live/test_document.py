@@ -7,7 +7,7 @@ import zipfile
 import pytest
 
 import macos
-from tests.helpers import ON_GITHUB, docx_with_table, png_size
+from tests.helpers import ON_GITHUB, docx_with_table, png_size, small_png
 
 
 @pytest.fixture
@@ -129,3 +129,28 @@ def test_documents_that_arent_web_pages_read_the_same_with_resources_off(report,
     notes = tmp_path / "notes.rtf"
     macos.document.convert(report, notes)
     assert macos.document.text(notes, resources=False) == macos.document.text(notes)
+
+
+def test_resources_off_keeps_this_macs_files_out_of_the_output(tmp_path):
+    # WebKit is refused the page's file:// pictures, but AppKit then reads them itself and attaches them.
+    secret = tmp_path / "elsewhere" / "secret.txt"
+    secret.parent.mkdir()
+    secret.write_text("TOP-SECRET-123")
+    (tmp_path / "elsewhere" / "red.png").write_bytes(small_png(40, 40))
+    page = tmp_path / "site" / "page.html"
+    page.parent.mkdir()
+    page.write_text(
+        '<p>Hello</p><img src="file://{0}"><object data="{0}"></object><img src="../elsewhere/red.png">'.format(secret)
+    )
+    assert macos.document.text(page, resources=False) == "Hello\n"
+    archive = macos.document.convert(page, tmp_path / "page.webarchive", resources=False)
+    assert b"TOP-SECRET" not in archive.read_bytes()
+    assert b"/Subtype /Image" not in macos.document.convert(page, tmp_path / "page.pdf", resources=False).read_bytes()
+    # As a browser would, otherwise: the picture is in.
+    assert b"/Subtype /Image" in macos.document.convert(page, tmp_path / "with.pdf").read_bytes()
+
+
+def test_resources_off_survives_urls_that_arent_paths(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text('<p>Hi</p><img src="file:///tmp/a%00b.png"><img src="x%00y.png"><link rel="stylesheet" href="s%00.css">')
+    assert macos.document.text(page, resources=False) == "Hi\n"  # refused, not a crash
