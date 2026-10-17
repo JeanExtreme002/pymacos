@@ -517,7 +517,8 @@ def pause(name: str) -> None:
     Stop the job ``name`` from running on its schedule, without deleting it; :func:`resume` restarts it.
 
     It stays paused after a restart. A run in progress is stopped too.
-    When launchd refuses, the job is left as it was (and the error raised).
+    When launchd refuses, the job is left as it was (and the error raised); when it can't be put back,
+    the error says how it was left.
     """
     _existing_job(name)
     try:
@@ -529,7 +530,12 @@ def pause(name: str) -> None:
         try:
             _run(["launchctl", "disable", _target(name)])
         except BaseException as error:
-            add_note(error, "the job {!r} was stopped, but comes back at the next login: it couldn't be paused".format(name))
+            # Paused already, maybe (launchctl wouldn't say): then it stays so, and nothing was stopped.
+            add_note(
+                error,
+                "the job {!r} was unloaded, but couldn't be paused: unless it was paused already, it comes back at "
+                "the next login".format(name),
+            )
             raise
         return
     # Disabled first: that alone changes nothing until the next login, so a refusal leaves the job as it
@@ -558,21 +564,30 @@ def resume(name: str) -> None:
     Put a job paused with :func:`pause` back on its schedule (with ``at_login``, it also runs now).
 
     When launchd refuses to load it again, a paused job stays paused (and the error is raised); one that
-    wasn't paused is reloaded at the next login, which the error says.
+    wasn't paused is reloaded at the next login, which the error says (as it says when launchctl wouldn't
+    tell whether the job was paused).
     """
     path = _existing_job(name)
+    was_paused: Optional[bool]
     try:
         was_paused = name in _paused(strict=True)  # read first: resuming is what changes it
     except (CommandError, CommandTimeoutError):
-        was_paused = False  # launchctl wouldn't say: only the rollback below needs it, and the error will say
+        was_paused = None  # launchctl wouldn't say: only the rollback below needs it, and the error says so
     _bootout(name)  # resuming a job that isn't paused: reload it
-    _run(["launchctl", "enable", _target(name)])
     try:
+        _run(["launchctl", "enable", _target(name)])
         _run(["launchctl", "bootstrap", _domain(), str(path)])
     except BaseException as error:
-        # Enabled but unloaded: it would come back at the next login as if resumed. A paused job goes
-        # back to paused; one that was loaded can't be put back, since loading it is what failed.
-        if was_paused:
+        # Enabled (maybe) but unloaded: it would come back at the next login as if resumed. A paused job
+        # goes back to paused (disabling it again is harmless if enabling is what failed); one that was
+        # loaded can't be put back, since loading it is what failed.
+        if was_paused is None:
+            add_note(
+                error,
+                "the job {!r} is unloaded, and launchctl wouldn't say whether it was paused: unless it still is, "
+                "it comes back at the next login".format(name),
+            )
+        elif was_paused:
             try:
                 _run(["launchctl", "disable", _target(name)])
             except Exception as failure:

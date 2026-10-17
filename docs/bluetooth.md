@@ -48,8 +48,8 @@ macos.bluetooth.disconnect("AirPods")  # still paired
 ```
 
 A few accessories are listed without an `address`: they can't be connected
-from here, and {func}`~macos.bluetooth.connect` says so (use the Bluetooth
-menu for them).
+from here, and {func}`~macos.bluetooth.connect` and
+{func}`~macos.bluetooth.disconnect` say so (use the Bluetooth menu for them).
 
 Both wait until the device is connected (or disconnected) and return it, so
 the next line can count on it. The device must be on and in range; after

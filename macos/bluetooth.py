@@ -241,7 +241,7 @@ def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     must be on and in range. This returns once the device is connected, or
     raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) after
     ``timeout`` seconds, or :class:`~macos.errors.MacOSError` right away when
-    Bluetooth is off.
+    Bluetooth is off or the device is listed without an ``address``.
     """
     return _connection(device, "openConnection", "connect to", True, timeout)
 
@@ -252,6 +252,7 @@ def disconnect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
 
     ``device`` works as in :func:`connect`. This returns once the device is
     disconnected, or raises :class:`~macos.WaitTimeoutError` (a
-    ``TimeoutError``) after ``timeout`` seconds.
+    ``TimeoutError``) after ``timeout`` seconds, or
+    :class:`~macos.errors.MacOSError` right away as :func:`connect` does.
     """
     return _connection(device, "closeConnection", "disconnect", False, timeout)

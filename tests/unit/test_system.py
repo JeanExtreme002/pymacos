@@ -244,8 +244,7 @@ def test_mount_image(fake_run, tmp_path):
     )
 
     assert macos.system.mount_image(image) == Path("/Volumes/Tool")
-    assert fake_run.args[:2] == ["hdiutil", "attach"] and fake_run.calls[-1]["input"] == b"Y\n"  # accepts a license
-    assert "text" not in fake_run.calls[-1]  # the answer as hdiutil wrote it: a plist, parsed from its bytes
+    assert fake_run.args[:2] == ["hdiutil", "attach"] and fake_run.calls[-1]["input"] == "Y\n"  # accepts a license
     macos.system.unmount_image("/Volumes/Tool", force=True)
     assert fake_run.args == ["hdiutil", "detach", "/Volumes/Tool", "-force"]
     macos.system.unmount_image("-force")  # a mount point named like an option is still a path
@@ -538,20 +537,6 @@ def test_iokit_failing_to_list_devices_is_an_error_not_none(monkeypatch, read, w
     monkeypatch.setattr(_iokit, "lib", lambda: Lib())
     with pytest.raises(macos.MacOSError, match="could not list the {} \\(IOReturn 0xe00002bc\\)".format(what)):
         getattr(macos.system, read)()
-
-
-def test_mount_image_reads_the_plist_from_the_bytes_hdiutil_wrote(fake_run, tmp_path):
-    image = tmp_path / "Tool.dmg"
-    image.write_bytes(b"dmg")
-    # A license's text with a byte that isn't UTF-8 before the plist: read as text, the replacement character
-    # couldn't be encoded back for plistlib. The CR is an entity, as hdiutil writes it (XML would fold a raw one).
-    fake_run.stdout = (
-        b"Licence \xe9 agreement\r\n"
-        b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>system-entities</key><array>'
-        b"<dict><key>mount-point</key><string>/Volumes/Tool&#13;Beta</string></dict></array></dict></plist>"
-    )
-
-    assert macos.system.mount_image(image) == Path("/Volumes/Tool\rBeta")
 
 
 # --- Kernel buffers, built by hand -------------------------------------------------------

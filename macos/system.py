@@ -39,7 +39,6 @@ from ._system import (
     require_macos,
     restart_process,
     run as _run,
-    run_bytes,
 )
 from .errors import CommandError, CommandTimeoutError, MacOSError, NotSupportedError
 
@@ -586,15 +585,11 @@ def mount_image(path: Union[str, "os.PathLike[str]"], *, timeout: float = 300.0)
         raise FileNotFoundError(str(image))
     # "Y" answers the license agreement some images show before mounting. -quiet would hide the
     # -plist answer too (it closes the output): the license's text before the plist is skipped instead.
-    # The answer as hdiutil wrote it (exact_newlines): the plist is parsed from its exact bytes, where the
-    # usual text mode would make U+FFFD of a byte that isn't UTF-8, and a LF of a CR, in a volume's name.
-    output = _run(
-        ["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n", timeout=timeout, exact_newlines=True
-    )
+    output = _run(["hdiutil", "attach", "-nobrowse", "-noautoopen", "-plist", str(image)], input="Y\n", timeout=timeout)
     start = output.find("<?xml")
     details: Any = None
     try:
-        details = plistlib.loads(output[start:].encode("utf-8", "surrogateescape")) if start >= 0 else None
+        details = plistlib.loads(output[start:].encode()) if start >= 0 else None
     except (plistlib.InvalidFileException, ValueError, ExpatError):  # cut short, or not a plist at all
         pass
     entities = details.get("system-entities") if isinstance(details, dict) else None
@@ -2009,11 +2004,10 @@ def disk_health() -> List[DiskHealth]:
     import plistlib
 
     require_macos()
-    # The plists as diskutil wrote them: a disk's name may hold a CR, which text mode would turn into a LF.
-    listed = plistlib.loads(run_bytes(["diskutil", "list", "-plist", "physical"], timeout=_DISKUTIL_TIMEOUT))
+    listed = plistlib.loads(_run(["diskutil", "list", "-plist", "physical"], timeout=_DISKUTIL_TIMEOUT).encode())
     disks = []
     for device in listed.get("WholeDisks", []):
-        info = plistlib.loads(run_bytes(["diskutil", "info", "-plist", device], timeout=_DISKUTIL_TIMEOUT))
+        info = plistlib.loads(_run(["diskutil", "info", "-plist", device], timeout=_DISKUTIL_TIMEOUT).encode())
         status = str(info.get("SMARTStatus") or "").lower()
         disks.append(
             DiskHealth(

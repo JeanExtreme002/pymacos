@@ -306,3 +306,34 @@ def test_logs_read_whole_arent_out_of_time_when_the_timer_fires_as_they_end(monk
 
     assert [entry.message for entry in entries] == ["a", "b"]  # all read: neither a timeout, nor a kill
     assert killed == []
+
+
+def test_logs_arent_out_of_time_when_the_kill_came_after_log_show_had_exited(monkeypatch):
+    import io
+    import subprocess
+    import threading
+
+    class Exited:
+        """A ``log show`` that wrote its entry and exited before the timer fired: the kill does nothing."""
+
+        def __init__(self, args, **kwargs):
+            line = json.dumps({"eventType": "logEvent", "timestamp": None, "eventMessage": "a"})
+            self.stdout, self.returncode = io.StringIO(line + "\n"), None
+
+        def kill(self):
+            pass  # Popen.kill() on a process that has exited
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+
+    class Early(threading.Timer):
+        """The timer going off before the loop had read the last line, but after log show exited."""
+
+        def start(self):
+            self.function(*self.args, **self.kwargs)
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")  # log show is started by popen(), which checks it too
+    monkeypatch.setattr(subprocess, "Popen", Exited)
+    monkeypatch.setattr(threading, "Timer", Early)
+
+    assert [entry.message for entry in system.logs(timeout=30, limit=None)] == ["a"]  # exited 0: not killed

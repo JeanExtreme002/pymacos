@@ -3,9 +3,8 @@
 import os
 import plistlib
 import sys
-from pathlib import Path
-
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -620,7 +619,7 @@ def test_schedule_pause_unloads_first_when_launchctl_wont_say_whether_its_paused
     assert [call[1] for call in calls] == ["bootout"]
 
 
-def test_schedule_pause_and_resume_dont_take_an_unanswered_question_for_not_paused(fake_run, home, monkeypatch):
+def test_schedule_pause_doesnt_take_an_unanswered_question_for_not_paused(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
 
     calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")  # an error: before, read as "none paused"
@@ -632,8 +631,45 @@ def test_schedule_pause_and_resume_dont_take_an_unanswered_question_for_not_paus
         warnings.simplefilter("always")
         with pytest.raises(macos.errors.CommandError, match="disable failed") as caught:
             macos.schedule.pause("backup")
-    assert "comes back at the next login: it couldn't be paused" in _notes_of(caught.value, reported)
+    assert "couldn't be paused: unless it was paused already, it comes back" in _notes_of(caught.value, reported)
 
     # The other functions still read "won't say" as none paused, as before: listing jobs doesn't fail for it.
     calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled")
     assert [job.name for job in macos.schedule.jobs()] == ["backup"]
+
+
+def test_schedule_resume_says_so_when_launchctl_wont_tell_whether_the_job_was_paused(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "print-disabled", also=("bootstrap",))
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
+            macos.schedule.resume("backup")
+
+    # Not paused again (it may never have been), but not said to be "not paused" either.
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]
+    notes = _notes_of(caught.value, reported)
+    assert "wouldn't say whether it was paused" in notes and "stays unloaded" not in notes
+
+
+def test_schedule_resume_says_when_it_couldnt_enable_a_job_it_unloaded(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "enable")  # not paused: unloaded to be reloaded
+
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
+            macos.schedule.resume("backup")
+
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable"]
+    assert "stays unloaded until the next login" in _notes_of(caught.value, reported)
+
+    # A paused job whose enabling failed is still paused: disabled again, which changes nothing, and no note.
+    calls = _refusing_launchctl(monkeypatch, fake_run, "enable", disabled=["backup"])
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
+            macos.schedule.resume("backup")
+    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "disable"]
+    assert _notes_of(caught.value, reported) == ""

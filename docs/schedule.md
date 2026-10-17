@@ -116,7 +116,8 @@ its schedule. Pausing or removing a job also stops a run in progress. When
 launchd refuses to pause a job, it's left as it was and the error raised (if
 it was stopped but not paused, the error says so); a job `resume` couldn't
 load again goes back to paused, or, if it wasn't paused, stays unloaded until
-the next login (the error says so).
+the next login (the error says so, as it does when launchctl won't tell whether
+the job was paused).
 
 ## Reference
 
