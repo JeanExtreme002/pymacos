@@ -574,26 +574,37 @@ def resume(name: str) -> None:
     except (CommandError, CommandTimeoutError):
         was_paused = None  # launchctl wouldn't say: only the rollback below needs it, and the error says so
     _bootout(name)  # resuming a job that isn't paused: reload it
+    enabled = False  # once launchctl enable has returned: no longer paused
     try:
         _run(["launchctl", "enable", _target(name)])
+        enabled = True
         _run(["launchctl", "bootstrap", _domain(), str(path)])
     except BaseException as error:
-        # Enabled (maybe) but unloaded: it would come back at the next login as if resumed. A paused job
-        # goes back to paused (disabling it again is harmless if enabling is what failed); one that was
-        # loaded can't be put back, since loading it is what failed.
-        if was_paused is None:
-            add_note(
-                error,
-                "the job {!r} is unloaded, and launchctl wouldn't say whether it was paused: unless it still is, "
-                "it comes back at the next login".format(name),
-            )
-        elif was_paused:
+        # Unloaded and, once enabled, back at the next login as if resumed. A paused job goes back to
+        # paused (disabled again even when enabling failed: out of time, it may have taken effect); one
+        # that was loaded can't be put back, since loading it is what failed.
+        if was_paused:
             try:
                 _run(["launchctl", "disable", _target(name)])
             except Exception as failure:
                 add_note(
-                    error, "the job {!r} couldn't be paused again either ({}): it runs at the next login".format(name, failure)
+                    error,
+                    "the job {!r} couldn't be paused again either ({}): it {} at the next login".format(
+                        name, failure, "runs" if enabled else "may run"
+                    ),
                 )
+        elif was_paused is None and enabled:
+            add_note(
+                error,
+                "the job {!r} is unloaded and no longer paused (launchctl wouldn't say whether it was): it comes "
+                "back at the next login".format(name),
+            )
+        elif was_paused is None:
+            add_note(
+                error,
+                "the job {!r} is unloaded, and launchctl wouldn't say whether it was paused: unless it is, it comes "
+                "back at the next login".format(name),
+            )
         else:
             add_note(error, "the job {!r} stays unloaded until the next login".format(name))
         raise

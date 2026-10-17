@@ -327,7 +327,7 @@ def test_logs_arent_out_of_time_when_the_kill_came_after_log_show_had_exited(mon
             self.returncode = 0
 
     class Early(threading.Timer):
-        """The timer going off before the loop had read the last line, but after log show exited."""
+        """The timer going off while its entries are still to be read (here, before the first), after log show exited."""
 
         def start(self):
             self.function(*self.args, **self.kwargs)

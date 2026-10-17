@@ -650,7 +650,7 @@ def test_schedule_resume_says_so_when_launchctl_wont_tell_whether_the_job_was_pa
     # Not paused again (it may never have been), but not said to be "not paused" either.
     assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]
     notes = _notes_of(caught.value, reported)
-    assert "wouldn't say whether it was paused" in notes and "stays unloaded" not in notes
+    assert "no longer paused (launchctl wouldn't say whether it was)" in notes and "stays unloaded" not in notes
 
 
 def test_schedule_resume_says_when_it_couldnt_enable_a_job_it_unloaded(fake_run, home, monkeypatch):
@@ -673,3 +673,23 @@ def test_schedule_resume_says_when_it_couldnt_enable_a_job_it_unloaded(fake_run,
             macos.schedule.resume("backup")
     assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "disable"]
     assert _notes_of(caught.value, reported) == ""
+
+
+def test_schedule_resume_tells_whether_enabling_took_effect(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+
+    # Paused, enabling refused and disabling again refused too: still disabled, so it only "may" run.
+    _refusing_launchctl(monkeypatch, fake_run, "enable", disabled=["backup"], also=("disable",))
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
+            macos.schedule.resume("backup")
+    assert "it may run at the next login" in _notes_of(caught.value, reported)
+
+    # launchctl wouldn't say whether it was paused, and enabling was refused: it may still be.
+    _refusing_launchctl(monkeypatch, fake_run, "print-disabled", also=("enable",))
+    with warnings.catch_warnings(record=True) as reported:
+        warnings.simplefilter("always")
+        with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
+            macos.schedule.resume("backup")
+    assert "unless it is, it comes back at the next login" in _notes_of(caught.value, reported)

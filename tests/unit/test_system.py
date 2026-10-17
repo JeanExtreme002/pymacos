@@ -255,6 +255,18 @@ def test_mount_image(fake_run, tmp_path):
         macos.system.mount_image(tmp_path / "missing.dmg")
 
 
+def test_mount_image_skips_a_license_shown_before_the_plist(fake_run, tmp_path):
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = (
+        "Software License Agreement\nPress Y to agree.\n"
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>system-entities</key><array>'
+        "<dict><key>mount-point</key><string>/Volumes/Tool</string></dict></array></dict></plist>"
+    )
+
+    assert macos.system.mount_image(image) == Path("/Volumes/Tool")
+
+
 def test_cpu_and_memory_argument_checks():
     with pytest.raises(ValueError, match="interval"):
         macos.system.cpu_usage(0)
