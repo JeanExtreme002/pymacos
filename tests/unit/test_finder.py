@@ -179,6 +179,54 @@ def test_finder_extract_says_when_it_would_write_over_files(fake_run, tmp_path):
         macos.finder.extract(archive, out, overwrite=True)
 
 
+def test_finder_extract_reads_the_names_as_ditto_writes_them(fake_run, tmp_path):
+    import zipfile
+
+    archive = tmp_path / "Projeto.zip"
+    with zipfile.ZipFile(str(archive), "w") as made:
+        made.writestr("Projeto/", "")
+        made.writestr("Projeto/a.txt", "a")
+        made.writestr("../fora.txt", "x")  # ditto drops the "..": written inside the destination
+        made.writestr("__MACOSX/Projeto/._a.txt", "attributes")  # put back on a.txt, not written
+        made.writestr("__MACOSX/notes.txt", "a file like any other")
+    out = tmp_path / "out"
+    (out / "Projeto" / "a.txt").mkdir(parents=True)  # a folder in the way: ditto fails, nothing written over
+    (out / "fora.txt").write_text("old")
+    (out / "__MACOSX").mkdir()
+    (out / "__MACOSX" / "notes.txt").write_text("old")
+    assert sorted(finder._extracted_over(archive, out)) == ["__MACOSX/notes.txt", "fora.txt"]
+
+    # UTF-8 bytes without the UTF-8 flag, as ditto and macOS's zip store them, which zipfile reads as
+    # cp437. zipfile itself sets the flag for such a name: the bytes are put in by hand.
+    with zipfile.ZipFile(str(archive), "w") as made:
+        made.writestr("relatXXrio.txt", "new")
+    archive.write_bytes(archive.read_bytes().replace(b"relatXXrio", "relatório".encode("utf-8")))
+    with zipfile.ZipFile(str(archive)) as made:
+        assert made.namelist() != ["relatório.txt"]  # what zipfile reads: not the name on disk
+    (out / "relatório.txt").write_text("old")
+    assert finder._extracted_over(archive, out) == ["relatório.txt"]
+
+
+def test_finder_extract_unchecked_archive(fake_run, tmp_path):
+    archive = tmp_path / "odd.zip"
+    archive.write_bytes(b"not a zip zipfile reads, which ditto may")
+
+    macos.finder.extract(archive, tmp_path / "out")  # nothing to check by: unzipped as before
+    assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(tmp_path / "out")]
+    fake_run.calls.clear()
+    with pytest.raises(ValueError, match="overwrite=True"):
+        macos.finder.extract(archive, tmp_path / "out", overwrite=False)
+    assert fake_run.calls == []
+
+
+def test_finder_compress_into_the_folder_it_zips_writes_in_place(fake_run, tmp_path):
+    folder = tmp_path / "Project"
+    folder.mkdir()
+
+    assert macos.finder.compress(folder, folder / "Project.zip") == folder / "Project.zip"
+    assert fake_run.args[-1] == str(folder / "Project.zip")  # not staged where ditto would zip it too
+
+
 def test_quick_look_returns_at_once(fake_run, monkeypatch, tmp_path):
     import subprocess
 

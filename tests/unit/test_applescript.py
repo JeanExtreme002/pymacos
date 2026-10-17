@@ -6,6 +6,10 @@ scripts never run live on CI (no player plays, no dialog is answered, no browser
 script that macOS refuses to compile would ship. This captures each script as the public functions
 build it and compiles it with ``osacompile``, which reads the app's dictionary without running
 anything or opening the app. A script for an app this Mac doesn't have is skipped.
+
+Compiling catches what macOS refuses to read: a syntax error, or a term of the app's dictionary
+used as a variable (Music's ``song``). It doesn't catch a misspelled command or property, which
+AppleScript takes for a variable until the script runs.
 """
 
 import os
@@ -29,7 +33,8 @@ def _source(args: List[str]) -> Optional[str]:
     """The script of an ``osascript -e ... -e ...`` command line, or ``None`` for another command."""
     if args[:1] != ["osascript"]:
         return None
-    lines = [value for flag, value in zip(args[1::2], args[2::2]) if flag == "-e"]
+    options = args[1:args.index("--")] if "--" in args else args[1:]  # what follows is the script's argv
+    lines = [value for flag, value in zip(options[::2], options[1::2]) if flag == "-e"]
     return "\n".join(lines)
 
 
@@ -87,6 +92,8 @@ for _app in ("Safari", "Google Chrome"):  # one of each dictionary browser.py kn
 for _app in music.PLAYERS:
     _CASES.update({
         "music.now_playing[{}]".format(_app): (_app, lambda app=_app: macos.music.now_playing(app)),
+        # With no app named, which player is playing is asked first.
+        "music._state[{}]".format(_app): (_app, lambda app=_app: music._state(app)),
         "music.play[{}]".format(_app): (_app, lambda app=_app: macos.music.play(app)),
         "music.pause[{}]".format(_app): (_app, lambda app=_app: macos.music.pause(app)),
         "music.play_pause[{}]".format(_app): (_app, lambda app=_app: macos.music.play_pause(app)),
@@ -128,5 +135,5 @@ def test_the_scripts_compile(name, scripts):
         pass
     assert scripts, "{} ran no AppleScript".format(name)
     for source in scripts:
-        result = _RUN(["osacompile", "-o", os.devnull, "-e", source], capture_output=True, text=True, timeout=60)
+        result = _RUN(["/usr/bin/osacompile", "-o", os.devnull, "-e", source], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, "{} doesn't compile: {}\n{}".format(name, result.stderr.strip(), source)
