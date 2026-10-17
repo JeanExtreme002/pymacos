@@ -2502,7 +2502,10 @@ def startup_items() -> List[StartupItem]:
         for path in files:
             try:
                 info = plistlib.loads(path.read_bytes())
-            except (OSError, ValueError, plistlib.InvalidFileException):
+            except Exception:
+                # Unreadable or malformed: plistlib's XML parser lets out more than InvalidFileException
+                # (ExpatError for cut-off XML, AttributeError for a bad date; see apps._installed_app), and
+                # one broken file of another app's mustn't take the whole listing down.
                 continue
             if not isinstance(info, dict) or not info.get("Label"):
                 continue

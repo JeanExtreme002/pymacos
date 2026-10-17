@@ -162,6 +162,61 @@ def test_compress_and_extract_keep_the_tags(tmp_path):
     assert macos.finder.tags(out / "Project" / "a.txt") == ["Red"]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its permissions: ditto wouldn't fail")
+def test_compress_keeps_the_old_archive_when_it_fails(tmp_path):
+    folder = tmp_path / "Project"
+    folder.mkdir()
+    (folder / "a.txt").write_text("hi")
+    archive = macos.finder.compress(folder)
+    before = archive.read_bytes()
+
+    unreadable = folder / "locked.txt"
+    unreadable.write_text("secret")
+    unreadable.chmod(0)
+    try:
+        with pytest.raises(macos.CommandError):
+            macos.finder.compress(folder)
+    finally:
+        unreadable.chmod(0o600)
+    assert archive.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["Project", "Project.zip"]  # nothing left behind
+
+
+def test_extract_refuses_to_write_over_files_when_asked(tmp_path):
+    folder = tmp_path / "Project"
+    folder.mkdir()
+    (folder / "a.txt").write_text("new")
+    archive = macos.finder.compress(folder)
+    out = tmp_path / "out"
+    (out / "Project").mkdir(parents=True)
+    (out / "Project" / "a.txt").write_text("old")
+
+    with pytest.raises(FileExistsError):
+        macos.finder.extract(archive, out, overwrite=False)
+    assert (out / "Project" / "a.txt").read_text() == "old"
+    macos.finder.extract(archive, out, overwrite=True)
+    assert (out / "Project" / "a.txt").read_text() == "new"
+
+
+def test_extract_sees_accented_names_and_compress_into_its_folder_stays_the_same(tmp_path):
+    folder = tmp_path / "Projeto"
+    folder.mkdir()
+    (folder / "relatório.txt").write_text("new")
+    archive = macos.finder.compress(folder)
+    out = tmp_path / "out"
+    (out / "Projeto").mkdir(parents=True)
+    (out / "Projeto" / "relatório.txt").write_text("old")
+
+    # ditto stores UTF-8 names without the zip's UTF-8 flag: read as cp437 they'd match nothing.
+    with pytest.raises(FileExistsError, match="relatório"):
+        macos.finder.extract(archive, out, overwrite=False)
+
+    # An archive kept in the folder it zips doesn't take in a copy of itself, run after run.
+    inside = folder / "Projeto.zip"
+    sizes = [macos.finder.compress(folder, inside).stat().st_size for _ in range(3)]
+    assert sizes[1] == sizes[2] and sorted(path.name for path in folder.iterdir()) == ["Projeto.zip", "relatório.txt"]
+
+
 def test_finder_settings_are_read():
     for read in (macos.finder.show_hidden_files, macos.finder.show_extensions, macos.finder.show_path_bar):
         assert isinstance(read(), bool)

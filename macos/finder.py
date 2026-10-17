@@ -26,6 +26,8 @@ import os
 import stat
 import subprocess
 import time
+import warnings
+import zipfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -33,6 +35,7 @@ from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional
 from urllib.parse import quote, unquote, urlparse
 
 from . import _cf, _cg, _libc, _objc, defaults, spotlight
+from ._files import write_atomically
 from ._objc import BOOL, NSUInteger
 from ._system import applescript, framework, popen, require_macos, restart_process, run as _run
 from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
@@ -872,23 +875,125 @@ def compress(path: PathLike, output: Optional[PathLike] = None) -> Path:
     By default the archive goes next to it, as ``<name>.zip``. It keeps what
     plain zip tools lose: extended attributes, tags, resource forks and
     permissions. Uses the ``ditto`` command, as Finder does.
+
+    An archive already there is replaced, in one step: until the new one is
+    complete, the old one stays as it was (unless the archive goes inside the
+    folder it zips, where it's written in place). The new one is another file,
+    with the old one's permissions: tags or other attributes set on the old
+    archive itself, and its hard links, don't carry over.
     """
+    require_macos()
     source = _existing(path)
     target = Path(output).expanduser().absolute() if output is not None else source.with_name(source.name + ".zip")
     if target.suffix.lower() != ".zip":
         raise ValueError("the archive must end in .zip, not {!r}".format(target.name))
-    _run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(source), str(target)])
+    command = ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(source)]
+    if source.is_dir() and _is_within(target, source):
+        # An archive kept in the folder it zips: staged beside it, the archive being written would be
+        # zipped too, growing with each run. Written in place, as before, it holds only an empty stub
+        # of itself (ditto empties it first).
+        _run([*command, str(target)])
+    else:
+        # Written beside it, then moved in place: ditto writes over the old archive as it goes, and one
+        # that fails halfway (a file it can't read) would leave neither the old archive nor a new one.
+        write_atomically(target, lambda temporary: _run([*command, temporary]))
     return target
 
 
-def extract(archive: PathLike, destination: Optional[PathLike] = None) -> Path:
+def _is_within(target: Path, folder: Path) -> bool:
+    """Whether ``target`` (followed, if it's a link, as :func:`~macos._files.replacing` follows it) is inside ``folder``."""
+    # By the files themselves, not their spelling: APFS ignores case and Unicode normalization, which
+    # realpath() keeps as typed ("~/project" is "~/Project").
+    path = Path(os.path.realpath(str(target)))
+    for ancestor in path.parents:
+        try:
+            if os.path.samefile(str(ancestor), str(folder)):
+                return True
+        except OSError:
+            continue  # not made yet
+    return False
+
+
+def _entry_name(info: zipfile.ZipInfo) -> str:
+    """The name ditto gives an entry: its bytes read as UTF-8, else as Mac Roman, whatever the zip's flag says."""
+    # zipfile reads a name without the UTF-8 flag as cp437, which ditto (and macOS's zip) never set
+    # for the UTF-8 they write: "café" would read as "caf├⌐". Encoding it back gives the bytes stored.
+    # orig_filename, not filename: from Python 3.12, filename is the name of an Info-ZIP Unicode Path
+    # field when there is one, which ditto ignores.
+    stored = info.orig_filename.split("\x00", 1)[0]  # cut at a NUL, as zipfile cuts filename
+    raw = stored.encode("utf-8" if info.flag_bits & 0x800 else "cp437")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("mac_roman")
+
+
+def _extracted_over(archive: Path, destination: Path) -> Optional[List[str]]:
+    """The files unzipping ``archive`` into ``destination`` would write over; ``None`` when it can't be read here."""
+    try:
+        with zipfile.ZipFile(str(archive)) as opened:
+            entries = opened.infolist()
+    except Exception:  # BadZipFile, NotImplementedError, UnicodeDecodeError...: ditto may read it all the same
+        return None
+    taken = []
+    for info in entries:
+        try:
+            name = _entry_name(info)
+        except Exception:  # a name stored in some way not foreseen: unchecked, as an archive zipfile can't read
+            return None
+        if name.endswith("/"):
+            continue  # the folders merge
+        parts = os.path.normpath(name.lstrip("/")).split(os.sep)
+        while parts and parts[0] == "..":
+            parts.pop(0)  # ditto drops them, and writes the rest inside the destination
+        if not parts:
+            continue
+        if parts[0] == "__MACOSX" and parts[-1].startswith("._"):
+            continue  # the attributes compress() set aside, which ditto puts back on their file
+        path = os.path.join(str(destination), *parts)
+        if os.path.lexists(path) and not os.path.isdir(path):  # a folder in the way fails ditto: nothing written over
+            taken.append(os.path.join(*parts))
+    return taken
+
+
+def extract(archive: PathLike, destination: Optional[PathLike] = None, *, overwrite: Optional[bool] = None) -> Path:
     """
     Unzip an archive, like double-clicking it, into ``destination`` (by default, its folder); return ``destination``.
 
     Keeps the attributes and permissions :func:`compress` stores.
+
+    A file of the archive whose name is already taken in ``destination`` is
+    written over it, unlike double-clicking (which picks another name):
+    ``overwrite=False`` raises :class:`FileExistsError` instead, before
+    anything is unzipped (:class:`ValueError` when the destination has files
+    and the archive's list of files can't be read to check them against), and ``overwrite=True`` replaces them. Say
+    which you want: today they're replaced unless told otherwise, and pymacos
+    2.0 will refuse by default, so replacing a file without ``overwrite=True``
+    warns (``DeprecationWarning``).
     """
+    require_macos()
     source = _existing(archive)
     target = Path(destination).expanduser().absolute() if destination is not None else source.parent
+    if overwrite is not True and target.exists():  # a destination not made yet has nothing to write over
+        taken = _extracted_over(source, target)
+        if taken is None and overwrite is False:
+            raise ValueError(
+                "{} can't be read here to tell which files unzipping it would write over: "
+                "pass overwrite=True to unzip it anyway".format(source.name)
+            )
+        if taken and overwrite is False:
+            raise FileExistsError(
+                "unzipping {} would write over {} file(s) in {}, such as {}".format(
+                    source.name, len(taken), target, taken[0]
+                )
+            )
+        if taken:
+            warnings.warn(
+                "macos.finder.extract() writes over the files already in the destination unless overwrite=False; "
+                "pymacos 2.0 will refuse by default: pass overwrite=True to replace them, or False to refuse",
+                DeprecationWarning,
+                stacklevel=2,
+            )
     target.mkdir(parents=True, exist_ok=True)
     _run(["ditto", "-x", "-k", str(source), str(target)])
     return target

@@ -447,7 +447,7 @@ def _state(name: str) -> Tuple[bool, Optional[int]]:
 def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
     try:
         data = plistlib.loads(path.read_bytes())
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except Exception:  # unreadable or malformed, whatever plistlib's XML parser lets out: see system.startup_items
         return None
     if not isinstance(data, dict):
         return None  # a file edited by hand into something else: not one of ours to list

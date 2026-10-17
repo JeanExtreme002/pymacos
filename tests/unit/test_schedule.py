@@ -387,9 +387,14 @@ def test_schedule_jobs_skip_a_plist_edited_into_nonsense(fake_run, home):
     (agents / "pymacos.logs.plist").write_bytes(plistlib.dumps({"Label": "pymacos.logs", "StandardOutPath": ["a", "b"]}))
     infinite = {"Label": "pymacos.forever", "StartCalendarInterval": {"Hour": float("inf")}}
     (agents / "pymacos.forever.plist").write_bytes(plistlib.dumps(infinite))
+    # Malformed files: plistlib's XML parser lets out ExpatError and AttributeError, not InvalidFileException.
+    (agents / "pymacos.cut.plist").write_bytes(plistlib.dumps({"Label": "pymacos.cut"})[:-20])
+    (agents / "pymacos.date.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><date>nope</date></dict></plist>'
+    )
 
     found = {job.name: job for job in macos.schedule.jobs()}
-    # The list, the day that isn't a number, the infinite hour and the log list are skipped.
+    # The list, the day that isn't a number, the infinite hour, the log list and the malformed files are skipped.
     assert set(found) == {"backup", "odd"}
     assert found["odd"].at == () and found["odd"].when_changed == () and found["odd"].script == Path()
 
