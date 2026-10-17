@@ -214,8 +214,12 @@ def _tile_path(tile: Dict[str, Any]) -> Optional[Path]:
     url = file_data.get("_CFURLString", "") if isinstance(file_data, dict) else ""
     if not isinstance(url, str) or not url.startswith("file://"):
         return None
-    # Resolved, like the app paths it's compared with: /Applications/Safari.app is a link.
-    return Path(os.path.realpath(_url_path(url).rstrip("/")))
+    path = _url_path(url)
+    if not path or "\x00" in path:  # hand-edited: no path, or one no file can have
+        return None
+    # Resolved, like the app paths it's compared with: /Applications/Safari.app is a link. The disk
+    # itself (file:///) is "/", not the empty path that would resolve to the current folder.
+    return Path(os.path.realpath(path.rstrip("/") or "/"))
 
 
 def _is_app(tile: Dict[str, Any]) -> bool:

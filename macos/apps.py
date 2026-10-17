@@ -663,7 +663,8 @@ def install_from_dmg(
         found = sorted(entry for entry in entries if entry.is_dir() and not entry.is_symlink())
         links = sorted(entry.name for entry in entries if entry.is_symlink())
         # Said when nothing fits, as Finder shows a link like the app it's named after.
-        skipped = " ({} {} a symbolic link, not installed)".format(", ".join(links), "is" if len(links) == 1 else "are")
+        being = "is a symbolic link" if len(links) == 1 else "are symbolic links"
+        skipped = " ({} {}, not installed)".format(", ".join(links), being)
         skipped = skipped if links else ""
         if not found:
             raise AppNotFoundError("{} has no app at its top{}".format(Path(image).name, skipped))

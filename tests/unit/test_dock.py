@@ -263,6 +263,8 @@ def test_dock_tiles_with_hand_edited_contents_read_as_no_app(dock_settings):
         {"tile-data": "x", "tile-type": "file-tile"},
         {"tile-data": {"file-data": []}, "tile-type": "file-tile"},
         {"tile-data": {"file-data": {"_CFURLString": 5}}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file:///a%00b/"}}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file://"}}, "tile-type": "file-tile"},
     ]
     store["persistent-apps"] = [*odd, safari]
     store["persistent-others"] = [{"tile-data": "x", "tile-type": "directory-tile"}]
@@ -272,6 +274,16 @@ def test_dock_tiles_with_hand_edited_contents_read_as_no_app(dock_settings):
     macos.dock.add_spacer()
     assert macos.dock.add_app("Code").path == app and store["persistent-apps"][: len(odd)] == odd
     assert len(restarts) == 3
+
+
+def test_dock_folder_of_the_whole_disk_is_the_root_not_the_current_folder(dock_settings):
+    store, _, _ = dock_settings
+    for url in ("file:///", "file:////"):  # as the Dock writes the disk, and as add_folder("/") would
+        store["persistent-others"] = [
+            {"tile-data": {"file-data": {"_CFURLString": url, "_CFURLStringType": 15}, "file-label": "Macintosh HD"},
+             "tile-type": "directory-tile"},
+        ]  # fmt: skip
+        assert [folder.path for folder in macos.dock.folders()] == [macos.dock.Path("/")], url
 
 
 def test_dock_tiles_keep_file_urls_as_the_dock_writes_them(dock_settings):
