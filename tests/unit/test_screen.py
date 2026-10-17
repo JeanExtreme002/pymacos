@@ -130,7 +130,7 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
     from macos import _cf
 
     graphics = SimpleNamespace(CGSessionCopyCurrentDictionary=lambda: _cf.from_python(session))
-    monkeypatch.setattr(macos.screen, "framework", lambda name: graphics)
+    monkeypatch.setattr(macos.screen, "_display_api", lambda: graphics)
 
     assert macos.screen.is_locked() is locked
 

@@ -474,6 +474,24 @@ def test_layouts_only_on_the_main_thread():
     assert len(errors) == 3 and all("main thread" in error for error in errors)
 
 
+def test_set_layout_names_the_layouts_a_loose_name_matches(monkeypatch):
+    from contextlib import contextmanager
+
+    from macos import keyboard
+
+    @contextmanager
+    def sources():
+        yield [(1, "U.S.", "com.apple.keylayout.US"), (2, "U.S. International", "com.apple.keylayout.USInternational"),
+               (3, "ABC", "com.apple.keylayout.ABC")]
+
+    monkeypatch.setattr(keyboard, "_require_main_thread", lambda what: None)
+    monkeypatch.setattr(keyboard, "_input_sources", sources)
+    with pytest.raises(ValueError) as caught:
+        keyboard.set_layout("u.s")
+    # The two it could mean, not every enabled layout.
+    assert "'U.S.', 'U.S. International'" in str(caught.value) and "ABC" not in str(caught.value)
+
+
 def test_backlight_ids_are_released(monkeypatch):
     from macos import keyboard
 

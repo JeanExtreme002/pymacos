@@ -448,6 +448,28 @@ def test_schedule_goes_by_the_file_name_not_the_label(fake_run, home):
     assert macos.schedule.get("backup").every is None
 
 
+def test_schedule_doesnt_take_a_name_spelled_otherwise_for_a_job(fake_run, home):
+    macos.schedule.add("Backup", home / "backup.py", every=60)
+    agents = home / "Library" / "LaunchAgents"
+    # By the disk, not sys.platform, which fake_run sets to darwin: Linux's disks tell case apart.
+    if not (agents / "pymacos.backup.plist").exists():
+        pytest.skip("this disk tells case apart: the names have files of their own")
+    fake_run.calls.clear()
+
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.add("backup", home / "backup.py", every=60)
+    # remove() would delete Backup's file and leave the job pymacos.Backup loaded, out of jobs()' sight.
+    assert macos.schedule.remove("backup") is False
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.run_now("backup")
+    with pytest.raises(ValueError, match="'Backup'"):
+        macos.schedule.pause("backup")
+    assert macos.schedule.get("backup") is None
+    assert fake_run.calls == []  # launchctl wasn't told about either name
+    assert [job.name for job in macos.schedule.jobs()] == ["Backup"]
+    assert macos.schedule.remove("Backup") is True
+
+
 def test_schedule_add_reads_the_paused_jobs_once(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     listings = [call["args"] for call in fake_run.calls if call["args"][:2] == ["launchctl", "print-disabled"]]

@@ -74,6 +74,9 @@ class CommandTimeoutError(MacOSError, TimeoutError):
 
     def __init__(self, args: Sequence[str], timeout: float) -> None:
         super().__init__(list(args), timeout)  # picklable, see CommandError
+        # Given two arguments, OSError (which TimeoutError is) takes them for an errno and its message:
+        # there's neither, as for a TimeoutError raised with a message.
+        self.errno = self.strerror = None
         self.cmd = list(args)
         self.timeout = timeout
 
@@ -94,7 +97,7 @@ class WaitTimeoutError(MacOSError, TimeoutError):
     What was waited for didn't happen in time.
 
     A copy, an appearance change, a geocoding answer, a folder walked, a Bluetooth or VPN switch, the
-    Dock restarting, a default app's confirmation, a window's full-screen change.
+    Dock restarting, a default app's confirmation, a window's full-screen change, an audio or video export.
     """
 
 

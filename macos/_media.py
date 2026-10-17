@@ -12,7 +12,7 @@ from typing import Optional
 
 from . import _files, _objc
 from ._system import framework
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 TIMESCALE = 600  # the usual movie timescale: exact for 24, 25, 30 and 60 fps
 _VALID = 1  # kCMTimeFlags_Valid
@@ -256,7 +256,7 @@ def export(
             raise
         if not finished:
             _objc.send(session, "cancelExport", restype=None)
-            raise MacOSError("the export didn't finish within {} seconds".format(timeout))
+            raise WaitTimeoutError("the export didn't finish within {} seconds".format(timeout))
         status = _objc.send(session, "status", restype=_objc.NSInteger)
         if status != _COMPLETED:
             error = _objc.send(session, "error")

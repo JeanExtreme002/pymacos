@@ -37,6 +37,32 @@ def test_objc_blocks_and_classes():
     assert _objc.run_until(lambda: False, 0.1) is False
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_objc_method_that_raises_answers_nil_and_reports_the_error():
+    import ctypes
+
+    from macos import _objc
+
+    def fail(self, cmd, value):
+        raise ValueError("boom")
+
+    reported = []
+    hook, sys.unraisablehook = sys.unraisablehook, reported.append
+    try:
+        answer = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        counted = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        _objc.define_class("PymacosTestFailing", {"answer:": ("@@:@", answer, fail), "count:": ("q@:@", counted, fail)})
+        with _objc.autorelease_pool():
+            probe = _objc.new("PymacosTestFailing")
+            # Without the guard, ctypes answers what the register held: a garbage object, or a stray number.
+            for _ in range(3):
+                assert _objc.send(probe, "answer:", probe, argtypes=(_objc.id,)) is None
+                assert _objc.send(probe, "count:", probe, argtypes=(_objc.id,), restype=ctypes.c_long) == 0
+    finally:
+        sys.unraisablehook = hook
+    assert len(reported) == 6 and all(isinstance(each.exc_value, ValueError) for each in reported)
+
+
 def test_one_cicontext_is_made_even_for_first_renders_at_once(monkeypatch):
     import threading
     import time
@@ -335,3 +361,14 @@ def test_a_class_the_runtime_doesnt_have_is_not_supported_and_still_a_lookup_err
     with pytest.raises(macos.NotSupportedError, match="'VNSomethingNewer' is not loaded") as missing:
         _objc.cls.__wrapped__("VNSomethingNewer")  # under the cache, which would keep a real lookup
     assert isinstance(missing.value, LookupError)  # what the callers that turn it into "needs macOS N" catch
+
+
+def test_png_raises_rather_than_return_empty_bytes(monkeypatch):
+    from macos import _objc
+
+    monkeypatch.setattr(_objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_objc, "send", lambda *args, **kwargs: 0)  # representationUsingType: answered nil
+    with pytest.raises(macos.MacOSError, match="PNG"):
+        _objc.png(2)
+    with pytest.raises(macos.MacOSError, match="PNG"):
+        _objc.png(0)  # initWithCGImage: answered nil

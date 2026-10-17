@@ -694,7 +694,10 @@ def wait_for_change(
     since = time.time()
     deadline = None if timeout is None else time.monotonic() + timeout
     if pattern is not None and not isinstance(pattern, str):
-        pattern = tuple(pattern)  # read twice: by watch() and by the look through the folder
+        try:
+            pattern = tuple(pattern)  # read twice: by watch() and by the look through the folder
+        except TypeError:
+            pass  # not a list: watch() says what pattern must be
     for event in watch(path, pattern=pattern, recursive=recursive, timeout=timeout):
         if event.kind != "rescan":
             return event

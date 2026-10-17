@@ -438,6 +438,10 @@ def _display_api() -> ctypes.CDLL:
     cg.CGDisplayModeGetRefreshRate.restype = ctypes.c_double
     cg.CGDisplayModeRelease.argtypes = (ctypes.c_void_p,)
     cg.CGDisplayModeRelease.restype = None
+    cg.CGDisplayIsAsleep.argtypes = (ctypes.c_uint32,)
+    cg.CGDisplayIsAsleep.restype = ctypes.c_bool
+    cg.CGSessionCopyCurrentDictionary.argtypes = ()
+    cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
     return cg
 
 
@@ -802,10 +806,7 @@ def is_locked() -> bool:
         while macos.screen.is_locked():
             time.sleep(5)
     """
-    graphics = framework("CoreGraphics")
-    graphics.CGSessionCopyCurrentDictionary.argtypes = ()
-    graphics.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
-    with _cf.owned(graphics.CGSessionCopyCurrentDictionary()) as session:
+    with _cf.owned(_display_api().CGSessionCopyCurrentDictionary()) as session:
         if not session:
             raise MacOSError("could not read the login session")
         # Present, and true, only while the screen is locked.
@@ -819,8 +820,6 @@ def is_asleep(display_id: Union[int, Display, None] = None) -> bool:
     ``display_id`` works as in :func:`wallpaper`.
     """
     graphics = _display_api()
-    graphics.CGDisplayIsAsleep.argtypes = (ctypes.c_uint32,)
-    graphics.CGDisplayIsAsleep.restype = ctypes.c_bool
     if display_id is None:
         target = graphics.CGMainDisplayID()
     else:

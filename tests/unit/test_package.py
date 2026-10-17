@@ -230,3 +230,40 @@ def test_every_native_call_that_calls_back_holds_a_ctrl_c():
                 unheld.append("{}:{} {}".format(path.name, node.lineno, name))
     assert found == functions | selectors  # each one still called: a renamed one would pass unchecked
     assert unheld == []
+
+
+def test_each_native_function_is_declared_in_one_module():
+    """
+    The frameworks are cached handles shared by every module: a function declared in two would have the last
+    module loaded set its ``argtypes`` for both (see ``macos/_cg.py``). Each is declared once, and the modules
+    that call it ask the one that declares it.
+    """
+    import ast
+    from collections import defaultdict
+    from pathlib import Path
+
+    declared = defaultdict(set)
+    for path in sorted(Path(macos.__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            # lib.CGImageRelease.argtypes = ... / .restype = ...
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr in ("argtypes", "restype")
+                    and isinstance(target.value, ast.Attribute)
+                ):
+                    declared[target.value.attr].add(path.name)
+            # The signature tables: {"CGImageRelease": ((pointer,), None), ...}
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and isinstance(key.value, str)
+                        and key.value[:2] in ("CF", "CG", "CV", "CM", "CT", "IO", "AX", "TI", "LS", "Se")
+                        and isinstance(value, ast.Tuple)
+                        and len(value.elts) == 2
+                    ):
+                        declared[key.value].add(path.name)
+    assert declared  # the scan found what it looks for
+    assert {name: sorted(files) for name, files in declared.items() if len(files) > 1} == {}

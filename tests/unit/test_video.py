@@ -107,6 +107,8 @@ def test_video_argument_checks(tmp_path):
         macos.video.speed(__file__, tmp_path / "out.mov", -1)
     with pytest.raises(ValueError, match="multiple of 90"):
         macos.video.rotate(__file__, tmp_path / "out.mov", 45)
+    with pytest.raises(TypeError, match="must be a number"):
+        macos.video.rotate(__file__, tmp_path / "out.mov", "90")
     with pytest.raises(ValueError, match="at least 2 x 2"):
         macos.video.crop(__file__, tmp_path / "out.mov", (0, 0, 0, 10))
     with pytest.raises(ValueError, match="at least 2 x 2"):
@@ -194,7 +196,8 @@ def test_a_frame_that_cant_be_encoded_cancels_the_writer(monkeypatch, tmp_path):
     assert not target.exists() and list(tmp_path.iterdir()) == []
 
 
-def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stop", ["interrupted", "timed out"])
+def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path, stop):
     from contextlib import nullcontext
 
     from macos import _media
@@ -206,6 +209,8 @@ def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path):
         return 0 if selector == "status" else 1
 
     def interrupted(done, timeout):
+        if stop == "timed out":
+            return False
         raise KeyboardInterrupt
 
     monkeypatch.setattr(_media._objc, "autorelease_pool", nullcontext)
@@ -216,7 +221,9 @@ def test_an_interrupted_export_is_cancelled(monkeypatch, tmp_path):
     monkeypatch.setattr(_media, "ignore_completion", lambda: 4)
     monkeypatch.setattr(_media._objc, "run_until", interrupted)
     target = tmp_path / "out.mov"
-    with pytest.raises(KeyboardInterrupt):
+    # A wait that ran out raises a TimeoutError, as every other does (and still a MacOSError, as it did).
+    expected = macos.WaitTimeoutError if stop == "timed out" else KeyboardInterrupt
+    with pytest.raises(expected):
         _media.export(5, target)
     # The session is stopped, not left encoding into the temporary folder, which is gone.
     assert sent[-1] == "cancelExport"

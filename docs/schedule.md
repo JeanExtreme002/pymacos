@@ -42,7 +42,10 @@ The script runs with the same Python that added it (or `python=`, such as a
 virtual environment's), in its own folder, with `args` as its arguments.
 Adding a name again replaces that job. If launchd refuses the new one, `add`
 deletes its plist, puts the old job back (still paused if it was) and raises
-the error.
+the error. Names that differ only in case share a file on the Mac's disk, so
+a name spelled otherwise than an existing job's (`"Backup"` when there's a
+`"backup"`) raises `ValueError`, and the other functions don't take it for
+that job.
 
 The job runs whatever is at the script's path (and `python=`'s) at each run,
 as you. When other users could change it there (a folder shared with them,

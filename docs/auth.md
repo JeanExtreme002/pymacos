@@ -19,7 +19,8 @@ never sees them, it only learns whether the user confirmed.
 
 {func}`~macos.auth.confirm` returns `True` when the user confirms, and `False`
 when they cancel, fail, or don't answer within `timeout` seconds (2 minutes by
-default). `reason` completes the prompt's sentence, so write it as what the
+default), and when macOS takes the prompt away (another app came to the front,
+the Mac slept). `reason` completes the prompt's sentence, so write it as what the
 script is about to do.
 
 By default the user may type their login password instead of using Touch ID,

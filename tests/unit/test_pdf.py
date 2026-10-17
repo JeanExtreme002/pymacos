@@ -616,3 +616,131 @@ def test_bookmarks_open_at_the_top_of_the_visible_part(tmp_path, rotate, corner)
         child = _objc.send(_objc.send(document, "outlineRoot"), "childAtIndex:", 0, argtypes=(ctypes.c_ulong,))
         point = _objc.send(_objc.send(child, "destination"), "point", restype=_objc.CGPoint)
     assert (point.x, point.y) == corner  # of the crop box as it shows, not the Letter page's (0, 792)
+
+
+def test_scrub_blocks_out_each_character_and_adds_to_the_counts():
+    import re
+
+    from macos.pdf import _patterns, _scrub
+
+    counts = [5]  # counts go on from what the pages found
+    assert _scrub("Ana Souza met ana  souza", _patterns("Ana Souza"), counts) == "█" * 9 + " met " + "█" * 10
+    assert counts == [7]
+    counts = [0]
+    # One block per character, an emoji or an accented letter as one: the length stays the text's.
+    assert _scrub("💡 Ação 💡", [("", re.compile("💡 Ação"))], counts) == "█" * 6 + " 💡" and counts == [1]
+    counts = [0, 0]
+    assert _scrub("", _patterns(["Ana", "Souza"]), counts) == "" and counts == [0, 0]
+    assert _scrub("Report", _patterns(["Ana", "Souza"]), counts) == "Report" and counts == [0, 0]
+
+
+def _object_stream(body, filters=b"/Filter /FlateDecode"):
+    return (
+        b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 " + filters + b" /Length " + str(len(body)).encode() + b" >>\n"
+        b"stream\n" + body + b"\nendstream\nendobj\n"
+    )
+
+
+def test_file_strings_read_object_streams_as_they_are_stored():
+    import zlib
+
+    from macos.pdf import _file_strings
+
+    plain = b"1 0 obj\n<< /Title (Report) >>\nendobj\n"
+    # Uncompressed: read as it is. Its line may end with \r\n.
+    stored = _object_stream(b"4 0 << /Contents (Ana Souza) >>", filters=b"").replace(b"stream\n", b"stream\r\n", 1)
+    assert sorted(_file_strings(plain + stored)) == ["Ana Souza", "Report"]
+    # Compressed, with UTF-16 text in it.
+    inflated = zlib.compress(b"4 0 << /T <FEFF004A006F007300E9> /V [(Ana) (Souza)] >>")
+    assert sorted(_file_strings(plain + _object_stream(inflated))) == ["Ana", "AnaSouza", "Jos\xe9", "Report", "Souza"]
+
+
+def test_file_strings_skip_object_streams_they_cannot_read():
+    import zlib
+
+    from macos.pdf import _file_strings
+
+    plain = b"1 0 obj\n<< /Title (Report) >>\nendobj\n"
+    corrupt = _object_stream(zlib.compress(b"4 0 << /T (Ana Souza) >>")[:-6] + b"\x00garbage")
+    assert list(_file_strings(plain + corrupt)) == ["Report"]  # the rest of the file is still read
+    hexed = _object_stream(b"(Ana Souza)", filters=b"/Filter /ASCIIHexDecode")
+    chained = _object_stream(zlib.compress(b"(Ana Souza)"), filters=b"/Filter [/FlateDecode /ASCII85Decode]")
+    assert list(_file_strings(plain + hexed + chained)) == ["Report"]  # encoded some other way: nothing PDFKit writes
+
+
+def test_file_strings_of_a_file_cut_short_or_mapped(tmp_path):
+    import mmap
+
+    from macos.pdf import _file_strings
+
+    # A stream with no end: read to the end of the file, the body before it too.
+    cut = b"1 0 obj\n<< /Title (Report) >>\nendobj\n5 0 obj\n<< /Type /ObjStm >>\nstream\n4 0 << /T (Ana Souza) >>"
+    assert sorted(_file_strings(cut)) == ["Ana Souza", "Report"]
+    assert list(_file_strings(b"")) == []
+    path = tmp_path / "cut.pdf"
+    path.write_bytes(cut)
+    with open(str(path), "rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        assert sorted(_file_strings(data)) == ["Ana Souza", "Report"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads pages with PDFKit")
+def test_redactions_count_the_matches_cropped_away(tmp_path):
+    from macos.pdf import _page, _patterns, _redactions
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "page.pdf"
+    source.write_bytes(pdf_with_text([("Ana Souza", 72, 72), ("Report", 72, 120)]))
+    patterns = _patterns(["Ana Souza", "Maria"])
+    with macos.pdf._open(source) as document:
+        page = _page(document, 1)
+        counts = [0, 0]
+        found, boxes = _redactions(page, 1, patterns, counts)
+        assert (found, len(boxes), counts) == (1, 1, [1, 0])
+        # The whole page holds two more, and a target the visible part doesn't: each counts, with nothing to box.
+        counts = [0, 0]
+        found, boxes = _redactions(page, 1, patterns, counts, whole="Ana Souza\nReport ANA souza Maria Ana Souza")
+        assert (found, len(boxes), counts) == (4, 1, [3, 1])
+        # The whole text holding fewer than the page shows (read another way) takes nothing off.
+        counts = [0, 0]
+        assert _redactions(page, 1, patterns, counts, whole="Report")[0] == 1 and counts == [1, 0]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes outlines with PDFKit")
+def test_scrub_outline_blocks_out_titles_and_drops_links_that_hold_a_target(tmp_path):
+    import ctypes
+
+    from macos import _objc
+    from macos.pdf import _patterns, _scrub_outline
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "page.pdf"
+    source.write_bytes(pdf_with_text([("Report", 72, 72)]))
+    marks = [("File of Ana Souza", 1), ("Links", 1), ("Ana Souza, again", 1, 1), ("Elsewhere", 1)]
+    marked = macos.pdf.set_bookmarks(source, tmp_path / "marked.pdf", marks)
+
+    def child(parent, index):
+        return _objc.send(parent, "childAtIndex:", index, argtypes=(ctypes.c_ulong,))
+
+    def link(mark, address):
+        url = _objc.send(_objc.cls("NSURL"), "URLWithString:", _objc.nsstring(address), argtypes=(_objc.id,))
+        action = _objc.send(_objc.send(_objc.cls("PDFActionURL"), "alloc"), "initWithURL:", url, argtypes=(_objc.id,))
+        _objc.send(mark, "setAction:", action, argtypes=(_objc.id,), restype=None)
+        _objc.send(action, "release", restype=None)
+
+    with macos.pdf._open(marked) as document:
+        root = _objc.send(document, "outlineRoot")
+        links, elsewhere = child(root, 1), child(root, 2)
+        link(links, "https://example.com/?q=Ana%20Souza")
+        link(elsewhere, "https://example.com/plain")
+        counts = [0]
+        _scrub_outline(root, _patterns("Ana Souza"), counts)
+
+        def label(mark):
+            return _objc.pystring(_objc.send(mark, "label"))
+
+        assert [label(child(root, 0)), label(links), label(child(links, 0)), label(elsewhere)] == [
+            "File of " + "█" * 9, "Links", "█" * 9 + ", again", "Elsewhere"
+        ]  # fmt: skip
+        assert counts == [3]  # two titles and a link's address
+        assert not _objc.send(links, "action")  # its address would lead nowhere once blocked out
+        assert _objc.send(elsewhere, "action")
