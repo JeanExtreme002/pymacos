@@ -22,11 +22,12 @@ import codecs
 import ctypes
 import os
 import re
+from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
-from . import _files, _objc
+from . import _cf, _files, _objc
 from ._system import framework, require_macos
 from .errors import MacOSError
 
@@ -47,9 +48,11 @@ _TYPES = {
 }
 _PAPERS = {"a4": (595.28, 841.89), "letter": (612.0, 792.0), "legal": (612.0, 1008.0)}
 _UTF8 = 4  # NSUTF8StringEncoding
-_CHARSET = re.compile(rb"charset\s*=", re.I)
+# An encoding the file names itself: an HTML page's charset, or an XML declaration's (XHTML).
+_CHARSET = re.compile(rb"charset\s*=|<\?xml[^>]*\bencoding\s*=", re.I)
 _CHUNK = 1 << 20  # bytes read at a time to check a file is UTF-8
-# What macOS reads through WebKit, as public.html (and a web archive): only on the main thread.
+# What macOS reads through WebKit, as public.html (and a web archive): only on the main thread. (XHTML that
+# opens with an XML declaration is read as plain text instead, but it's guarded all the same.)
 _HTML_FORMATS = (".html", ".htm", ".shtml", ".shtm", ".xhtml", ".xht")
 _WEB_FORMATS = _HTML_FORMATS + (".webarchive",)
 # What macOS never reads through WebKit, whatever the file holds. It goes by the content, not the name:
@@ -104,9 +107,9 @@ def _will_send(gatekeeper: int, _command: int, _view: int, _resource: int, reque
     """
     WebKit's ``willSendRequest:``: the request to make, or ``None`` for none. Only the page itself gets through.
 
-    Never raises: an exception in a ctypes callback answers WebKit garbage, which crashes the process, and the
-    page picks the URLs (``file:///a%00b`` makes ``realpath`` raise). Whatever goes wrong refuses the load,
-    a Ctrl-C landing here included: losing it beats the crash.
+    Never raises an error: one in a ctypes callback answers WebKit garbage, which crashes the process, and
+    the page picks the URLs (``file:///a%00b`` makes ``realpath`` raise). Whatever goes wrong refuses the
+    load. A Ctrl-C goes on to the wrapper ``define_class`` puts around it, which keeps it for :func:`_load`.
     """
     try:
         url = _objc.send(request, "URL")
@@ -114,7 +117,7 @@ def _will_send(gatekeeper: int, _command: int, _view: int, _resource: int, reque
         path = (_objc.pystring(_objc.send(url, "path")) if url else None) or ""
         if scheme.lower() == "file" and path and os.path.realpath(path) == _PAGES.get(gatekeeper):
             return request
-    except BaseException:
+    except Exception:
         pass
     return None
 
@@ -195,7 +198,7 @@ def _load(source: Path, resources: bool = True) -> int:
     """The document as an ``NSAttributedString`` (autoreleased); see :func:`text` for ``resources``."""
     if source.suffix.lower() in _WEB_FORMATS:
         _files.require_main_thread("reading an HTML page or a web archive")
-    elif not resources and source.suffix.lower() not in _NOT_WEB_FORMATS:
+    elif not resources and source.suffix.lower() not in _NOT_WEB_FORMATS and not source.is_dir():  # an .rtfd folder
         # macOS may read it through WebKit (it goes by what the file holds), and WebKit asks the gatekeeper
         # on the main thread: from another thread, while that one waits, the load would never end.
         _files.require_main_thread("reading a file that may be an HTML page with resources=False")
@@ -203,22 +206,24 @@ def _load(source: Path, resources: bool = True) -> int:
     error = ctypes.c_void_p()
     attributes = ctypes.c_void_p()
     options, gatekeeper = _options(source, resources)
-    try:
-        loaded = _objc.send(
-            _objc.send(_objc.cls("NSAttributedString"), "alloc"),
-            "initWithURL:options:documentAttributes:error:",
-            _objc.file_url(source),
-            options,
-            ctypes.byref(attributes),
-            ctypes.byref(error),
-            argtypes=(_objc.id, _objc.id, ctypes.c_void_p, ctypes.c_void_p),
-        )
-    finally:
-        if gatekeeper is not None:  # the load is synchronous: nothing asks this gatekeeper after it
-            _PAGES.pop(gatekeeper, None)
+    # With the gatekeeper, Python runs during the load: a Ctrl-C meanwhile is raised once it's done, not lost in it.
+    with _cf.deferred_interrupt() if gatekeeper is not None else nullcontext():
+        try:
+            loaded = _objc.send(
+                _objc.send(_objc.cls("NSAttributedString"), "alloc"),
+                "initWithURL:options:documentAttributes:error:",
+                _objc.file_url(source),
+                options,
+                ctypes.byref(attributes),
+                ctypes.byref(error),
+                argtypes=(_objc.id, _objc.id, ctypes.c_void_p, ctypes.c_void_p),
+            )
+            loaded = _objc.send(loaded, "autorelease") if loaded else None
+        finally:
+            if gatekeeper is not None:  # the load is synchronous: nothing asks this gatekeeper after it
+                _PAGES.pop(gatekeeper, None)
     if not loaded:
         raise MacOSError("could not read {}: {}".format(source, _objc.error_message(error, "unknown format")))
-    loaded = _objc.send(loaded, "autorelease")
     if gatekeeper is not None:
         kind = attributes.value and _objc.send(
             attributes.value, "objectForKey:", _objc.nsstring("DocumentType"), argtypes=(_objc.id,)

@@ -179,6 +179,10 @@ def test_resources_off_needs_the_main_thread_unless_webkit_cant_read_it(monkeypa
     notes.write_text("{\\rtf1 x}")
     with pytest.raises(RuntimeError, match="loading"):
         document._load(notes, resources=False)
+    package = tmp_path / "notes.rtfd"  # a folder: it can't be a page, whatever's in it
+    package.mkdir()
+    with pytest.raises(RuntimeError, match="loading"):
+        document._load(package, resources=False)
 
 
 @pytest.mark.parametrize("name", ["page.html", "page.shtml", "page.shtm", "page.xhtml", "page.xht", "notes.txt"])
@@ -190,3 +194,6 @@ def test_every_html_extension_is_read_as_utf8(tmp_path, name):
     assert document._reads_as_utf8(source)
     source.write_text('<meta charset="latin-1"><p>Ol\xe1</p>', encoding="latin-1")
     assert not document._reads_as_utf8(source)
+    if source.suffix != ".txt":  # a page may also name it in an XML declaration (XHTML)
+        source.write_bytes(b'<?xml version="1.0" encoding="ISO-8859-1"?><p>\xc3\xa9</p>')  # valid UTF-8 too
+        assert not document._reads_as_utf8(source)
