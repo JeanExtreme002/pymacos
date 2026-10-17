@@ -207,6 +207,24 @@ def test_finder_extract_reads_the_names_as_ditto_writes_them(fake_run, tmp_path)
     assert finder._extracted_over(archive, out) == ["relatório.txt"]
 
 
+def test_finder_extract_ignores_the_unicode_path_field_as_ditto_does(tmp_path):
+    import struct
+    import zipfile
+    import zlib
+
+    # Info-ZIP's Unicode Path field (0x7075), which Windows and Linux zip tools add: from Python 3.12,
+    # zipfile reports its name instead of the one stored, and that one can't be encoded back. ditto
+    # writes the stored name.
+    archive = tmp_path / "windows.zip"
+    entry = zipfile.ZipInfo("x.txt")
+    field = struct.pack("<BL", 1, zlib.crc32(b"x.txt")) + "日本.txt".encode("utf-8")
+    entry.extra = struct.pack("<HH", 0x7075, len(field)) + field
+    with zipfile.ZipFile(str(archive), "w") as made:
+        made.writestr(entry, "new")
+    (tmp_path / "x.txt").write_text("old")
+    assert finder._extracted_over(archive, tmp_path) == ["x.txt"]
+
+
 def test_finder_extract_unchecked_archive(fake_run, tmp_path):
     archive = tmp_path / "odd.zip"
     archive.write_bytes(b"not a zip zipfile reads, which ditto may")
@@ -225,6 +243,15 @@ def test_finder_compress_into_the_folder_it_zips_writes_in_place(fake_run, tmp_p
 
     assert macos.finder.compress(folder, folder / "Project.zip") == folder / "Project.zip"
     assert fake_run.args[-1] == str(folder / "Project.zip")  # not staged where ditto would zip it too
+
+    # However it's reached: through a link to a file in it, or (APFS ignoring case) spelled otherwise.
+    link = tmp_path / "link.zip"
+    link.symlink_to(folder / "Linked.zip")
+    macos.finder.compress(folder, link)
+    assert fake_run.args[-1] == str(link)
+    if sys.platform == "darwin":
+        macos.finder.compress(folder, tmp_path / "project" / "Other.zip")
+        assert fake_run.args[-1] == str(tmp_path / "project" / "Other.zip")
 
 
 def test_quick_look_returns_at_once(fake_run, monkeypatch, tmp_path):
