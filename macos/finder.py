@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, MutableMapping, Optional, Sequence, Tuple, Union
+from urllib.parse import quote, unquote, urlparse
 
 from . import _cf, _cg, _libc, _objc, defaults, spotlight
 from ._objc import BOOL, NSUInteger
@@ -108,6 +109,16 @@ def _raise(error: ctypes.c_void_p, what: str) -> None:
     raise MacOSError("{}: {}".format(what, _objc.error_message(error)))
 
 
+def _file_url(path: PathLike) -> str:
+    """``path`` as the ``file://`` URL of a folder, as Finder's and the Dock's preferences keep one."""
+    return "file://{}/".format(quote(str(path)))
+
+
+def _url_path(url: str) -> str:
+    """The path a ``file://`` URL names, its escapes undone."""
+    return unquote(urlparse(url).path)
+
+
 @lru_cache(maxsize=None)
 def _tag_names_key() -> int:
     return ctypes.c_void_p.in_dll(framework("Foundation"), "NSURLTagNamesKey").value or 0
@@ -125,7 +136,8 @@ def trash(path: PathLike) -> Path:
     Move ``path`` to the Trash and return where it ended up.
 
     Unlike deleting it, the file can be restored from the Trash with
-    *Put Back*.
+    *Put Back*. Raises :class:`~macos.MacOSError` when macOS refuses, or
+    (rarely) when it moved the item without saying where it went.
     """
     source = _existing(path)
     with _objc.autorelease_pool():
@@ -143,7 +155,11 @@ def trash(path: PathLike) -> Path:
         )
         if not ok:
             _raise(error, "could not move {} to the Trash".format(source))
-        return Path(_objc.pystring(_objc.send(resulting.value, "path")) or "")
+        # macOS may say it moved the item and not where: the empty path that would come out of it isn't the Trash.
+        where = _objc.pystring(_objc.send(resulting.value, "path")) if resulting.value else None
+        if not where:
+            raise MacOSError("{} was moved to the Trash, but macOS didn't say where".format(source))
+        return Path(where)
 
 
 def tags(path: PathLike) -> List[str]:
@@ -791,7 +807,11 @@ _FINDER = "com.apple.finder"
 
 
 def restart() -> None:
-    """Relaunch Finder, so it reads its settings again (the ``set_show_*`` functions do it for you)."""
+    """
+    Relaunch Finder, so it reads its settings again (the ``set_show_*`` functions do it for you).
+
+    Several changes relaunch it several times: a :func:`macos.settings.batch` block relaunches it once, at its end.
+    """
     # macOS opens it again right away, with its windows (unless quit from its menu, see set_quit_menu).
     restart_process("Finder")
 
@@ -956,20 +976,16 @@ def new_window_folder() -> Path:
     if target in _NEW_WINDOW_TARGETS:
         return Path(os.path.expanduser(_NEW_WINDOW_TARGETS[target]))
     url = defaults.read(_FINDER, "NewWindowTargetPath", default="")
-    from urllib.parse import unquote, urlparse
-
-    return Path(unquote(urlparse(url).path)).absolute() if url else Path.home()
+    return Path(_url_path(url)).absolute() if url else Path.home()
 
 
 def set_new_window_folder(folder: PathLike) -> None:
     """Open new Finder windows (⌘N) in ``folder``, such as ``"~/Downloads"``. Relaunches Finder."""
-    from urllib.parse import quote
-
     target = _existing(folder)
     if not target.is_dir():
         raise NotADirectoryError(str(target))
     defaults.write(_FINDER, "NewWindowTarget", "PfLo")
-    defaults.write(_FINDER, "NewWindowTargetPath", "file://{}/".format(quote(str(target))))
+    defaults.write(_FINDER, "NewWindowTargetPath", _file_url(target))
     restart()
 
 
@@ -1126,12 +1142,22 @@ def desktop_view() -> Dict[str, object]:
     }
 
 
+class _Unchanged:
+    """The default of an option whose values include ``None``, so ``None`` can't mean "leave it as it is"."""
+
+    def __repr__(self) -> str:
+        return "<unchanged>"
+
+
+_UNCHANGED = _Unchanged()
+
+
 def set_desktop_view(
     *,
     icon_size: Optional[int] = None,
     grid_spacing: Optional[int] = None,
     text_size: Optional[int] = None,
-    sort: Union[str, None, bool] = False,
+    sort: Union[str, None, bool, _Unchanged] = _UNCHANGED,
     show_item_info: Optional[bool] = None,
     labels_on_bottom: Optional[bool] = None,
 ) -> None:
@@ -1151,6 +1177,9 @@ def set_desktop_view(
     ``show_item_info`` adds a line under each name (a disk's free space, a
     folder's item count, an image's size), and ``labels_on_bottom=False``
     puts the names to the right of the icons instead of below. Relaunches Finder.
+
+    ``sort`` left out keeps the order as it is, as the other options do when
+    left out: ``None`` is a value of it, not "leave it alone".
     """
     changes: Dict[str, object] = {}
     for name, value, low, high, key in (
@@ -1162,11 +1191,13 @@ def set_desktop_view(
             if not low <= value <= high:
                 raise ValueError("{} must be from {} to {}, not {}".format(name, low, high, value))
             changes[key] = float(value)
-    if sort is not False:
-        if sort not in _DESKTOP_SORTS:
-            names = ", ".join(name for name in _DESKTOP_SORTS if name)
-            raise ValueError("sort must be one of {} or None, not {!r}".format(names, sort))
+    if sort is _UNCHANGED or sort is False:
+        pass  # left out, or False, the default it replaced, which still means the same: the order stays
+    elif (sort is None or isinstance(sort, str)) and sort in _DESKTOP_SORTS:
         changes["arrangeBy"] = _DESKTOP_SORTS[sort]
+    else:
+        names = ", ".join(name for name in _DESKTOP_SORTS if name)
+        raise ValueError("sort must be one of {} or None, not {!r}".format(names, sort))
     if show_item_info is not None:
         changes["showItemInfo"] = bool(show_item_info)
     if labels_on_bottom is not None:

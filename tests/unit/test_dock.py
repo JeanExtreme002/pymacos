@@ -64,21 +64,12 @@ def test_dock_restart_tolerates_a_dock_that_is_not_running(monkeypatch, commands
 
 
 def test_dock_pid_asks_for_the_dock_alone(monkeypatch):
-    sent = []
+    asked = []
 
     class ObjC:
-        id = object
-        BOOL = bool
-
         def send(self, receiver, selector, *args, **kwargs):
-            sent.append(selector)
-            return {"isTerminated": False, "processIdentifier": 321}.get(selector, 1)
-
-        def nsarray(self, obj):
-            return [11]
-
-        def nsstring(self, text):
-            return text
+            assert (receiver, selector) == (11, "processIdentifier")
+            return 321
 
         def autorelease_pool(self):
             import contextlib
@@ -86,9 +77,11 @@ def test_dock_pid_asks_for_the_dock_alone(monkeypatch):
             return contextlib.nullcontext()
 
     monkeypatch.setattr(dock, "_objc", ObjC())
-    monkeypatch.setattr(dock._apps, "_running_application_class", lambda: 1)
-    assert dock._pid() == 321
-    assert sent[0] == "runningApplicationsWithBundleIdentifier:"  # one call, not a scan of every process
+    # The apps module's helper asks LaunchServices about that one bundle ID, not about every process.
+    monkeypatch.setattr(dock._apps, "_handles_with_bundle_id", lambda bundle_id: asked.append(bundle_id) or [11])
+    assert dock._pid() == 321 and asked == ["com.apple.dock"]
+    monkeypatch.setattr(dock._apps, "_handles_with_bundle_id", lambda bundle_id: [])
+    assert dock._pid() is None  # killed a moment ago, not back yet
 
 
 def test_dock_settings(dock_settings):
@@ -224,3 +217,80 @@ def test_dock_numbers_tolerate_hand_edited_values(dock_settings):
     assert macos.dock.hot_corners()["top_left"] is None and macos.dock.hot_corner_modifiers()["top_left"] is None
     store.update({"tilesize": "48", "autohide-delay": 0})  # a number written as text still reads
     assert macos.dock.size() == 48 and macos.dock.autohide_delay() == 0.0
+
+
+def test_dock_tiles_tolerate_hand_edited_values(dock_settings):
+    store, restarts, app = dock_settings
+    # The lists of tiles replaced by something else, or holding something that isn't a tile: not a crash.
+    store["persistent-apps"] = "Safari"
+    store["persistent-others"] = {"tile-type": "directory-tile"}
+    with pytest.warns(RuntimeWarning, match="isn't a list of tiles"):
+        assert macos.dock.apps() == [] and macos.dock.folders() == []
+    with pytest.warns(RuntimeWarning, match="isn't a list of tiles"):
+        assert macos.dock.remove_app("Safari") is False and macos.dock.remove_spacers() == 0 and restarts == []
+        added = macos.dock.add_app("Code")  # written back as a proper list
+    assert added.path == app and [entry.name for entry in macos.dock.apps()] == ["Code"]
+    store["persistent-apps"] = [
+        "Safari",
+        42,
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Safari.app/", "_CFURLStringType": 15},
+                       "file-label": "Safari", "bundle-identifier": "com.apple.Safari"}, "tile-type": "file-tile"},
+    ]  # fmt: skip
+    with pytest.warns(RuntimeWarning, match="2 of the Dock's persistent-apps entries aren't tiles") as reported:
+        assert [entry.name for entry in macos.dock.apps()] == ["Safari"]
+    assert reported[0].filename == __file__  # it points at the call to apps(), not inside the package
+    # A folder's view, sort and icon edited into text, a list, a number out of range: the defaults, as for the Dock's numbers.
+    store["persistent-others"] = [
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Users/me/Downloads/", "_CFURLStringType": 15},
+                       "file-label": "Downloads", "showas": "fan", "arrangement": [2], "displayas": 7},
+         "tile-type": "directory-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file:///Users/me/Projects/", "_CFURLStringType": 15},
+                       "file-label": "Projects", "showas": "2", "arrangement": 1.0, "displayas": "1"},
+         "tile-type": "directory-tile"},
+    ]  # fmt: skip
+    folders = macos.dock.folders()
+    assert [(folder.view, folder.sort, folder.display) for folder in folders] == [
+        ("automatic", "name", "stack"),
+        ("grid", "name", "folder"),  # numbers written as text still read
+    ]
+
+
+def test_dock_tiles_with_hand_edited_contents_read_as_no_app(dock_settings):
+    store, restarts, app = dock_settings
+    safari = store["persistent-apps"][0]
+    # Dictionaries, so tiles, but what they hold was edited into something else: skipped, and kept as they are.
+    odd = [
+        {"tile-data": "x", "tile-type": "file-tile"},
+        {"tile-data": {"file-data": []}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": 5}}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file:///a%00b/"}}, "tile-type": "file-tile"},
+        {"tile-data": {"file-data": {"_CFURLString": "file://"}}, "tile-type": "file-tile"},
+    ]
+    store["persistent-apps"] = [*odd, safari]
+    store["persistent-others"] = [{"tile-data": "x", "tile-type": "directory-tile"}]
+    assert [entry.name for entry in macos.dock.apps()] == ["Safari"]
+    assert [(folder.name, folder.path, folder.view) for folder in macos.dock.folders()] == [("", None, "automatic")]
+    assert macos.dock.remove_app("Safari") is True and store["persistent-apps"] == odd
+    macos.dock.add_spacer()
+    assert macos.dock.add_app("Code").path == app and store["persistent-apps"][: len(odd)] == odd
+    assert len(restarts) == 3
+
+
+def test_dock_folder_of_the_whole_disk_is_the_root_not_the_current_folder(dock_settings):
+    store, _, _ = dock_settings
+    for url in ("file:///", "file:////"):  # as the Dock writes the disk, and as add_folder("/") would
+        store["persistent-others"] = [
+            {"tile-data": {"file-data": {"_CFURLString": url, "_CFURLStringType": 15}, "file-label": "Macintosh HD"},
+             "tile-type": "directory-tile"},
+        ]  # fmt: skip
+        assert [folder.path for folder in macos.dock.folders()] == [macos.dock.Path("/")], url
+
+
+def test_dock_tiles_keep_file_urls_as_the_dock_writes_them(dock_settings):
+    store, _, app = dock_settings
+    folder = app.parent / "My Projects"
+    folder.mkdir()
+    kept = macos.dock.add_folder(folder)
+    url = store["persistent-others"][0]["tile-data"]["file-data"]["_CFURLString"]
+    assert url == "file://{}/My%20Projects/".format(app.parent) and kept.path == folder
+    assert [entry.path for entry in macos.dock.folders()] == [folder]  # read back through the same escapes

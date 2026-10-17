@@ -33,7 +33,8 @@ macos.windows.list("Preview", title="invoice")    # Preview's invoice windows
 when the app in front has none. An app that doesn't answer within two seconds
 (busy, or still starting) counts as having no windows, for
 {func}`~macos.windows.list` too: ask again, or use
-{func}`~macos.windows.wait_for`.
+{func}`~macos.windows.wait_for`. So does a name no running app goes by (not
+open, or misspelt): {func}`macos.apps.get` tells the two apart.
 
 ## Moving and resizing
 

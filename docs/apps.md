@@ -54,7 +54,12 @@ macos.apps.open("Mail", background=True)   # launch without stealing focus
 ```
 
 It raises {class}`~macos.AppNotFoundError` if no installed app matches, or if
-the app doesn't show up within `timeout` seconds (10 by default).
+the app doesn't show up within `timeout` seconds (10 by default). When a copy
+of the app is already running from another path (an older version in another
+folder, say), macOS brings that one to the front rather than open the one
+asked for (with `background=True`, it stays behind), and that running copy is
+returned after a second (or once `timeout` ends, if sooner), when the one asked
+for hasn't come up: check its `path`. In front, the copy must then be the active app.
 
 A name is only treated as a path when it contains a `/` (or starts with `~`),
 so `open("Notes")` finds the Notes app even if the current directory has a
@@ -187,9 +192,10 @@ macos.apps.install_from_dmg("~/Downloads/Rectangle.dmg")   # '/Applications/Rect
 
 It mounts the image, copies the `.app` into `destination` (`/Applications` by
 default), and unmounts it. An app already installed raises `FileExistsError`,
-unless `replace=True`. When the install fails and the image then won't
-unmount either, the error raised is the install's. To mount an image
-yourself, see {func}`macos.system.mount_image`.
+unless `replace=True`. A symbolic link named like an app isn't followed: only
+an app the image itself holds is installed. When the install fails and the
+image then won't unmount either, the error raised is the install's. To mount
+an image yourself, see {func}`macos.system.mount_image`.
 
 An image that holds several apps installs the first by name and warns
 (`RuntimeWarning`) about the others; `app=` picks one:
@@ -224,14 +230,20 @@ version and bundle ID:
 ```
 
 It looks in the Applications folders (yours, the Mac's and the system's),
-and at the apps Spotlight knows elsewhere.
+and at the apps Spotlight knows elsewhere. When Spotlight doesn't answer
+within a minute, or can't be asked (a permission it lacks), only the folders
+are listed, with a {class}`RuntimeWarning` saying why. With Spotlight off,
+it finds nothing more than the folders hold.
 
 ## Uninstalling an app
 
 Dragging an app to the Trash leaves its settings, caches and support files
 behind, sometimes gigabytes of them. {func}`~macos.apps.uninstall` moves the
 app to the Trash with the files it left in your Library, and returns what it
-moved, the app first. `dry_run=True` only returns what would go:
+moved, the app first. It lists the other installed apps first, to tell a
+shared name from the app's own, so the warning of
+{func}`~macos.apps.installed` when Spotlight can't be asked comes from here
+too. `dry_run=True` only returns what would go:
 
 ```python
 macos.apps.uninstall("Slack", dry_run=True)
