@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import re
+import signal
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -213,9 +214,8 @@ def idle_time() -> timedelta:
             run_heavy_job()
     """
     io = _iokit.lib()
-    # IOServiceGetMatchingService consumes the matching dictionary; 0 is the
-    # default main port.
-    service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOHIDSystem"))
+    # IOServiceGetMatchingService consumes the matching dictionary.
+    service = io.IOServiceGetMatchingService(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOHIDSystem"))
     if not service:
         raise MacOSError("the IOHIDSystem service is not available")
     try:
@@ -728,7 +728,7 @@ def lid_closed() -> bool:
     Raises :class:`~macos.errors.NotSupportedError` on a Mac without a lid.
     """
     io = _iokit.lib()
-    service = io.IOServiceGetMatchingService(0, io.IOServiceMatching(b"IOPMrootDomain"))
+    service = io.IOServiceGetMatchingService(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOPMrootDomain"))
     if not service:
         raise MacOSError("the IOPMrootDomain service is not available")
     try:
@@ -1929,8 +1929,8 @@ def gpu_usage() -> List[GPUUsage]:
     require_macos()
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
-    # The graphics drivers register as IOAccelerator; 0 is kIOMainPortDefault.
-    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator))
+    # The graphics drivers register as IOAccelerator.
+    status = io.IOServiceGetMatchingServices(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOAccelerator"), ctypes.byref(iterator))
     if status != 0:  # a Mac without a GPU driver still answers, with an empty iterator: this is IOKit failing
         raise MacOSError("could not list the graphics processors (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []
@@ -2261,9 +2261,15 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
         stopped = False  # by us, at the limit: not a failure
         read_all = False  # its output ended, so it's ending by itself: nothing to kill
         expired = threading.Event()
+        # The timer against the end of the loop: fired once the output had all been read, it would call
+        # the read out of time, and kill a command that had ended. read_all is set, and read here, under it.
+        ending = threading.Lock()
 
         def expire() -> None:
-            expired.set()
+            with ending:
+                if read_all:
+                    return
+                expired.set()
             reader.kill()  # its output ends, and so does the loop below
 
         timer = threading.Timer(timeout, expire) if timeout is not None else None
@@ -2278,7 +2284,8 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
                     if limit is not None and len(entries) >= limit:
                         stopped = True
                         break
-            read_all = not stopped
+            with ending:
+                read_all = not stopped
         finally:
             if timer is not None:
                 timer.cancel()
@@ -2291,7 +2298,10 @@ def _read_log(args: List[str], limit: Optional[int], timeout: Optional[float]) -
             reader.stdout.close()
         errors_file.seek(0)
         errors = errors_file.read().decode("utf-8", "replace")
-    if expired.is_set() and not stopped:
+    # Out of time only if the kill is what ended it: a timer that fired once log show had exited (its last
+    # line read, its exit not yet seen) killed nothing. One that fires in the instant between its last line
+    # and its exit still counts as out of time: it was, by that instant.
+    if expired.is_set() and not stopped and reader.returncode == -signal.SIGKILL:
         raise CommandTimeoutError(args, timeout or 0)
     if not stopped and reader.returncode != 0:
         raise CommandError(args, reader.returncode, errors)
@@ -2358,7 +2368,7 @@ def usb_devices() -> List[USBDevice]:
     require_macos()
     io = _iokit.lib()
     iterator = ctypes.c_uint32()
-    status = io.IOServiceGetMatchingServices(0, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator))
+    status = io.IOServiceGetMatchingServices(_iokit.MAIN_PORT, io.IOServiceMatching(b"IOUSBHostDevice"), ctypes.byref(iterator))
     if status != 0:  # no USB device is an empty iterator, not an error: this is IOKit failing
         raise MacOSError("could not list the USB devices (IOReturn {:#x})".format(status & 0xFFFFFFFF))
     found = []

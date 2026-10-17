@@ -202,6 +202,14 @@ def _connection(target: Union[str, Device], selector: str, verb: str, connected:
     device = _find(target)
     if not power():
         raise MacOSError("Bluetooth is off; turn it on with macos.bluetooth.set_power(True)")
+    if not device.address:
+        # devices() lists a few accessories without an address (see there): IOBluetoothDevice would take "" and
+        # answer nothing, which read as macOS not knowing a device it had just listed.
+        raise MacOSError(
+            "macOS lists {!r} without a Bluetooth address, so it can't be {} from here: use the Bluetooth menu".format(
+                device.name, "connected" if connected else "disconnected"
+            )
+        )
     with _objc.autorelease_pool():
         handle = _objc.send(
             _objc.cls("IOBluetoothDevice"),
@@ -233,7 +241,7 @@ def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     must be on and in range. This returns once the device is connected, or
     raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) after
     ``timeout`` seconds, or :class:`~macos.errors.MacOSError` right away when
-    Bluetooth is off.
+    Bluetooth is off or the device is listed without an ``address``.
     """
     return _connection(device, "openConnection", "connect to", True, timeout)
 
@@ -244,6 +252,7 @@ def disconnect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
 
     ``device`` works as in :func:`connect`. This returns once the device is
     disconnected, or raises :class:`~macos.WaitTimeoutError` (a
-    ``TimeoutError``) after ``timeout`` seconds.
+    ``TimeoutError``) after ``timeout`` seconds, or
+    :class:`~macos.errors.MacOSError` right away as :func:`connect` does.
     """
     return _connection(device, "closeConnection", "disconnect", False, timeout)

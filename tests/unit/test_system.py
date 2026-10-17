@@ -255,6 +255,18 @@ def test_mount_image(fake_run, tmp_path):
         macos.system.mount_image(tmp_path / "missing.dmg")
 
 
+def test_mount_image_skips_a_license_shown_before_the_plist(fake_run, tmp_path):
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    fake_run.stdout = (
+        "Software License Agreement\nPress Y to agree.\n"
+        '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>system-entities</key><array>'
+        "<dict><key>mount-point</key><string>/Volumes/Tool</string></dict></array></dict></plist>"
+    )
+
+    assert macos.system.mount_image(image) == Path("/Volumes/Tool")
+
+
 def test_cpu_and_memory_argument_checks():
     with pytest.raises(ValueError, match="interval"):
         macos.system.cpu_usage(0)
@@ -537,3 +549,139 @@ def test_iokit_failing_to_list_devices_is_an_error_not_none(monkeypatch, read, w
     monkeypatch.setattr(_iokit, "lib", lambda: Lib())
     with pytest.raises(macos.MacOSError, match="could not list the {} \\(IOReturn 0xe00002bc\\)".format(what)):
         getattr(macos.system, read)()
+
+
+# --- Kernel buffers, built by hand -------------------------------------------------------
+
+
+def _vinfo_stat(device=0, inode=0):
+    """A ``vinfo_stat`` (136 bytes): the device and the inode, the rest zero."""
+    import struct
+
+    return struct.pack("=IHHQII8qqqiIIIqq", device, 0, 0, inode, 0, 0, *([0] * 8), 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def _socket_fdinfo(family, kind, socket_type, local, remote, state=0):
+    """
+    A ``socket_fdinfo`` as ``proc_pidfdinfo`` fills it, field by field after <sys/proc_info.h>.
+
+    ``local`` and ``remote`` are ``(address bytes, port)``: 4 bytes for IPv4, which the kernel keeps at the
+    end of its 16, 16 for IPv6. The ports are in network order, as ``in_sockinfo`` holds them.
+    """
+    import socket
+    import struct
+
+    def in4in6(address):
+        return address if len(address) == 16 else b"\x00" * 12 + address
+
+    proc_fileinfo = struct.pack("=IIqiI", 0, 0, 0, macos.system._PROX_FDTYPE_SOCKET, 0)
+    socket_info = (
+        _vinfo_stat()
+        + struct.pack("=QQiii", 0, 0, socket_type, 0, family)  # soi_so, soi_pcb, soi_type, soi_protocol, soi_family
+        + struct.pack("=hhhhhhhHI", 0, 0, 0, 0, 0, 0, 0, 0, 0)  # the shorts, then soi_oobmark
+        + struct.pack("=IIIIIhh", 0, 0, 0, 0, 0, 0, 0) * 2  # soi_rcv, soi_snd
+        + struct.pack("=iI", kind, 0)  # soi_kind, rfu_1
+    )
+    in_sockinfo = struct.pack(
+        "=iiQiiBBxxI16s16sBBxxiHhxxxx",
+        socket.htons(remote[1]), socket.htons(local[1]), 0, 0, 0, 0, 0, 0, in4in6(remote[0]), in4in6(local[0]),
+        0, 0, 0, 0, 0,
+    )  # fmt: skip
+    tcp_sockinfo = in_sockinfo + struct.pack("=i", state)
+    return proc_fileinfo + socket_info + tcp_sockinfo
+
+
+class _Proc:
+    """A libproc whose ``proc_pidfdinfo`` hands over the buffer given for each descriptor."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def proc_pidfdinfo(self, pid, fd, flavor, buffer, size):
+        answer = self.answers[fd]
+        if answer is None:
+            return 0  # another user's process: nothing filled in
+        assert len(answer) <= size
+        macos.system.ctypes.memmove(buffer, answer, len(answer))
+        return len(answer)
+
+
+def test_socket_fields_are_read_where_the_kernel_puts_them():
+    import socket
+
+    system = macos.system
+    ipv4_local, ipv4_remote = socket.inet_pton(socket.AF_INET, "192.168.0.8"), socket.inet_pton(socket.AF_INET, "142.250.79.46")
+    ipv6_local, ipv6_remote = socket.inet_pton(socket.AF_INET6, "fe80::1"), socket.inet_pton(socket.AF_INET6, "2001:db8::443")
+    lib = _Proc(
+        {
+            1: _socket_fdinfo(2, system._SOCKINFO_TCP, system._SOCK_STREAM, (ipv4_local, 54321), (ipv4_remote, 443), state=4),
+            2: _socket_fdinfo(30, system._SOCKINFO_TCP, system._SOCK_STREAM, (ipv6_local, 8000), (b"\x00" * 16, 0), state=1),
+            3: _socket_fdinfo(2, system._SOCKINFO_IN, system._SOCK_DGRAM, (b"\x00" * 4, 5353), (b"\x00" * 4, 0)),
+            4: _socket_fdinfo(30, system._SOCKINFO_IN, system._SOCK_DGRAM, (ipv6_local, 65535), (ipv6_remote, 1)),
+            5: _socket_fdinfo(1, system._SOCKINFO_IN, system._SOCK_STREAM, (b"\x00" * 4, 1), (b"\x00" * 4, 1)),  # AF_UNIX
+            6: _socket_fdinfo(2, 3, system._SOCK_STREAM, (ipv4_local, 1), (ipv4_remote, 1)),  # SOCKINFO_UN
+            7: _socket_fdinfo(2, system._SOCKINFO_IN, system._SOCK_STREAM, (ipv4_local, 1), (ipv4_remote, 1)),  # raw
+            8: None,
+        }
+    )
+
+    assert system._socket(lib, 1, 1) == system._Socket("tcp", "192.168.0.8", 54321, "142.250.79.46", 443, "established")
+    assert system._socket(lib, 1, 2) == system._Socket("tcp", "fe80::1", 8000, "::", 0, "listen")
+    assert system._socket(lib, 1, 3) == system._Socket("udp", "0.0.0.0", 5353, "0.0.0.0", 0, None)
+    assert system._socket(lib, 1, 4) == system._Socket("udp", "fe80::1", 65535, "2001:db8::443", 1, None)
+    assert [system._socket(lib, 1, fd) for fd in (5, 6, 7, 8)] == [None] * 4
+
+
+def test_vnode_paths_are_read_after_the_vnode_info():
+    import struct
+
+    system = macos.system
+    name = b"/Users/me/caf\xe9.txt"  # Latin-1 bytes in a name, as the file system may hold them
+    info = _vinfo_stat(device=16777234, inode=2 ** 40 + 5) + bytes(system._VNODE_INFO - 136) + name + b"\x00"
+    found = system._vnode(b"\xff" * 24 + info, 24)  # after a proc_fileinfo
+    assert found == system._Opened("/Users/me/caf\udce9.txt", (16777234, 2 ** 40 + 5))
+    assert found.path.encode("utf-8", "surrogateescape") == name  # os.fsdecode: the bytes survive
+
+    longest = b"/" + b"x" * (system._MAXPATHLEN - 1)  # fills vip_path with no NUL after it
+    found = system._vnode(_vinfo_stat() + bytes(system._VNODE_INFO - 136) + longest + b"\xaa" * 8, 0)
+    assert found.path == longest.decode() and found.file == (0, 0)
+    assert struct.calcsize("=IHHQ") == 16  # the device and the inode sit in the first 16 bytes of a vinfo_stat
+
+
+def test_open_files_are_read_from_the_descriptors_the_folders_and_the_executable():
+    system = macos.system
+    ctypes = system.ctypes
+
+    def vnode_info_path(device, inode, path):
+        return _vinfo_stat(device, inode) + bytes(system._VNODE_INFO - 136) + path.ljust(system._MAXPATHLEN, b"\x00")
+
+    descriptors = [(3, system._PROX_FDTYPE_VNODE), (4, system._PROX_FDTYPE_SOCKET), (5, system._PROX_FDTYPE_VNODE), (6, 1)]
+    files = {
+        3: bytes(system._SOCKET) + vnode_info_path(1, 100, b"/tmp/a.log"),
+        5: bytes(system._SOCKET) + vnode_info_path(1, 101, b""),  # a vnode without a path (a pipe...): dropped
+        6: bytes(system._SOCKET) + vnode_info_path(2, 7, b"/Volumes/Backup"),
+    }
+    folders = vnode_info_path(1, 200, b"/Users/me/project") + vnode_info_path(1, 2, b"/")  # pvi_cdir, pvi_rdir
+
+    class Lib(_Proc):
+        def proc_pidinfo(self, pid, flavor, argument, buffer, size):
+            if flavor == system._PROC_PIDLISTFDS:
+                if buffer is None:
+                    return len(descriptors) * ctypes.sizeof(system._FDInfo)
+                for index, (fd, kind) in enumerate(descriptors):
+                    buffer[index] = system._FDInfo(fd, kind)
+                return len(descriptors) * ctypes.sizeof(system._FDInfo)
+            assert flavor == system._PROC_PIDVNODEPATHINFO and size == system._FOLDERS_INFO_SIZE
+            ctypes.memmove(buffer, folders, len(folders))
+            return len(folders)
+
+        def proc_pidpath(self, pid, buffer, size):
+            buffer.value = b"/usr/bin/python3"
+            return len(buffer.value)
+
+    assert system._files(Lib(files), 42) == [
+        system._Opened("/tmp/a.log", (1, 100)),
+        system._Opened("/Volumes/Backup", (2, 7)),
+        system._Opened("/Users/me/project", (1, 200)),  # the working folder, not the root
+        system._Opened("/usr/bin/python3", None),
+    ]
