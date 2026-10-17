@@ -145,7 +145,8 @@ kept inside the folder it zips is written in place); tags set on the old
 archive itself don't carry over. When unzipping would
 write over files already in the destination, say whether to replace them:
 `overwrite=False` raises `FileExistsError` before anything is unzipped (or
-`ValueError` when the archive's list of files can't be read to check), and
+`ValueError` when the destination has files and the archive's list of files
+can't be read to check them against), and
 `overwrite=True` replaces them. Left out, they're replaced with a
 `DeprecationWarning`, as pymacos 2.0 will refuse by default:
 

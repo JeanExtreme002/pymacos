@@ -965,8 +965,8 @@ def extract(archive: PathLike, destination: Optional[PathLike] = None, *, overwr
     A file of the archive whose name is already taken in ``destination`` is
     written over it, unlike double-clicking (which picks another name):
     ``overwrite=False`` raises :class:`FileExistsError` instead, before
-    anything is unzipped (:class:`ValueError` when the archive's list of
-    files can't be read to check), and ``overwrite=True`` replaces them. Say
+    anything is unzipped (:class:`ValueError` when the destination has files
+    and the archive's list of files can't be read to check them against), and ``overwrite=True`` replaces them. Say
     which you want: today they're replaced unless told otherwise, and pymacos
     2.0 will refuse by default, so replacing a file without ``overwrite=True``
     warns (``DeprecationWarning``).

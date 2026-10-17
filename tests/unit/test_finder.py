@@ -249,7 +249,8 @@ def test_finder_compress_into_the_folder_it_zips_writes_in_place(fake_run, tmp_p
     link.symlink_to(folder / "Linked.zip")
     macos.finder.compress(folder, link)
     assert fake_run.args[-1] == str(link)
-    if sys.platform == "darwin":
+    # By the disk, not sys.platform, which fake_run sets to darwin: Linux's disks tell case apart.
+    if (tmp_path / "PROJECT").exists():
         macos.finder.compress(folder, tmp_path / "project" / "Other.zip")
         assert fake_run.args[-1] == str(tmp_path / "project" / "Other.zip")
 
