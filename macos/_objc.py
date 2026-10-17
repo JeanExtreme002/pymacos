@@ -225,7 +225,7 @@ def file_url(path: "os.PathLike[str] | str") -> int:
     except UnicodeEncodeError:
         # A name that isn't UTF-8 (a network volume's), which an NSString can't hold: by its bytes,
         # as a CFURL, which is an NSURL too.
-        return send(_cf.file_url(os.path.abspath(text)), "autorelease")
+        return send(_cf.file_url(os.path.abspath(text), directory=os.path.isdir(text)), "autorelease")
 
 
 def error_message(error: ctypes.c_void_p, default: Optional[str] = "unknown error") -> Optional[str]:
@@ -466,7 +466,7 @@ def _define_class(name: str, methods: Any, protocols: Sequence[str]) -> int:
         return int(existing)
     implementations = []
     for selector, (types, function_type, function) in methods.items():
-        # A Ctrl-C inside it isn't lost, and neither it nor an error answers garbage.
+        # A Ctrl-C inside it isn't lost, and neither an error nor (on the main thread) a Ctrl-C answers garbage.
         empty = _empty_answer(function_type)
         answer = partial(_constant, empty)  # this method's, bound now: not the loop's last
         implementation = function_type(_cf.callback(_answering_empty_on_error(function, function_type, empty), answer))

@@ -467,21 +467,29 @@ def test_schedule_doesnt_take_a_name_spelled_otherwise_for_a_job(fake_run, home)
     # remove() would delete Backup's file and leave the job pymacos.Backup loaded, out of jobs()' sight.
     # It only unloads a pymacos.backup an older version may have left loaded without a file.
     assert macos.schedule.remove("backup") is False
-    assert [call["args"] for call in fake_run.calls] == [["launchctl", "bootout", "gui/501/pymacos.backup"]]
+    told = [call["args"] for call in fake_run.calls if call["args"][1] != "print-disabled"]
+    assert told == [["launchctl", "bootout", "gui/501/pymacos.backup"]]
     assert [job.name for job in macos.schedule.jobs()] == ["Backup"]
     assert macos.schedule.remove("Backup") is True
 
 
-def test_schedule_takes_a_file_spelled_otherwise_with_its_label_for_its_own(fake_run, home):
+def test_schedule_remove_unloads_a_job_an_older_version_left_without_a_file(fake_run, home, monkeypatch):
     agents = home / "Library" / "LaunchAgents"
+    # What adding "backup", then "Backup" did before: Backup's file (pymacos.Backup.plist, its label
+    # pymacos.Backup) where backup's was, and pymacos.backup still loaded, here paused too.
     macos.schedule.add("Backup", home / "backup.py", every=60)
     if not (agents / "pymacos.backup.plist").exists():
         pytest.skip("this disk tells case apart: the names have files of their own")
-    # As an older version could leave it: the file spelled "backup", its label "pymacos.Backup".
-    (agents / "pymacos.Backup.plist").rename(agents / "pymacos.backup.plist")
-    assert macos.schedule.get("Backup").name == "Backup"
-    assert macos.schedule.remove("Backup") is True
-    assert not list(agents.iterdir())
+    monkeypatch.setattr(macos.schedule, "_paused", lambda **kwargs: ["backup"])
+    fake_run.calls.clear()
+
+    assert macos.schedule.remove("backup") is False
+    # Unloaded and its pause lifted, as remove() does for any job; Backup's file is left alone.
+    assert [call["args"] for call in fake_run.calls] == [
+        ["launchctl", "bootout", "gui/501/pymacos.backup"],
+        ["launchctl", "enable", "gui/501/pymacos.backup"],
+    ]
+    assert [path.name for path in agents.iterdir()] == ["pymacos.Backup.plist"]
 
 
 def test_schedule_doesnt_take_a_prefix_or_extension_spelled_otherwise_for_another_name(fake_run, home):

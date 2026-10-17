@@ -623,7 +623,7 @@ def rotate(source: PathLike, output: PathLike, degrees: int) -> Path:
     phones do, so it's fast and lossless.
     """
     # A string would be formatted with 90 ("%d" % 90 is "90"), or fail to be ("not all arguments converted").
-    if isinstance(degrees, (str, bytes)):
+    if isinstance(degrees, (str, bytes, bytearray)):
         raise TypeError("degrees must be a number, a multiple of 90, not {!r}".format(degrees))
     try:
         uneven = degrees % 90

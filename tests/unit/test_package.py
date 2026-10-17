@@ -245,9 +245,12 @@ def test_each_native_function_is_declared_in_one_module():
     declared = defaultdict(set)
     for path in sorted(Path(macos.__file__).parent.glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            if isinstance(node, ast.AnnAssign) and node.value is not None:  # signatures: Dict[...] = {...}
+                target = node.target
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+            else:
                 continue
-            target = node.targets[0]
             # lib.CGImageRelease.argtypes = ..., and getattr(lib, "CGImageRelease").restype = ...
             if isinstance(target, ast.Attribute) and target.attr in ("argtypes", "restype"):
                 function = target.value

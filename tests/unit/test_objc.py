@@ -87,6 +87,7 @@ def test_objc_method_interrupted_answers_zero_and_keeps_the_ctrl_c():
                     _cf.raise_interrupt()
     finally:
         sys.unraisablehook = hook
+        _cf._interrupt.error = None  # a failed assert above mustn't leave a Ctrl-C for the next test to get
     assert reported == []  # ctypes reports an answer it can't convert ("Exception ignored on converting result")
 
 
