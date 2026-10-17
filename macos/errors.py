@@ -59,6 +59,15 @@ class CommandError(MacOSError):
             message += ": " + self.stderr
         return message
 
+    def __repr__(self) -> str:
+        # The command's name only, as in str(): the default repr would print self.args, that is the
+        # whole command line, and the arguments can hold a URL with a token, a dialog's default text,
+        # a notification... which a traceback or a log line mustn't show. ``cmd`` keeps them for
+        # whoever asks for them. ``stderr`` stays as the command wrote it, and may quote one.
+        return "{}({!r}, returncode={!r}, stderr={!r})".format(
+            type(self).__name__, self.cmd[0], self.returncode, self.stderr
+        )
+
 
 class CommandTimeoutError(MacOSError, TimeoutError):
     """A system command the package relies on was still running when its time ran out, and was stopped."""
@@ -70,6 +79,10 @@ class CommandTimeoutError(MacOSError, TimeoutError):
 
     def __str__(self) -> str:
         return "{!r} didn't finish within {:g} seconds".format(self.cmd[0], self.timeout)
+
+    def __repr__(self) -> str:
+        # Not the arguments: see CommandError.
+        return "{}({!r}, timeout={!r})".format(type(self).__name__, self.cmd[0], self.timeout)
 
 
 class PromptTimeoutError(MacOSError, TimeoutError):
