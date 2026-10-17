@@ -31,6 +31,14 @@ class CFRange(ctypes.Structure):
 kCFStringEncodingUTF8 = 0x08000100
 
 
+class NotPropertyListError(MacOSError, ValueError):
+    """
+    macOS handed over a value that isn't a property list (a third-party driver's property, say): it can't be converted.
+
+    A :class:`ValueError` too, as :func:`to_python` raised before it was one of the package's errors.
+    """
+
+
 @lru_cache(maxsize=None)
 def lib() -> ctypes.CDLL:
     cf = framework("CoreFoundation")
@@ -320,7 +328,9 @@ def to_python(ref: Optional[int]) -> Any:
         return None
     with owned(lib().CFPropertyListCreateData(None, ref, _BINARY_PLIST, 0, None)) as data:
         if not data:
-            raise ValueError("not a property list")
+            # A MacOSError: the callers (the IORegistry, the dynamic store...) promise one for what macOS
+            # gives them, and this value is macOS's; from_python() keeps a plain ValueError for the caller's own.
+            raise NotPropertyListError("not a property list")
         return plistlib.loads(to_bytes(data))
 
 

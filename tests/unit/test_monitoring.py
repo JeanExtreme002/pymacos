@@ -56,6 +56,7 @@ def test_disk_health(monkeypatch):
     monkeypatch.setattr(system, "require_macos", lambda: None)
 
     def diskutil(args, **kwargs):
+        assert kwargs["timeout"]  # a failing disk that never answers mustn't hang disk_health()
         return plistlib.dumps(answers[(args[1],) if args[1] == "list" else (args[1], args[3])]).decode()
 
     monkeypatch.setattr(system, "_run", diskutil)
