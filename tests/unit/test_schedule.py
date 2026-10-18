@@ -17,6 +17,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: 501, raising=False)
     script = tmp_path / "backup.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # only yours, whatever the umask: no warning about other users
     return tmp_path
 
 
@@ -526,6 +527,7 @@ def test_schedule_warns_when_other_users_could_change_the_script(fake_run, home)
     shared.chmod(0o777)  # writable by anyone, no sticky bit: the script could be swapped
     script = shared / "job.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # whatever the umask: only the folder is open to others
     with pytest.warns(RuntimeWarning, match="other users may replace what's in"):
         macos.schedule.add("swapped", script, every=60)
 
@@ -546,6 +548,7 @@ def test_schedule_trusts_folders_only_the_admin_group_may_write_in(monkeypatch, 
 
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # whatever the umask
     real_stat = os.stat
 
     def stat_as(gid):

@@ -144,11 +144,15 @@ def _handler(image: Image) -> int:
     return _objc.send(handler, "autorelease")
 
 
-def _request(languages: Optional[Sequence[str]], fast: bool) -> int:
+def _check_languages(languages: Optional[Sequence[str]]) -> None:
     # A string is a sequence too: "zh-Hans" would go as seven one-letter codes, which Vision
     # ignores without a word, reading the text as English.
     if isinstance(languages, str):
         raise TypeError("languages takes a list of codes, e.g. [{!r}], not a string".format(languages))
+
+
+def _request(languages: Optional[Sequence[str]], fast: bool) -> int:
+    _check_languages(languages)
     request = _objc.send(_objc.send(_objc.cls("VNRecognizeTextRequest"), "alloc"), "init")
     request = _objc.send(request, "autorelease")
     _objc.send(request, "setRecognitionLevel:", _FAST if fast else _ACCURATE, argtypes=(NSInteger,), restype=None)
@@ -264,6 +268,7 @@ def lines(image: Image, *, languages: Optional[Sequence[str]] = None, fast: bool
     An input that isn't an image raises ``ValueError`` (``IsADirectoryError``
     for a folder).
     """
+    _check_languages(languages)  # before the frameworks load
     _load()
     found: List[Any] = []
     with _objc.autorelease_pool():
@@ -312,6 +317,7 @@ def _picture_words(
     No image file in between: encoding a page as PNG for Vision to decode it
     again is most of the work for a large page.
     """
+    _check_languages(languages)  # before the frameworks load
     _load()
     framework("CoreImage")
     with _objc.autorelease_pool():
@@ -353,6 +359,7 @@ def _occurrences(
     The box surrounds the matching characters only, not the whole line, as
     fractions of the image from its top-left corner.
     """
+    _check_languages(languages)  # before the frameworks load
     _load()
     found = []
     with _objc.autorelease_pool():

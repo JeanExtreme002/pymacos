@@ -98,7 +98,11 @@ def _carry_metadata(source: Path, destination: Path) -> Iterator[None]:
         return
     from . import _libc
 
-    libc = _xattr_lib()
+    try:
+        libc = _xattr_lib()
+    except OSError:  # no libSystem to load: nothing can be carried, and the save still goes ahead
+        yield
+        return
     old, new = os.fsencode(str(source)), os.fsencode(str(destination))
     size = libc.listxattr(old, None, 0, _XATTR_NOFOLLOW)
     names = ctypes.create_string_buffer(max(size, 1))

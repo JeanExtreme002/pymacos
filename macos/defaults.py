@@ -48,7 +48,7 @@ def _as_int(value: object, fallback: _T) -> Union[int, _T]:
     return fallback if number is None else int(number)
 
 
-def _as_bool(value: object, fallback: bool) -> bool:
+def _as_bool(value: object, fallback: _T) -> Union[bool, _T]:
     """
     ``value`` as macOS reads a yes-or-no preference (``CFPreferencesGetAppBooleanValue``), or ``fallback``.
 

@@ -268,6 +268,7 @@ def test_save_writes_text_as_utf8_and_drops_pictures_the_format_cant_hold(monkey
 
     monkeypatch.setattr(document._objc, "send", send)
     monkeypatch.setattr(document._objc, "nsstring", lambda value: value)
+    monkeypatch.setattr(document._objc, "cls", lambda name: name)
     monkeypatch.setattr(document._objc, "nsdictionary_of", lambda options: made.update(options) or 7)
     monkeypatch.setattr(document._objc, "pybytes", lambda data: b"x")
     monkeypatch.setattr(document, "_without_attachments", lambda document: "stripped")

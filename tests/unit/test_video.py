@@ -522,6 +522,7 @@ def test_frames_gif_and_reverse_stop_at_the_pictures_end(monkeypatch, tmp_path):
         image, "_io", lambda: SimpleNamespace(CGImageDestinationAddImage=nothing, CGImageDestinationSetProperties=nothing)
     )
     monkeypatch.setattr(image, "_write", lambda target, kind, add, count: add(0) or target)
+    monkeypatch.setattr(video._cf, "from_python", lambda value: None)  # the loop count: Core Foundation
     video.to_gif("clip.mov", tmp_path / "clip.gif", start=0.5, duration=1.0)
     assert asked[-1][:5] == [pytest.approx(moment) for moment in (0.5, 0.6, 0.7, 0.8, 0.9)]
     assert asked[-1][5:] == [0.999] * 5

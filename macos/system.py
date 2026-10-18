@@ -1010,7 +1010,11 @@ def measurement_units() -> str:
     if metric is None:
         return _locale_measurement()
     # Text that isn't a yes or no (a hand edit) counts as unset: the region decides.
-    return "metric" if _as_bool(metric, _locale_measurement() == "metric") else "us"
+    # Read as one, the region isn't asked at all.
+    chosen = _as_bool(metric, None)
+    if chosen is None:
+        return _locale_measurement()
+    return "metric" if chosen else "us"
 
 
 def set_measurement_units(units: str) -> None:
