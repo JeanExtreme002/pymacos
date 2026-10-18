@@ -49,8 +49,10 @@ def test_an_unreadable_file_is_a_permission_error(objc, tmp_path):
     try:
         if os.access(locked, os.R_OK):
             pytest.skip("this user reads any file (root)")
-        with pytest.raises(macos.PermissionDeniedError, match="cannot read"):
+        with pytest.raises(PermissionError) as raised:
             _media.asset(locked)
+        # Python's own, as image and pdf raise: PermissionDeniedError is for a privacy permission.
+        assert not isinstance(raised.value, macos.MacOSError)
     finally:
         locked.chmod(0o600)
     # One that opens but isn't media, or a folder, is still a ValueError.
@@ -107,7 +109,8 @@ def test_editing_keeps_every_tracks_language_group_and_state(objc):
 
 def test_editing_media_of_no_known_length_fails(objc):
     objc.answers["duration"] = _media.CMTime(0, 0, 0, 0)  # flags without kCMTimeFlags_Valid
-    with pytest.raises(macos.MacOSError, match="could not read the media"):
+    objc.answers["insertTimeRange:ofAsset:atTime:error:"] = lambda *args: pytest.fail("inserted media of no known length")
+    with pytest.raises(macos.MacOSError, match="could not read the media: it has no known length"):
         _media.editable(1)
 
 
@@ -163,3 +166,55 @@ def test_export_keeps_the_sources_metadata(objc, monkeypatch, tmp_path):
     objc.sent.clear()
     _media.export(5, tmp_path / "out.mov")
     assert not [entry for entry in objc.sent if entry[1] == "setMetadata:"]
+
+
+def test_editing_for_a_re_encode_leaves_every_track_on(objc):
+    """The re-encoding exporter leaves a track that's off out: speed() and crop() dropped a video's second language."""
+    media, edited, french, copy_french, segment = 1, 2, 11, 21, 31
+    kinds = {(media, "soun"): [french], (edited, "soun"): [copy_french]}
+    objc.answers.update(
+        {
+            "composition": edited,
+            "insertTimeRange:ofAsset:atTime:error:": True,
+            "duration": _media.time(2),
+            "tracksWithMediaType:": lambda receiver, kind: kinds.get((receiver, kind), []),
+            "trackID": lambda track, *args: track,
+            "segments": [segment],
+            "isEmpty": False,
+            "sourceTrackID": french,
+            "isEnabled": False,
+            "alternateGroupID": 1,
+            "extendedLanguageTag": "fr",
+        }
+    )
+    assert _media.editable(media, keep_state=False) == edited
+    assert _flags(objc.sent, copy_french) == [("setExtendedLanguageTag:", "fr")]  # the language only
+    objc.sent.clear()
+    _media.editable(media)
+    assert _flags(objc.sent, copy_french)[:2] == [("setEnabled:", False), ("setAlternateGroupID:", 1)]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+def test_a_fifo_is_not_media_and_doesnt_wait_for_a_writer(objc, tmp_path):
+    """open() on a FIFO waits for a writer: the readability check would hang for good."""
+    import threading
+
+    objc.answers.update({"URLAssetWithURL:options:": 1, "isPlayable": False})
+    fifo = tmp_path / "pipe"
+    os.mkfifo(str(fifo))
+    raised = []
+
+    def read():
+        try:
+            _media.asset(fifo)
+        except ValueError as error:
+            raised.append(error)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(5)
+    if reader.is_alive():
+        os.close(os.open(str(fifo), os.O_WRONLY | os.O_NONBLOCK))  # let the stuck open() return
+        reader.join(5)
+        pytest.fail("asset() waited on the FIFO for a writer")
+    assert raised and "not a video or sound" in str(raised[0])

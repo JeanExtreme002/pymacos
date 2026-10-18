@@ -7,13 +7,14 @@ compositions, and exporting them to a file.
 
 import ctypes
 import math
+import os
 from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 
 from . import _files, _objc
 from ._system import framework
-from .errors import MacOSError, PermissionDeniedError, WaitTimeoutError
+from .errors import MacOSError, WaitTimeoutError
 
 TIMESCALE = 600  # the usual movie timescale: exact for 24, 25, 30 and 60 fps
 _VALID = 1  # kCMTimeFlags_Valid
@@ -66,14 +67,12 @@ def asset(path: Path, kind: str = "video or sound") -> int:
         _objc.cls("AVURLAsset"), "URLAssetWithURL:options:", _objc.file_url(path), None, argtypes=(_objc.id, _objc.id)
     )
     if not found or not _objc.send(found, "isPlayable", restype=_objc.BOOL):
-        # A file that can't be read isn't playable either: say so, not that its format is wrong. open(), not
-        # os.access(): the folders privacy protects (Desktop, Documents...) pass the permission bits.
-        try:
+        # A file that can't be read isn't playable either: Python's own PermissionError says so, as image and
+        # pdf do, not that its format is wrong. open(), not os.access(): the folders privacy protects
+        # (Desktop, Documents...) pass the permission bits. Only a file: a folder isn't media, as below, and
+        # a FIFO's open would wait for a writer.
+        if os.path.isfile(path):
             open(path, "rb").close()
-        except PermissionError as error:
-            raise PermissionDeniedError("cannot read {}".format(path)) from error
-        except OSError:
-            pass  # a folder, say: not a media file, as below
         raise ValueError("{} is not a {} macOS can play".format(path, kind))
     return found
 
@@ -149,21 +148,27 @@ def copy_track(target: int, track: int, kind: str, until: float) -> int:
     return copy
 
 
-def keep_settings(copy: int, track: int) -> None:
+def keep_settings(copy: int, track: int, state: bool = True) -> None:
     """
     Give the composition track ``copy`` the language, alternate group and on/off state of ``track``.
 
     A new track is on, in no language and no group: a film's second
     language (or its commentary) would otherwise play over the first.
+    ``state=False`` copies the language only, for an export that re-encodes:
+    it leaves a track that's off out of the file, and puts every track in
+    no group.
     """
-    _objc.send(copy, "setEnabled:", _objc.send(track, "isEnabled", restype=_objc.BOOL), argtypes=(_objc.BOOL,), restype=None)
-    _objc.send(
-        copy,
-        "setAlternateGroupID:",
-        _objc.send(track, "alternateGroupID", restype=ctypes.c_int32),
-        argtypes=(ctypes.c_int32,),
-        restype=None,
-    )
+    if state:
+        _objc.send(
+            copy, "setEnabled:", _objc.send(track, "isEnabled", restype=_objc.BOOL), argtypes=(_objc.BOOL,), restype=None
+        )
+        _objc.send(
+            copy,
+            "setAlternateGroupID:",
+            _objc.send(track, "alternateGroupID", restype=ctypes.c_int32),
+            argtypes=(ctypes.c_int32,),
+            restype=None,
+        )
     # Only ever the tag ("fr-CA"): the exporter fills the three-letter code from it. A code copied onto the
     # track would outlive a tag a caller sets later, and an English code on a track relabelled Spanish
     # makes players that go by the code call it English. An older file with only a code ("eng") gets
@@ -196,15 +201,17 @@ def ignore_completion() -> int:
     return _objc.block(lambda: None, b"v@?")
 
 
-def editable(media: int) -> int:
+def editable(media: int, keep_state: bool = True) -> int:
     """
     An autoreleased ``AVMutableComposition`` with every track of an asset, to edit.
 
     The video tracks keep the asset's ``preferredTransform``: a video marked
     to play turned (a portrait phone video, :func:`macos.video.rotate`'s
     output) still does, and what's done to the composition composes with it.
-    Every track keeps its language, alternate group and on/off state, and
-    the whole length is kept, to the sample.
+    Every track keeps its language, and the whole length is kept, to the
+    sample. Each keeps its alternate group and on/off state too, unless
+    ``keep_state`` is false: pass that for an export that re-encodes, which
+    drops a track that's off (a second language) and every group anyway.
     """
     # The asset's own duration, not one rounded to the 1/600 s TIMESCALE: that would cut the last samples.
     length = _objc.send(media, "duration", restype=CMTime)
@@ -242,7 +249,7 @@ def editable(media: int) -> int:
             if kind == "vide":
                 turn = _objc.send(source, "preferredTransform", restype=_objc.CGAffineTransform)
                 _objc.send(copy, "setPreferredTransform:", turn, argtypes=(_objc.CGAffineTransform,), restype=None)
-            keep_settings(copy, source)
+            keep_settings(copy, source, keep_state)
     return edited
 
 
@@ -266,7 +273,9 @@ def export(
     only the first seconds: the time stretcher pads the sound with silence.
     ``source`` is the asset a composition was made from: the output keeps
     its metadata (the date it was shot, where, the camera...), which a
-    composition has none of. Keep it alive until this returns.
+    composition has none of. All of it in the source's own kind of file;
+    from a .mov to an .mp4 or back, only what the output can hold (the date
+    and place, mostly). Keep it alive until this returns.
     """
     extension = output.suffix.lower()
     if extension not in FILE_TYPES:

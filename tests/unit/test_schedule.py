@@ -799,11 +799,23 @@ def test_schedule_writes_the_replaced_plist_back_only_you_may_write(fake_run, ho
 
     macos.schedule.add("backup", home / "backup.py", every=3600)
     path = home / "Library/LaunchAgents/pymacos.backup.plist"
-    path.chmod(0o664)
-    _failing_bootstrap(monkeypatch, fake_run)
+    _failing_bootstrap(monkeypatch, fake_run, fail=False)
+    write_plist = macos.schedule._write_plist
+    writes = []
 
-    with pytest.raises(macos.errors.CommandError):
-        macos.schedule.add("backup", home / "backup.py", every=60)
+    def full_disk(target, plist):
+        writes.append(target)
+        if len(writes) == 1:  # the new job's, after the old plist was deleted
+            raise OSError(28, "No space left on device")
+        write_plist(target, plist)
+
+    monkeypatch.setattr(macos.schedule, "_write_plist", full_disk)
+    old = os.umask(0o002)  # the old plist is put back as a new file: 0o664, which launchd refuses
+    try:
+        with pytest.raises(OSError, match="No space left"):
+            macos.schedule.add("backup", home / "backup.py", every=60)
+    finally:
+        os.umask(old)
 
     assert _plist(home, "backup")["StartInterval"] == 3600
     assert stat.S_IMODE(path.stat().st_mode) == 0o644

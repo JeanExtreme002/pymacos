@@ -506,6 +506,17 @@ def test_wait_for_text(monkeypatch):
     assert scans == [0.0, 0.4]
 
 
+def test_a_string_of_languages_is_refused_before_the_screenshot(monkeypatch):
+    # Not after it: without Screen Recording, the caller would be told to grant a permission for a typo.
+    monkeypatch.setattr(screen, "_area", lambda *args: pytest.fail("checked before the area"))
+    monkeypatch.setattr(screen, "screenshot", lambda *args, **kwargs: pytest.fail("checked before the screenshot"))
+    with pytest.raises(TypeError, match="languages takes a list"):
+        screen.find_text("OK", languages="en-US")
+    monkeypatch.setattr(screen, "find_text", lambda *args, **kwargs: pytest.fail("checked before the first look"))
+    with pytest.raises(TypeError, match="languages takes a list"):
+        screen.wait_for_text("OK", languages="en-US")
+
+
 def test_find_text_argument_checks():
     with pytest.raises(ValueError, match="empty"):
         screen.find_text("  ")

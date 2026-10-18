@@ -326,6 +326,16 @@ def current_tab(app: Optional[str] = None) -> Optional[Tab]:
     return None
 
 
+def _host_and_port(scheme: str, url: str) -> bool:
+    """
+    Whether what urlsplit read as ``url``'s scheme is a host followed by a port: ``"localhost:3000/"``, ``"example.com:8080"``.
+
+    A real scheme may be followed by digits too (``"tel:555"``): only a name with a dot, or
+    ``localhost``, before the port is taken for a host.
+    """
+    return url[len(scheme) + 1 :][:1].isdigit() and (scheme.lower() == "localhost" or "." in scheme)
+
+
 def open(url: str, app: Optional[str] = None) -> None:
     """
     Open ``url`` in a new tab and bring the browser to the front.
@@ -334,13 +344,15 @@ def open(url: str, app: Optional[str] = None) -> None:
     the default browser, and raises :class:`~macos.errors.AppNotFoundError`
     when macOS has none. To open a URL in whatever handles it, see :func:`macos.open`.
     A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option;
-    so does one with no scheme (``"example.com"``, not ``"https://example.com"``). A browser
+    so does one with no scheme (``"example.com"`` or ``"localhost:3000"``, not ``"https://example.com"``),
+    a file path among them: pass ``pathlib.Path(path).as_uri()`` for a local page. A browser
     given with ``app`` that isn't installed raises :class:`~macos.errors.AppNotFoundError`.
     """
     if url.startswith("-"):
         # `open` has no "--": "-g" or "-F" would be one of its options, not a URL.
         raise ValueError("url must not start with '-', not {!r}".format(url))
-    if not urlsplit(url).scheme:
+    scheme = urlsplit(url).scheme
+    if not scheme or _host_and_port(scheme, url):
         # `open` would take it for a file in the current directory, and quote its path (the URL,
         # token and all) in its error. The URL stays out of this message too.
         raise ValueError("url must have a scheme, such as https://")

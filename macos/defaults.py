@@ -54,8 +54,9 @@ def _as_bool(value: object, fallback: _T) -> Union[bool, _T]:
 
     One written without ``-bool`` (``defaults write ... Key NO``) is the text ``'NO'``, which
     Python's ``bool()`` takes for true: ``'yes'``/``'true'`` and ``'no'``/``'false'`` (any case)
-    and numbers, as text or not, count; anything else (other text, a list) is ``fallback``, as if
-    the preference weren't set.
+    and numbers, as text or not, count (a real number is true unless it's zero, numeric text by
+    its whole part; NaN and inf are ``fallback``); anything else (other text, a list) is
+    ``fallback``, as if the preference weren't set.
     """
     if isinstance(value, bool):
         return value
@@ -65,7 +66,11 @@ def _as_bool(value: object, fallback: _T) -> Union[bool, _T]:
             return True
         if word in ("no", "false"):
             return False
-    number = _as_float(value, None) if isinstance(value, (str, int, float)) else None
+    if isinstance(value, (int, float)):
+        # A real number is true unless it's zero, as CF and NSNumber read it: 0.5 too. Only
+        # NaN and inf (which CF takes for true) stay the fallback, as for every number read here.
+        return fallback if isinstance(value, float) and not math.isfinite(value) else value != 0
+    number = _as_float(value, None) if isinstance(value, str) else None
     return fallback if number is None else int(number) != 0  # CF reads text by its whole part: "0.5" is false
 
 

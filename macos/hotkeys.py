@@ -118,18 +118,13 @@ _calling = threading.local()
 
 def _combination(keys: str) -> Tuple[int, int]:
     """The key code and modifier flags of a shortcut such as ``"cmd+shift+k"``."""
-    if not keys.strip():
-        raise ValueError("a shortcut needs a key, such as 'cmd+shift+k' or 'f5'")
-    try:
-        modifiers, code, shifted = keyboard._parse(keys)
-    except ValueError as error:
-        if "type()" not in str(error):
-            raise
-        # A character the layout has no key for: the advice to type() it is for keyboard.press.
-        raise ValueError(
-            "{!r} has a character no key types on this keyboard layout: pick a key it has, or a name "
-            "such as 'f5'".format(keys)
-        ) from None
+    # The parser's own advice names press() and type(), which are for keyboard.press: give a shortcut's.
+    modifiers, code, shifted = keyboard._parse(
+        keys,
+        empty="a shortcut needs a key, such as 'cmd+shift+k' or 'f5'",
+        no_key="{keys!r} has a character no key types on this keyboard layout: pick a key it has, or a name "
+        "such as 'f5'",
+    )
     if code in _NO_KEY_DOWN:
         # A modifier pressed on its own, or Caps Lock, is a flags change to macOS, not a key press:
         # the tap, which listens to key presses, would never see it, and the shortcut would never fire.

@@ -81,6 +81,10 @@ def _load_file(path: Path) -> int:
         player, "initWithContentsOfFile:byReference:", _objc.nsstring(str(path)), False, argtypes=(_objc.id, BOOL)
     )
     if not player:
+        # A file that can't be read: Python's own PermissionError, as image, pdf and video raise, not a
+        # format it can't play. Only a file: a FIFO's open would wait for a writer.
+        if path.is_file():
+            open(path, "rb").close()
         raise ValueError("{} is not an audio file macOS can play".format(path))
     return player
 

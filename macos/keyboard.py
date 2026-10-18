@@ -379,7 +379,8 @@ def _parse(
             if char in layout:
                 code, shifted = layout[char]
                 return modifiers, code, shifted
-        if layout is _us_jis_layout():
+        # Only the characters JIS moves: one no layout like US has (an "é") is a ValueError, as on any keyboard.
+        if layout is _us_jis_layout() and (key in _JIS_MOVED or key.lower() in _JIS_MOVED):
             raise MainThreadError(
                 "a Japanese (JIS) keyboard types {!r} on another key than a US one: call "
                 "macos.keyboard.layout() once from the main thread first, so other threads know it".format(key)

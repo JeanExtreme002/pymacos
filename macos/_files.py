@@ -184,13 +184,16 @@ def replacing(target: Path) -> Iterator[Path]:
             replaced = True
         except FileNotFoundError:
             mode, replaced = _default_mode(folder), False
-        os.chmod(str(temporary), mode)
         if not replaced:
+            os.chmod(str(temporary), mode)
             os.replace(str(temporary), str(target))
         else:
-            # The access list goes on once the new file is in place, after the chmod too: an
-            # entry that denies changing the permissions, or deleting the file, mustn't stop either.
+            # The extended attributes go on before the chmod, while the staged file can still be
+            # written: an old file that was read-only would have them all refused. The access
+            # list once the new file is in place, after the chmod too: an entry that denies
+            # changing the permissions, or deleting the file, mustn't stop either.
             with _carry_metadata(target, temporary):
+                os.chmod(str(temporary), mode)
                 os.replace(str(temporary), str(target))
     finally:
         shutil.rmtree(folder, ignore_errors=True)

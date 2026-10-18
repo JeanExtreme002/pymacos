@@ -669,6 +669,19 @@ def test_a_worker_on_a_jis_keyboard_refuses_the_characters_it_types_elsewhere(mo
         assert isinstance(error, macos.MainThreadError) and "JIS" in str(error), keys
 
 
+def test_a_worker_on_a_jis_keyboard_still_says_no_key_types_a_character_no_us_like_layout_has(monkeypatch):
+    # "é" isn't one JIS moves: calling layout() on the main thread wouldn't help, type() would.
+    monkeypatch.setattr(macos.keyboard, "_layout", macos.keyboard._us_jis_layout)
+    with pytest.raises(macos.MainThreadError, match="JIS"):
+        macos.keyboard._parse("[")
+    with pytest.raises(macos.MainThreadError, match="JIS"):
+        macos.keyboard._parse("cmd+{")  # a shifted one JIS moves too
+    with pytest.raises(ValueError, match=r"no key types '\u00e9' on this keyboard layout; use type\(\) for text"):
+        macos.keyboard._parse("\u00e9")
+    with pytest.raises(ValueError, match="no key types on this keyboard layout: pick a key it has"):
+        macos.hotkeys.register("cmd+\u00e9", lambda: None)
+
+
 def test_jis_layout_type_is_read_from_the_keyboard_kind(monkeypatch):
     from types import SimpleNamespace
 

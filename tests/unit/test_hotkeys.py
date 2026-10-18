@@ -48,6 +48,17 @@ def test_shortcut_errors_speak_of_shortcuts_not_of_press(monkeypatch):
         hotkeys.register("hyper+k", lambda: None)
 
 
+def test_shortcut_errors_keep_their_wording_whatever_the_keyboard_module_says(monkeypatch):
+    # hotkeys hands the parser its own messages, rather than rewording keyboard's when they mention type().
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"k": (40, False)})
+    monkeypatch.setitem(macos.keyboard._parse.__kwdefaults__, "no_key", "no key types {key!r}; use write() for text")
+    monkeypatch.setitem(macos.keyboard._parse.__kwdefaults__, "empty", "write() needs a key")
+    with pytest.raises(ValueError, match="no key types on this keyboard layout: pick a key it has"):
+        hotkeys.register("cmd+\u00e9", lambda: None)
+    with pytest.raises(ValueError, match="a shortcut needs a key"):
+        hotkeys.register(" ", lambda: None)
+
+
 def test_a_callback_that_isnt_callable_is_refused_at_register(monkeypatch):
     # Not at the first press, from inside run(), which it would end.
     before = dict(hotkeys._registered)

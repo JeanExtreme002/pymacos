@@ -275,6 +275,7 @@ def find_text(
 
     if not text.strip():
         raise ValueError("text must not be empty")
+    vision._check_languages(languages)  # before the screenshot, and its permission check
     left, top, width, height = _area(region, display)
     shot = screenshot(region=region, display=None if region is not None else display)
     try:
@@ -309,6 +310,9 @@ def wait_for_text(
 
         macos.screen.wait_for_text("Export complete", timeout=120)
     """
+    from . import vision
+
+    vision._check_languages(languages)
     if not math.isfinite(interval) or interval <= 0:
         raise ValueError("interval must be a positive finite number, not {}".format(interval))
     if timeout is not None and math.isnan(timeout):  # never past its deadline: it would look forever

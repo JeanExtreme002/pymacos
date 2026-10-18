@@ -245,12 +245,20 @@ def file_url(path: Union[str, "os.PathLike[str]"]) -> int:
     Built from the bytes, not with ``fileURLWithPath:``, which decomposes accents (NFD): a file
     macOS creates at the URL would otherwise get another name than the one asked for. A name
     that isn't UTF-8 (a network volume's) works the same way.
+
+    Made absolute without :func:`os.path.abspath`: that drops ``link/..`` by name, where the
+    kernel goes to the parent of the link's target, so the URL would name another file than the
+    one Python checked. A NUL raises :class:`ValueError`, as ``os`` does: C would read the bytes
+    only up to it, and the URL would name a shorter path.
     """
     text = os.fspath(path)
+    raw = os.fsencode(text if os.path.isabs(text) else os.path.join(os.getcwd(), text))
+    if b"\0" in raw:
+        raise ValueError("embedded null byte")
     return send(
         cls("NSURL"),
         "fileURLWithFileSystemRepresentation:isDirectory:relativeToURL:",
-        os.fsencode(os.path.abspath(text)),
+        raw,
         os.path.isdir(text),
         None,
         argtypes=(ctypes.c_char_p, BOOL, id),

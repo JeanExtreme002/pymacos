@@ -565,7 +565,14 @@ class _StreamDescription(ctypes.Structure):
     ]
 
 
-_existing = _files.existing
+def _existing(path: PathLike) -> Path:
+    """``path`` made absolute; ``FileNotFoundError`` when nothing's there, ``PermissionError`` when it can't be read.
+
+    Checked here, not left to ``afconvert``, which says only "Couldn't open input file (-54)".
+    """
+    found = _files.existing(path)
+    _objc._readable(str(found))
+    return found
 
 
 @lru_cache(maxsize=None)
@@ -958,7 +965,7 @@ def speed(
     with tempfile.TemporaryDirectory() as folder, _encoding_to(
         target, channels, details.sample_rate, quality, lossless
     ) as write, _objc.autorelease_pool():
-        edited = _media.editable(_media.asset(original))
+        edited = _media.editable(_media.asset(original), keep_state=False)  # re-encoded: every track in the mix
         length = _media.duration(edited)
         # A second of silence after the sound, in each of its tracks, stretched along with it: the
         # time-pitch algorithm holds back the last stretch before the end of what it stretches, which

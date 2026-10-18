@@ -632,7 +632,7 @@ def speed(source: PathLike, output: PathLike, factor: float) -> Path:
     target = _target(output)
     with _objc.autorelease_pool():
         media = _media.asset(_existing(source))
-        edited = _media.editable(media)
+        edited = _media.editable(media, keep_state=False)  # re-encoded: a second language that's off would be lost
         length = _media.duration(edited)
         # Rounded to no time at all, the new length would leave the video as it was: not sped up, and no error.
         if length > 0 and _media.time(length / factor).value == 0:
@@ -717,7 +717,7 @@ def crop(source: PathLike, output: PathLike, box: Tuple[int, int, int, int]) -> 
     target = _target(output)
     with _objc.autorelease_pool():
         media = _media.asset(_existing(source))
-        edited = _media.editable(media)
+        edited = _media.editable(media, keep_state=False)  # re-encoded: a second language that's off would be lost
         videos = _media.tracks(edited, "vide")
         if not videos:
             raise ValueError("{} has no video to crop".format(source))

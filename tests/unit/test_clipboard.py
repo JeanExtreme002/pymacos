@@ -349,6 +349,67 @@ def test_wait_for_change_stops_at_the_timeout_while_concealed_copies_keep_coming
     assert clock.now < 3
 
 
+def _recopied_at_the_deadline(monkeypatch):
+    """A fake clipboard where the first copy is read past the deadline, and copied over while it's read."""
+    clipboard = macos.clipboard
+    clock = _Clock()
+    copies = {"count": 1}
+
+    def paste():
+        if copies["count"] == 2:
+            clock.now += 0.2  # a slow read, through the deadline
+            copies["count"] += 1  # and a second plain copy lands meanwhile
+            return "copy 2"
+        return "copy {}".format(copies["count"])
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        copies["count"] = max(copies["count"], 2)  # the first copy lands while it waits
+
+    monkeypatch.setattr(clipboard.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(clipboard.time, "sleep", sleep)
+    monkeypatch.setattr(clipboard, "change_count", lambda: copies["count"])
+    monkeypatch.setattr(clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(clipboard, "_is_sensitive", lambda: False)
+    monkeypatch.setattr(clipboard, "paste", paste)
+
+
+def test_wait_for_change_returns_a_copy_overwritten_at_the_deadline(monkeypatch):
+    # Two plain copies landed in time: "nothing was copied" would be wrong, and the newer one is there.
+    _recopied_at_the_deadline(monkeypatch)
+    assert macos.clipboard.wait_for_change(timeout=0.1, interval=0.01, include_sensitive=False) == "copy 3"
+
+
+def test_watch_yields_the_newer_copy_when_one_is_overwritten_at_the_deadline(monkeypatch):
+    _recopied_at_the_deadline(monkeypatch)
+    assert list(macos.clipboard.watch(timeout=0.1, interval=0.01, include_sensitive=False)) == ["copy 3"]
+
+
+@pytest.mark.parametrize(
+    "timeout, interval",
+    [(float("inf"), float("inf")), (1e300, float("inf")), (None, 1e300), (float("inf"), 1e300)],
+)
+def test_wait_for_change_and_watch_never_hand_time_sleep_a_value_it_overflows_on(monkeypatch, timeout, interval):
+    clipboard = macos.clipboard
+    clock = _Clock()
+    copies = {"count": 1}
+
+    def sleep(seconds):
+        if not seconds < 1e12:  # as time.sleep does, past what a C time value holds
+            raise OverflowError("timestamp too large to convert to C _PyTime_t")
+        clock.sleep(seconds)
+        copies["count"] += 1  # a copy lands while it waits
+
+    monkeypatch.setattr(clipboard.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(clipboard.time, "sleep", sleep)
+    monkeypatch.setattr(clipboard, "change_count", lambda: copies["count"])
+    monkeypatch.setattr(clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(clipboard, "paste", lambda: "copied")
+
+    assert clipboard.wait_for_change(timeout=timeout, interval=interval) == "copied"
+    assert next(clipboard.watch(timeout=timeout, interval=interval, include_sensitive=True)) == "copied"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

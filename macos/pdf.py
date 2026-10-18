@@ -656,6 +656,7 @@ def ocr(
     """
     from . import vision
 
+    vision._check_languages(languages)  # before any page is read: pages with text never reach Vision
     _files.existing(path)
     graphics, core_text = _graphics(), _core_text()
     with _open(path, password) as document:
@@ -1149,7 +1150,7 @@ def _check_position(position: Position) -> Position:
     if isinstance(position, str):
         if position in _CORNERS:
             return position
-    elif isinstance(position, Sequence) and len(position) == 2:
+    elif isinstance(position, (tuple, list)) and len(position) == 2:  # not bytes, a sequence of ints too
         if all(isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value) for value in position):
             return float(position[0]), float(position[1])
     raise ValueError("position must be one of {} or (x, y), not {!r}".format(", ".join(_CORNERS), position))

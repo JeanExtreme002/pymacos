@@ -43,6 +43,9 @@ __all__ = [
 _TYPE_STRING = "public.utf8-plain-text"  # NSPasteboardTypeString
 _TYPE_PNG = "public.png"  # NSPasteboardTypePNG
 _TYPE_TIFF = "public.tiff"  # NSPasteboardTypeTIFF
+# The longest one sleep of a wait: time.sleep overflows on an infinite or huge value, and an
+# infinite interval is fine with a deadline (the wait sleeps until it), even an infinite one.
+_LONGEST_SLEEP = 86400.0
 # The nspasteboard.org markers clipboard managers (Alfred, Raycast, Maccy,
 # Paste, 1Password's own...) honor: Concealed, don't show or store the
 # contents; Transient, don't keep them in the history. Their value is unused.
@@ -138,6 +141,7 @@ def wait_for_change(
     _check_wait(timeout, interval)
     start = change_count()
     deadline = None if timeout is None else time.monotonic() + timeout
+    last = False  # past the deadline, a copy overwritten while read: the newer one is read once more
     while True:
         # An app copies by clearing the clipboard, then writing to it, and the
         # clearing alone already bumps the change count: keep waiting while the
@@ -147,27 +151,32 @@ def wait_for_change(
             if count != start and not _is_empty():
                 break
             if deadline is None:
-                time.sleep(interval)
+                time.sleep(min(interval, _LONGEST_SLEEP))
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise WaitTimeoutError("nothing was copied within {}s".format(timeout))
             # Never sleep past the deadline, even with a long interval.
-            time.sleep(min(interval, remaining))
+            time.sleep(min(interval, remaining, _LONGEST_SLEEP))
         content = paste()
         if include_sensitive:
             return content
         skipped = _is_sensitive()
         recopied = change_count() != count
-        if not recopied and not skipped:
+        if not skipped and (not recopied or last):
             return content
         # The inner loop leaves before its deadline check when the count has
         # already moved: check it here, or a stream of copies would wait forever.
-        if deadline is not None and time.monotonic() >= deadline:
+        expired = deadline is not None and time.monotonic() >= deadline
+        if recopied and not last:
+            # Copied again while reading: read the newer copy instead (see watch).
+            # Something was copied in time, so past the deadline it's read once
+            # more and returned, however many copies follow: no timeout error.
+            last = expired
+            continue
+        if expired:
             raise WaitTimeoutError("nothing was copied within {}s".format(timeout))
-        if not recopied:
-            start = count  # a concealed copy: wait for the next one
-        # else: copied again while reading: read the newer copy instead (see watch)
+        start = count  # a concealed copy: wait for the next one
 
 
 def watch(
@@ -209,6 +218,7 @@ def watch(
 def _watch(timeout: Optional[float], interval: float, include_sensitive: bool) -> Iterator[Optional[str]]:
     seen = change_count()
     deadline = None if timeout is None else time.monotonic() + timeout
+    last = False  # past the deadline, a copy overwritten while read: the newer one is read once more
     while True:
         # An empty clipboard is a copy being made (see wait_for_change): wait for its content.
         count = change_count()
@@ -216,24 +226,28 @@ def _watch(timeout: Optional[float], interval: float, include_sensitive: bool) -
             content = paste()
             skipped = not include_sensitive and _is_sensitive()
             # Copied again while reading: skip this one, and read the newer copy instead.
-            if change_count() == count:
+            recopied = change_count() != count
+            if not recopied or last:
                 seen = count
                 if not skipped:
                     yield content
             # Copies landing while the loop's body ran would come back here
-            # without ever reaching the idle branch's deadline check.
+            # without ever reaching the idle branch's deadline check. A copy
+            # overwritten at the deadline still has its newer one read, once.
             if deadline is not None and time.monotonic() >= deadline:
-                return
+                if not recopied or last:
+                    return
+                last = True
             continue
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             return
-        time.sleep(interval if remaining is None else min(interval, remaining))
+        time.sleep(min(interval, _LONGEST_SLEEP) if remaining is None else min(interval, remaining, _LONGEST_SLEEP))
 
 
 def _check_wait(timeout: Optional[float], interval: float) -> None:
     """Refuse a ``timeout`` or ``interval`` that would hang the wait, or fail inside ``time.sleep``."""
-    # NaN passes "<= 0", and an infinite interval with no deadline overflows time.sleep.
+    # NaN passes "<= 0", and an infinite interval with no deadline would never look again.
     if not math.isfinite(interval) and not (interval == math.inf and timeout is not None):
         raise ValueError("interval must be a positive number of seconds, not {}".format(interval))
     if interval <= 0:

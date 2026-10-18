@@ -111,8 +111,12 @@ def _refuse_pdf(image: Image) -> None:
     if isinstance(image, (bytes, bytearray)):
         head = bytes(image[:1024])
     else:
+        path = Path(image).expanduser()
+        if path.exists() and not path.is_dir() and not path.is_file():
+            # A FIFO, say: its open would wait for a writer, and so would Vision's.
+            raise ValueError("{} is not an image macOS can read".format(path))
         try:
-            with open(Path(image).expanduser(), "rb") as file:
+            with open(path, "rb") as file:
                 head = file.read(1024)
         except OSError:
             return  # missing or unreadable: the usual errors follow

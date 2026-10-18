@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.audio`. They run on any platform."""
 
+import os
+
 import pytest
 
 import macos
@@ -618,3 +620,18 @@ def test_an_exception_in_the_classifier_callback_ends_the_analysis_with_that_err
         assert "cancelAnalysis" in sent
     finally:
         audio._heard.pop(7, None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_unreadable_source_is_a_permission_error_before_afconvert_runs(tmp_path, monkeypatch):
+    from macos import audio
+
+    source = tmp_path / "song.wav"
+    source.write_bytes(b"RIFF")
+    source.chmod(0)
+    monkeypatch.setattr(audio, "_run", lambda *args, **kwargs: pytest.fail("afconvert ran"))
+    try:
+        with pytest.raises(PermissionError):
+            audio.convert(source, tmp_path / "song.m4a")
+    finally:
+        source.chmod(0o644)

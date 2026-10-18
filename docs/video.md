@@ -2,7 +2,10 @@
 
 {mod}`macos.video` reads videos, grabs their frames and converts them, with
 AVFoundation, the framework behind QuickTime Player. Any format QuickTime opens
-works (MOV, MP4, M4V, HEVC, ProRes...), with no ffmpeg to install.
+works (MOV, MP4, M4V, HEVC, ProRes...), with no ffmpeg to install. A file
+the app isn't allowed to read (its permissions, or a folder such as Desktop
+without access) raises `PermissionError`, and one that isn't a video
+`ValueError`.
 
 ```python
 import macos
@@ -101,7 +104,15 @@ macos.video.reverse("jump.mov", "jump-backwards.mov")
   {func}`~macos.video.crop`, {func}`~macos.video.speed`,
   {func}`~macos.video.add_audio` and {func}`~macos.video.add_language_track`
   keep the video's metadata (when and where it was shot, the camera...);
-  {func}`~macos.video.concat` keeps the first clip's.
+  {func}`~macos.video.concat` keeps the first clip's. All of it when the
+  output is the same kind of file as the source; from a `.mov` to an `.mp4`
+  or back, only what the output can hold: the date and place, mostly, but
+  not always the camera.
+- {func}`~macos.video.rotate` and {func}`~macos.video.add_language_track`
+  keep which sound plays: a second language stays off until the viewer picks
+  it. {func}`~macos.video.crop` and {func}`~macos.video.speed` re-encode,
+  which can't keep that: every sound comes out, each in its language, but
+  all on, so a player may play them together.
 - {func}`~macos.video.reverse` plays the sound backwards too. It reads every
   frame, so it's best for short clips; it reads them a few at a time (about
   256 MB of frames at once), so a long or 4K one takes time, not all the memory.

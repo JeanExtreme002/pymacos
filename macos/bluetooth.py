@@ -20,11 +20,12 @@ running Python (your terminal or IDE) the first time.
 import ctypes
 import json
 import math
+import numbers
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from . import _objc
 from ._system import PROFILER_TIMEOUT, framework, run as _run
@@ -72,12 +73,18 @@ def _bluetooth() -> ctypes.CDLL:
     return bluetooth
 
 
-def _check_timeout(timeout: Any) -> None:
-    # NaN passes "<= 0", and a NaN (or inf) deadline is never passed: the wait would never end.
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-        raise TypeError("timeout must be a number of seconds, not {!r}".format(timeout))
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be a positive number of seconds, not {}".format(timeout))
+def _deadline(timeout: Optional[float]) -> Optional[float]:
+    """When the wait ends, or ``None`` for no limit (a ``timeout`` of ``None`` or inf), as the other waits take it."""
+    # NaN passes "<= 0", and a NaN deadline is never passed: the wait would never end.
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, numbers.Real) or math.isnan(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds, or None, not {!r}".format(timeout))
+    return None if math.isinf(timeout) else time.monotonic() + timeout
+
+
+def _passed(deadline: Optional[float]) -> bool:
+    return deadline is not None and time.monotonic() > deadline
 
 
 def _require_controller() -> None:
@@ -93,21 +100,22 @@ def power() -> bool:
     return bool(bluetooth.IOBluetoothPreferenceGetControllerPowerState())
 
 
-def set_power(on: bool, *, timeout: float = 10.0) -> None:
+def set_power(on: bool, *, timeout: Optional[float] = 10.0) -> None:
     """
     Turn Bluetooth on or off, like the switch in Control Center, and wait until it's done.
 
     Careful on a desktop Mac: turning it off disconnects a wireless keyboard
     and mouse. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
-    the switch hasn't happened within ``timeout`` seconds.
+    the switch hasn't happened within ``timeout`` seconds (``None`` or inf: no limit).
+    A ``timeout`` that isn't a positive number of seconds raises :class:`ValueError`.
     """
-    _check_timeout(timeout)
+    _deadline(timeout)  # checked before switching anything
     bluetooth = _bluetooth()
     _require_controller()
     bluetooth.IOBluetoothPreferenceSetControllerPowerState(1 if on else 0)
-    deadline = time.monotonic() + timeout
+    deadline = _deadline(timeout)
     while bool(bluetooth.IOBluetoothPreferenceGetControllerPowerState()) != bool(on):
-        if time.monotonic() > deadline:
+        if _passed(deadline):
             raise WaitTimeoutError("Bluetooth didn't turn {} within {} seconds".format("on" if on else "off", timeout))
         time.sleep(0.1)
 
@@ -238,8 +246,10 @@ def _find(target: Union[str, Device]) -> Device:
     )
 
 
-def _connection(target: Union[str, Device], selector: str, verb: str, connected: bool, timeout: float) -> Device:
-    _check_timeout(timeout)
+def _connection(
+    target: Union[str, Device], selector: str, verb: str, connected: bool, timeout: Optional[float]
+) -> Device:
+    _deadline(timeout)  # checked before listing anything
     device = _find(target)
     if not power():
         raise MacOSError("Bluetooth is off; turn it on with macos.bluetooth.set_power(True)")
@@ -265,15 +275,15 @@ def _connection(target: Union[str, Device], selector: str, verb: str, connected:
             raise MacOSError("could not {} {!r} (IOReturn {:#x})".format(verb, device.name, status & 0xFFFFFFFF))
         # The request returns before the link changes: wait for it, or a
         # script that exits right away cancels it (the device stays connected).
-        deadline = time.monotonic() + timeout
+        deadline = _deadline(timeout)
         while bool(_objc.send(handle, "isConnected", restype=_objc.BOOL)) != connected:
-            if time.monotonic() > deadline:
+            if _passed(deadline):
                 raise WaitTimeoutError("could not {} {!r} within {} seconds".format(verb, device.name, timeout))
             time.sleep(0.1)
     return replace(device, connected=connected)
 
 
-def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
+def connect(device: Union[str, Device], *, timeout: Optional[float] = 10.0) -> Device:
     """
     Connect a paired device and return it, like clicking it in the Bluetooth menu.
 
@@ -283,13 +293,14 @@ def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     name raise ``ValueError``: give the address then. The device
     must be on and in range. This returns once the device is connected, or
     raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) after
-    ``timeout`` seconds, or :class:`~macos.errors.MacOSError` right away when
+    ``timeout`` seconds (``None`` or inf: no limit; one that isn't a positive number
+    raises :class:`ValueError`), or :class:`~macos.errors.MacOSError` right away when
     Bluetooth is off or the device is listed without an ``address``.
     """
     return _connection(device, "openConnection", "connect to", True, timeout)
 
 
-def disconnect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
+def disconnect(device: Union[str, Device], *, timeout: Optional[float] = 10.0) -> Device:
     """
     Disconnect a paired device (it stays paired) and return it.
 

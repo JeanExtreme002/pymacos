@@ -24,7 +24,7 @@ macos.vision.text(macos.clipboard.paste_image())      # text of a copied image
 macos.vision.text(macos.screenshot(region=(0, 0, 800, 600)))
 ```
 
-Anything that isn't an image (empty bytes, a text file) raises `ValueError`,
+Anything that isn't an image (empty bytes, a text file, a FIFO) raises `ValueError`,
 and a folder `IsADirectoryError`, whichever function you call. A real image
 Vision can't work with, such as one 2 pixels high, raises `MacOSError` with
 Vision's reason. Vision reads images, not PDFs: a PDF raises `ValueError` too. Draw the pages you want with

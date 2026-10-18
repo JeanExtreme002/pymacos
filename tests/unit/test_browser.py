@@ -212,11 +212,28 @@ def test_browser_open_refuses_a_url_that_looks_like_an_option(browsers):
     assert browsers.calls == []
 
 
-def test_browser_open_refuses_a_url_without_a_scheme(browsers):
+@pytest.mark.parametrize(
+    "url",
+    [
+        "localhost/x?token=s3cret",
+        # urlsplit reads the host as the scheme of these.
+        "127.0.0.1:8000/?token=s3cret",
+        "localhost:3000/x?token=s3cret",
+        "example.com:8080/?token=s3cret",
+        "/Users/me/page.html?token=s3cret",
+    ],
+)
+def test_browser_open_refuses_a_url_without_a_scheme(browsers, url):
     # `open` would take it for a file here, and quote its path, token and all, in its error.
     with pytest.raises(ValueError, match="must have a scheme") as raised:
-        macos.browser.open("localhost/x?token=s3cret")
+        macos.browser.open(url)
     assert browsers.calls == [] and "s3cret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("url", ["tel:5550100", "mailto:a@example.com", "https://localhost:3000/"])
+def test_browser_open_takes_a_scheme_followed_by_digits(browsers, url):
+    macos.browser.open(url)  # a scheme, not a host and its port
+    assert browsers.calls
 
 
 def test_browser_open_in_a_browser_that_isnt_installed(browsers, monkeypatch):

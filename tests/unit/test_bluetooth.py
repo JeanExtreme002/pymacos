@@ -317,7 +317,7 @@ def test_bluetooth_refuses_a_device_that_is_not_a_name(commands, target):
     assert commands.calls == []
 
 
-@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1])
+@pytest.mark.parametrize("timeout", [float("nan"), -1, 0])
 def test_bluetooth_refuses_a_timeout_that_never_ends(commands, timeout):
     with pytest.raises(ValueError, match="timeout"):
         macos.bluetooth.connect("AirPods", timeout=timeout)
@@ -326,9 +326,30 @@ def test_bluetooth_refuses_a_timeout_that_never_ends(commands, timeout):
     assert commands.calls == []
 
 
-@pytest.mark.parametrize("timeout", [None, "10", True])
+@pytest.mark.parametrize("timeout", ["10", True, [10]])
 def test_bluetooth_refuses_a_timeout_that_is_not_a_number(timeout):
-    with pytest.raises(TypeError, match="timeout"):
+    # ValueError, as the other waits in pymacos raise for one.
+    with pytest.raises(ValueError, match="timeout"):
         macos.bluetooth.disconnect("AirPods", timeout=timeout)
-    with pytest.raises(TypeError, match="timeout"):
+    with pytest.raises(ValueError, match="timeout"):
         macos.bluetooth.set_power(True, timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [None, float("inf")])
+def test_bluetooth_set_power_waits_without_limit_for_none_or_inf(monkeypatch, timeout):
+    from types import SimpleNamespace
+
+    from macos import bluetooth
+
+    states = iter([1] * 500 + [0])  # turns off after 50 seconds of polling
+    fake = SimpleNamespace(
+        IOBluetoothPreferenceSetControllerPowerState=lambda state: None,
+        IOBluetoothPreferenceGetControllerPowerState=lambda: next(states),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(bluetooth, "_bluetooth", lambda: fake)
+    monkeypatch.setattr(bluetooth, "_require_controller", lambda: None)
+    monkeypatch.setattr(bluetooth.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bluetooth.time, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
+    macos.bluetooth.set_power(False, timeout=timeout)
+    assert clock["now"] > 49

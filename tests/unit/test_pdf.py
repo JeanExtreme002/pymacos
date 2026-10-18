@@ -561,6 +561,14 @@ def test_ocr_opens_the_pdf_once_and_hands_vision_the_drawn_page(tmp_path, monkey
     assert "Invoice number 4821" in macos.pdf.text(searchable)
 
 
+def test_ocr_refuses_a_string_of_languages_before_it_opens_the_pdf(tmp_path, monkeypatch):
+    # Pages that have text never reach Vision: checked only there, the string would pass for those PDFs.
+    monkeypatch.setattr(macos.pdf._files, "existing", lambda path: pytest.fail("checked before the file"))
+    monkeypatch.setattr(macos.pdf, "_open", lambda *args: pytest.fail("checked before the PDF opens"))
+    with pytest.raises(TypeError, match="languages takes a list"):
+        macos.pdf.ocr(tmp_path / "text.pdf", tmp_path / "out.pdf", languages="en-US")
+
+
 def test_inverting_samples_flips_every_byte():
     assert bytes([0, 1, 128, 254, 255]).translate(macos.pdf._INVERTED) == bytes([255, 254, 127, 1, 0])
 
@@ -822,7 +830,9 @@ def test_positions_are_corners_or_two_numbers():
     assert _check_position("top_left") == "top_left"
     assert _check_position((72, 100)) == (72.0, 100.0)
     assert _check_position([72, 100.5]) == (72.0, 100.5)  # a list, as json.loads gives it
-    for wrong in ("middle", (72,), (1, 2, 3), [72, "100"], (True, 1), (float("nan"), 1), (1, float("inf")), 72, None):
+    wrong_ones = ("middle", (72,), (1, 2, 3), [72, "100"], (True, 1), (float("nan"), 1), (1, float("inf")), 72, None)
+    # bytes and a range are sequences of two ints too, but no one means b"tl" as (116, 108)
+    for wrong in wrong_ones + (b"tl", bytearray(b"ab"), range(2)):
         with pytest.raises(ValueError, match="position must be one of"):
             _check_position(wrong)
     assert _origin((72.0, 100.0), 10, 10, 612, 792, 36) == (72.0, 100.0)

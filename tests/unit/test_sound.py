@@ -169,3 +169,27 @@ def test_ui_sounds_reads_a_hand_edited_value(monkeypatch, value, on):
     monkeypatch.setattr(macos.sound.defaults, "read", lambda *args, **kwargs: value)
 
     assert macos.sound.ui_sounds() is on
+
+
+def test_an_unreadable_file_is_a_permission_error(monkeypatch, tmp_path):
+    """NSSound just answers nil: a file that can't be read was said to be no audio file, a ValueError."""
+    import os
+
+    monkeypatch.setattr(macos.sound._objc, "send", lambda receiver, selector, *args, **kwargs: None)
+    monkeypatch.setattr(macos.sound._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(macos.sound._objc, "nsstring", lambda text: text)
+    locked = tmp_path / "done.mp3"
+    locked.write_bytes(b"ID3")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):
+            pytest.skip("this user reads any file (root)")
+        with pytest.raises(PermissionError) as raised:
+            macos.sound._load_file(locked)
+        assert not isinstance(raised.value, macos.MacOSError)  # Python's own, as image, pdf and video raise
+    finally:
+        locked.chmod(0o600)
+    with pytest.raises(ValueError, match="not an audio file"):
+        macos.sound._load_file(locked)
+    with pytest.raises(ValueError, match="not an audio file"):
+        macos.sound._load_file(tmp_path)

@@ -434,6 +434,46 @@ def test_file_url_of_a_relative_path_is_absolute():
         assert _objc.pystring(_objc.send(url, "path")) == os.path.join(os.getcwd(), "relative.txt")
 
 
+def test_file_url_keeps_dot_dots_and_refuses_a_nul(monkeypatch, tmp_path):
+    import os
+
+    from macos import _objc
+
+    sent = []
+    monkeypatch.setattr(_objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_objc, "send", lambda *args, **kwargs: sent.append(args[2]) or 2)
+    monkeypatch.chdir(tmp_path)
+    # abspath would drop "link/.." by name, where the kernel goes to the parent of the link's target.
+    _objc.file_url("/base/link/../target.txt")
+    _objc.file_url("link/../target.txt")
+    assert sent == [b"/base/link/../target.txt", os.fsencode(os.path.join(os.getcwd(), "link/../target.txt"))]
+    # C would read the bytes only up to the NUL, and the URL would name "/tmp/a".
+    with pytest.raises(ValueError, match="null byte"):
+        _objc.file_url("/tmp/a\0b")
+    assert len(sent) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_file_url_through_a_symlinked_folder_names_the_file_python_opens(tmp_path):
+    import ctypes
+
+    from macos import _objc
+
+    (tmp_path / "real" / "sub").mkdir(parents=True)
+    (tmp_path / "real" / "target.txt").write_bytes(b"REAL")
+    (tmp_path / "target.txt").write_bytes(b"DECOY")
+    (tmp_path / "link").symlink_to(tmp_path / "real" / "sub")
+    path = str(tmp_path / "link" / ".." / "target.txt")
+    with open(path, "rb") as file:
+        assert file.read() == b"REAL"
+    with _objc.autorelease_pool():
+        data = _objc.send(_objc.cls("NSData"), "dataWithContentsOfURL:", _objc.file_url(path), argtypes=(_objc.id,))
+        assert data
+        length = _objc.send(data, "length", restype=ctypes.c_ulong)
+        bytes_ = _objc.send(data, "bytes")
+        assert ctypes.string_at(bytes_, length) == b"REAL"
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
 def test_pystring_keeps_a_string_holding_half_an_emoji():
     import ctypes

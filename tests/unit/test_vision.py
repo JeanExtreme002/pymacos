@@ -102,6 +102,17 @@ def test_pdfs_are_refused_before_vision_sees_a_blank_image(tmp_path):
     _refuse_pdf(tmp_path / "missing.png")  # left to the usual FileNotFoundError
 
 
+def test_a_fifo_is_refused_before_anything_waits_for_its_writer(tmp_path):
+    from macos.vision import _refuse_pdf
+
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(str(fifo))
+    # Opened, it'd block this test forever: refused, it can't.
+    with pytest.raises(ValueError, match="not an image macOS can read"):
+        _refuse_pdf(fifo)
+    _refuse_pdf(tmp_path)  # a folder: left to IsADirectoryError, as ciimage raises
+
+
 def test_scan_document_says_it_needs_macos_12_where_vision_cant(monkeypatch):
     from macos import _cf, _objc, vision
 

@@ -360,7 +360,9 @@ def test_defaults_restored_checks_every_key_before_the_block_runs(monkeypatch, k
         (1, True),
         (0, False),
         (2.5, True),
-        (0.5, False),  # CF reads a number by its whole part
+        (0.5, True),  # CF reads a real number as true unless it's zero, text by its whole part
+        (-0.5, True),
+        (0.0, False),
         ("1", True),
         ("0", False),
         ("0.5", False),

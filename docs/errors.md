@@ -40,8 +40,10 @@ exceptions instead:
 | `FileNotFoundError` | An input file or folder doesn't exist |
 | `FileExistsError` | The destination already exists |
 | `NotADirectoryError` | A folder was expected, but the path is a file |
+| `IsADirectoryError` | A file was expected (an input or an output), but the path is a folder |
 | `TimeoutError` | Caught by `except TimeoutError`: every wait that ran out of time raises a subclass of it ({class}`~macos.WaitTimeoutError`, {class}`~macos.CommandTimeoutError`, {class}`~macos.PromptTimeoutError`, {class}`~macos.AppLaunchTimeoutError`) |
 | `OSError` | A file's attributes can't be read or changed |
+| `PermissionError` | A file the app isn't allowed to read (its permissions, or a folder such as Desktop without access) |
 | `ProcessLookupError`, `PermissionError` | {func}`macos.system.kill` on a process that's gone, or another user's |
 
 ## Reference

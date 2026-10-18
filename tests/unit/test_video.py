@@ -459,7 +459,7 @@ def fake_edit(monkeypatch):
     monkeypatch.setattr(video, "_existing", lambda path: Path(path))
     monkeypatch.setattr(video, "_concat_transforms", lambda first, second: second)
     monkeypatch.setattr(video._media, "asset", lambda path: 1)
-    monkeypatch.setattr(video._media, "editable", lambda media: 2)
+    monkeypatch.setattr(video._media, "editable", lambda media, **options: sent.append(("editable", options)) or 2)
     monkeypatch.setattr(video._media, "duration", lambda media: clip["length"])
     monkeypatch.setattr(video._media, "tracks", lambda media, kind: [9])
     monkeypatch.setattr(video._media, "export", lambda media, target, **options: target)
@@ -584,3 +584,15 @@ def test_times_must_be_finite(avconvert, monkeypatch, tmp_path, bad):
         with pytest.raises(ValueError, match=label + " must"):
             macos.video.to_gif(__file__, tmp_path / "out.gif", **{label: bad})
     assert not avconvert
+
+
+def test_re_encoding_edits_leave_every_track_on(fake_edit, monkeypatch, tmp_path):
+    """The re-encoding exporter leaves a track that's off out: speed() and crop() dropped a dubbed video's second language."""
+    from macos import video
+
+    clip, sent = fake_edit
+    monkeypatch.setattr(video, "_upright_size", lambda track: (640, 480))
+    video.speed("clip.mov", tmp_path / "out.mov", 2)
+    video.crop("clip.mov", tmp_path / "out.mov", (0, 0, 320, 240))
+    video.rotate("clip.mov", tmp_path / "out.mov", 90)  # passthrough: the on/off state and groups survive it
+    assert [args for selector, args in sent if selector == "editable"] == [{"keep_state": False}, {"keep_state": False}, {}]

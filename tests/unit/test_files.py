@@ -259,6 +259,44 @@ def test_attributes_that_cant_be_copied_dont_fail_the_write(tmp_path, monkeypatc
     assert target.read_bytes() == b"new"
 
 
+def test_a_read_only_file_keeps_its_attributes_and_its_mode(tmp_path, monkeypatch, umask_022):
+    # macOS refuses setxattr on a file without write permission: copied once the staged
+    # file had the old one's 0o444, every attribute would be lost.
+    target = tmp_path / "report.pdf"
+    target.write_bytes(b"old")
+    os.chmod(str(target), 0o444)
+    old = os.fsencode(str(target))
+
+    class LikeMacOS(_FakeXattrs):
+        def setxattr(self, path, *args):
+            if not os.stat(os.fsdecode(path)).st_mode & stat.S_IWUSR:
+                return -1  # EACCES
+            return super().setxattr(path, *args)
+
+    fake = LikeMacOS({old: {b"com.apple.metadata:_kMDItemUserTags": b"Work", b"user.note": b"x"}})
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", lambda: fake)
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"new")
+        new = os.fsencode(str(temporary))
+    assert target.read_bytes() == b"new" and _mode(target) == 0o444
+    assert fake.files[new] == {b"com.apple.metadata:_kMDItemUserTags": b"Work", b"user.note": b"x"}
+
+
+def test_no_libsystem_to_load_doesnt_fail_the_write(tmp_path, monkeypatch):
+    target = tmp_path / "plain.txt"
+    target.write_bytes(b"old")
+
+    def missing():
+        raise OSError("libSystem.dylib: cannot open shared object file")
+
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", missing)
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"new")
+    assert target.read_bytes() == b"new" and os.listdir(str(tmp_path)) == ["plain.txt"]
+
+
 def test_write_atomically(tmp_path):
     target = tmp_path / "out.txt"
     assert _files.write_atomically(str(target), lambda name: open(name, "w").write("hi")) == target

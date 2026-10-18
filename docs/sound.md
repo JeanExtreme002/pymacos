@@ -40,6 +40,10 @@ extension (`"./chime"`, `"done.mp3"`), and a sound name otherwise; a name with
 a dot in it, such as `"My.Sound"` from `My.Sound.aiff`, still plays when no
 file of that name exists.
 
+A file the app isn't allowed to read (its permissions, or a folder such as
+Desktop without access) raises `PermissionError`, and one that isn't audio
+`ValueError`.
+
 ## Waiting
 
 {func}`~macos.sound.play` returns when the sound ends. Pass `wait=False` to

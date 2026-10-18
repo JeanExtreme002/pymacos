@@ -1077,8 +1077,22 @@ def test_uninstall_refuses_an_app_on_the_system_volume(tmp_path, monkeypatch):
         plistlib.dumps({"CFBundleName": "Safari", "CFBundleIdentifier": "com.apple.Safari"})
     )
     devices = {"/": 1, str(bundle): 1}
-    monkeypatch.setattr(apps.os, "stat", lambda path: types.SimpleNamespace(st_dev=devices.get(str(path), 2)))
-    monkeypatch.setattr(apps.os, "statvfs", lambda path: types.SimpleNamespace(f_flag=os.ST_RDONLY))
+    flags = {"/": os.ST_RDONLY, str(bundle): os.ST_RDONLY}
+    # apps.os is os itself: answer for "/" and the bundle only, so pytest's own calls (a failure's report) still work.
+    real_stat, real_statvfs = os.stat, os.statvfs
+
+    def stat(path, *args, **kwargs):
+        if str(path) in devices:
+            return types.SimpleNamespace(st_dev=devices[str(path)])
+        return real_stat(path, *args, **kwargs)
+
+    def statvfs(path):
+        if str(path) in flags:
+            return types.SimpleNamespace(f_flag=flags[str(path)])
+        return real_statvfs(path)
+
+    monkeypatch.setattr(apps.os, "stat", stat)
+    monkeypatch.setattr(apps.os, "statvfs", statvfs)
     monkeypatch.setattr(apps, "require_macos", lambda: None)
     monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
     monkeypatch.setattr(apps, "_installed", lambda: pytest.fail("listed the other apps"))
@@ -1089,7 +1103,7 @@ def test_uninstall_refuses_an_app_on_the_system_volume(tmp_path, monkeypatch):
     devices[str(bundle)] = 2  # the Data volume, where /Applications's own apps are
     assert not apps._on_system_volume(str(bundle))
     devices[str(bundle)] = 1
-    monkeypatch.setattr(apps.os, "statvfs", lambda path: types.SimpleNamespace(f_flag=0))  # / writable: older macOS
+    flags[str(bundle)] = 0  # / writable: older macOS
     assert not apps._on_system_volume(str(bundle))
 
 

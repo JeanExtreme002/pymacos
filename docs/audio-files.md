@@ -22,6 +22,9 @@ It reads anything macOS plays (MP3, AAC, WAV, AIFF, FLAC...) and writes
 `.caf`, the last three as 16-bit PCM. `quality` (`"high"`, `"medium"` or
 `"low"`) sets the AAC quality; `lossless=True` is only for `.m4a`.
 It uses the `afconvert` command that ships with macOS.
+A file you can't read (its permissions, or a folder such as the Desktop
+without access) raises `PermissionError`, and one that isn't audio
+raises `ValueError`.
 
 ## Editing
 
