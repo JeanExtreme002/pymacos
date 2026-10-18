@@ -82,18 +82,46 @@ def test_browser_tab_actions_pass_numbers_as_arguments(browsers):
 
 
 def test_browser_run_js(browsers):
-    browsers.stdout = "pymacos\n"
+    browsers.stdout = "spymacos\n"
     script = 'document.querySelector("h1").textContent'
 
     assert macos.browser.run_js(script) == "pymacos"
     call = browsers.calls[-1]
     assert call["args"][:2] == ["osascript", "-e"] and len(call["args"]) == 3  # nothing after the source
-    assert call["input"] == script  # on stdin: not in the process list, nor pasted into the AppleScript
+    assert call["input"] == script.encode()  # on stdin: not in the process list, nor pasted into the AppleScript
     assert script not in call["args"][2] and 'tell application "Google Chrome"' in call["args"][2]
     macos.browser.run_js("-1")
-    assert browsers.calls[-1]["input"] == "-1" and len(browsers.args) == 3
-    browsers.stdout = "missing value\n"
+    assert browsers.calls[-1]["input"] == b"-1" and len(browsers.args) == 3
+    browsers.stdout = "n\n"
     assert macos.browser.run_js("undefined") is None
+
+
+def test_browser_run_js_keeps_the_string_as_the_page_made_it(browsers):
+    # Only osascript's own newline goes: the page's, a \r\n included, stay; and a page's
+    # "missing value" is a string, not undefined.
+    browsers.stdout = b"sa\r\nb\n\n\n"
+    assert macos.browser.run_js("text") == "a\r\nb\n\n"
+    browsers.stdout = b"smissing value\n"
+    assert macos.browser.run_js("'missing value'") == "missing value"
+    browsers.stdout = b"s\n"
+    assert macos.browser.run_js("''") == ""
+    browsers.stdout = b"v, 1, 2\n"  # not a string: as osascript prints it
+    assert macos.browser.run_js("[1, 2]") == "1, 2"
+    browsers.stdout = b"v,\n"  # an empty list or object: no space after the comma
+    assert macos.browser.run_js("[]") == ""
+    browsers.stdout = b"v,, 1\n"
+    assert macos.browser.run_js("[[], 1]") == ", 1"
+    assert '"s" & pymacosResult' in browsers.args[2]
+
+
+def test_browser_run_js_never_opens_a_browser_that_quit_meanwhile(browsers):
+    # Checked again in the script, where checking doesn't launch it.
+    browsers.stdout = "x\n"
+    with pytest.raises(macos.MacOSError, match="no browser is running"):
+        macos.browser.run_js("1")
+    assert browsers.args[2].index('is not running then return "x"') < browsers.args[2].index("tell application")
+    for source in macos.browser._LIST.values():
+        assert source.index('is not running then return out') < source.index('tell application')
 
 
 def test_browser_run_js_needs_the_browser_setting(browsers, monkeypatch):
@@ -104,6 +132,30 @@ def test_browser_run_js_needs_the_browser_setting(browsers, monkeypatch):
 
     monkeypatch.setattr(_system.subprocess, "run", refuse)
     with pytest.raises(macos.PermissionDeniedError, match="View › Developer › Allow JavaScript from Apple Events"):
+        macos.browser.run_js("1")
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "execution error: Erro no Google Chrome: A execução do JavaScript por AppleScript está desativada. (12)",
+        "execution error: Fehler in Google Chrome: Die Ausführung von JavaScript über AppleScript ist deaktiviert. (12)",
+    ],
+)
+def test_browser_run_js_needs_the_browser_setting_in_any_language(browsers, monkeypatch, stderr):
+    # Chrome writes the message in its own language: its number tells it.
+    monkeypatch.setattr(_system.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", stderr))
+    with pytest.raises(macos.PermissionDeniedError, match="Allow JavaScript from Apple Events"):
+        macos.browser.run_js("1")
+
+
+def test_browser_run_js_other_failures_stay_command_errors(browsers, monkeypatch):
+    def fail(args, **kwargs):
+        stderr = "execution error: Google Chrome got an error: (12) Something else. (-1728)"
+        return subprocess.CompletedProcess(args, 1, "", stderr)
+
+    monkeypatch.setattr(_system.subprocess, "run", fail)
+    with pytest.raises(macos.CommandError):
         macos.browser.run_js("1")
 
 
@@ -158,6 +210,48 @@ def test_browser_open_refuses_a_url_that_looks_like_an_option(browsers):
     with pytest.raises(ValueError, match="must not start with '-'"):
         macos.browser.open("-g")
     assert browsers.calls == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "localhost/x?token=s3cret",
+        # urlsplit reads the host as the scheme of these.
+        "127.0.0.1:8000/?token=s3cret",
+        "localhost:3000/x?token=s3cret",
+        "example.com:8080/?token=s3cret",
+        "/Users/me/page.html?token=s3cret",
+    ],
+)
+def test_browser_open_refuses_a_url_without_a_scheme(browsers, url):
+    # `open` would take it for a file here, and quote its path, token and all, in its error.
+    with pytest.raises(ValueError, match="must have a scheme") as raised:
+        macos.browser.open(url)
+    assert browsers.calls == [] and "s3cret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("url", ["tel:5550100", "mailto:a@example.com", "https://localhost:3000/"])
+def test_browser_open_takes_a_scheme_followed_by_digits(browsers, url):
+    macos.browser.open(url)  # a scheme, not a host and its port
+    assert browsers.calls
+
+
+def test_browser_open_in_a_browser_that_isnt_installed(browsers, monkeypatch):
+    def missing(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, "", "Unable to find application named 'Vivaldi'")
+
+    monkeypatch.setattr(_system.subprocess, "run", missing)
+    with pytest.raises(macos.AppNotFoundError, match="Vivaldi isn't installed") as raised:
+        macos.browser.open("https://localhost/?token=s3cret", app="Vivaldi")
+    assert "s3cret" not in str(raised.value) and "s3cret" not in repr(raised.value.args)
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+    def damaged(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, "", "The application cannot be opened. (-10669)")
+
+    monkeypatch.setattr(_system.subprocess, "run", damaged)
+    with pytest.raises(macos.CommandError):
+        macos.browser.open("https://example.com", app="Vivaldi")
 
 
 def test_browser_tab_actions_refuse_an_app_that_isnt_a_browser(browsers):

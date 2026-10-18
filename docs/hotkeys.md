@@ -24,7 +24,16 @@ reaching the app in front needs [Accessibility](permissions.md#accessibility).
 Shortcuts are written as for {func}`macos.keyboard.press`: `"ctrl+option+s"`,
 `"cmd+shift+k"`, `"f5"`... Pick ones apps don't use: while
 {func}`~macos.hotkeys.run` or {func}`~macos.hotkeys.wait` listens, the app in
-front doesn't get them.
+front doesn't get them. A modifier on its own, such as `"shift"`, and Caps
+Lock can't be shortcuts: macOS reports them as a change of the modifier
+flags, not as a key press, so they raise `ValueError`.
+
+A character in a shortcut, such as the `a` of `"cmd+a"`, is looked up on the
+keyboard layout in use when the shortcut is registered, and the shortcut keeps
+to that physical key: after switching to another layout, it is still the key
+that typed `a` before. Register the shortcut again after a switch to follow
+the new layout. Key names such as `"f5"`, `"space"` or `"return"` don't depend
+on the layout.
 
 ```python
 macos.hotkeys.register("ctrl+option+p", pause_music)
@@ -40,7 +49,13 @@ repeat the call, and registering a shortcut again replaces its callback.
 on a thread of its own, so a slow callback doesn't hold up typing in other
 apps. With no shortcut registered, {func}`~macos.hotkeys.run` warns
 (`RuntimeWarning`) and waits all the same: shortcuts registered meanwhile,
-from another thread, are caught from then on.
+from another thread, are caught from then on. A callback that
+{func}`~macos.hotkeys.run` called can't call {func}`~macos.hotkeys.run`
+itself, to enter a "mode" with other shortcuts: it raises `RuntimeError`,
+since the shortcuts would go on to the {func}`~macos.hotkeys.run` the callback
+holds up. Register or unregister the mode's shortcuts in the callback and
+return instead. A callback that a {func}`~macos.hotkeys.wait` called, with no
+{func}`~macos.hotkeys.run` in progress, may start one.
 
 The keys a callback presses with {mod}`macos.keyboard` go to the app in front
 as they are, even its own shortcut: a callback can do some work, then pass the
@@ -64,7 +79,12 @@ precedence: `"f5"` then never fires. Register one or the other, not both.
 {func}`~macos.hotkeys.stop` stops every {func}`~macos.hotkeys.run` and
 {func}`~macos.hotkeys.wait` in progress, on any thread, including one still
 starting. Several may listen at once: each {func}`~macos.hotkeys.wait` gets
-its shortcut, and a callback is called once. An error inside the listener
+its shortcut, and a callback is called at most once: by
+{func}`~macos.hotkeys.run` when one runs, otherwise by the
+{func}`~macos.hotkeys.wait` that caught the keys, unless a
+{func}`~macos.hotkeys.wait` is waiting for those very keys. With no
+{func}`~macos.hotkeys.run`, then, a {func}`~macos.hotkeys.wait` for a
+registered shortcut takes it without calling its callback. An error inside the listener
 itself doesn't swallow the keystroke: the key goes on to the app, and the
 error comes out of {func}`~macos.hotkeys.run`.
 
@@ -72,7 +92,9 @@ error comes out of {func}`~macos.hotkeys.run`.
 
 {func}`~macos.hotkeys.wait` blocks until a shortcut is pressed, to start or
 pause a script from anywhere. It returns `True` once the shortcut is pressed,
-and `False` when `timeout` seconds pass first:
+and `False` when `timeout` seconds pass first. A `timeout` that isn't a
+number of seconds, 0 or more (a NaN, say), raises `ValueError`, for
+{func}`~macos.hotkeys.run` too:
 
 ```python
 print("Press Ctrl-Option-S to start")

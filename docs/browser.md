@@ -57,14 +57,18 @@ macos.browser.open("https://example.com", app="Safari")
 
 {func}`~macos.browser.open` opens the URL in a new tab, in the default browser
 when none is running (with no default browser set, it raises
-{class}`~macos.AppNotFoundError`). A URL starting with `-` raises `ValueError`:
-the `open` command would take it as one of its options.
+{class}`~macos.AppNotFoundError`, as it does for a browser named with `app=`
+that isn't installed). A URL starting with `-` raises `ValueError`: the `open`
+command would take it as one of its options. So does a URL with no scheme
+(`"example.com"` or `"localhost:3000"`, not `"https://example.com"`), which `open`
+would take for a file in the current directory. A file path has no scheme either:
+for a local page, pass `pathlib.Path(path).absolute().as_uri()` (a `file://` URL).
 
 ## Running JavaScript
 
 {func}`~macos.browser.run_js` runs JavaScript in the current tab and returns
-its result as text (`None` for `undefined`). With no browser running, it raises
-{class}`~macos.MacOSError`:
+its result as text (`None` for `undefined` and `null`). With no browser running,
+it raises {class}`~macos.MacOSError`:
 
 ```python
 macos.browser.run_js("document.title")
@@ -72,6 +76,13 @@ macos.browser.run_js("document.title")
 js_code = "JSON.stringify([...document.links].map(a => a.href))"
 links = json.loads(macos.browser.run_js(js_code))
 ```
+
+A string comes back as the page made it, its newlines included. Other values
+the browser turns into AppleScript's, and they come back as `osascript` prints
+them: a number with 15 digits at most, in E-notation from 2**29
+(`run_js("Date.now()")` gives `'1.760612345123E+12'`), an array as `'1, 2'`.
+Return `String(...)` to get JavaScript's own text, and `JSON.stringify(...)`
+for structured data.
 
 The browser must allow it, once:
 

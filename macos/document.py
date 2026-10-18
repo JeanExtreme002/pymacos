@@ -15,11 +15,15 @@ LibreOffice needed. What TextEdit keeps survives (fonts, bold, colours,
 lists, tables, links); the page layout of Word documents (columns, headers
 and footers, text boxes) doesn't, so a converted PDF looks like the document
 opened in TextEdit, not in Word. Tables are lost when writing Word files
-(``.docx``, ``.doc``): their cells become lines.
+(``.docx``, ``.doc``): their cells become lines. Pictures and other
+attachments are kept only in web archives (``.webarchive``) and drawn in
+PDFs: the other formats leave them out.
 """
 
 import codecs
 import ctypes
+import math
+import numbers
 import os
 import re
 from contextlib import nullcontext
@@ -48,8 +52,10 @@ _TYPES = {
 }
 _PAPERS = {"a4": (595.28, 841.89), "letter": (612.0, 792.0), "legal": (612.0, 1008.0)}
 _UTF8 = 4  # NSUTF8StringEncoding
-# An encoding the file names itself: an HTML page's charset, or an XML declaration's (XHTML).
-_CHARSET = re.compile(rb"charset\s*=|<\?xml[^>]*\bencoding\s*=", re.I)
+# An encoding the file names itself: an HTML page's <meta> charset, or an XML declaration's (XHTML), which
+# opens the file. A "charset=" elsewhere (a <script> or <link> attribute, the text, a comment) names none.
+_CHARSET = re.compile(rb"<meta\b[^>]*\bcharset\s*=|\A(?:\xef\xbb\xbf)?\s*<\?xml[^>]*\bencoding\s*=", re.I)
+_COMMENT = re.compile(rb"<!--.*?(?:-->|\Z)", re.S)
 _CHUNK = 1 << 20  # bytes read at a time to check a file is UTF-8
 # What macOS reads through WebKit, as public.html (and a web archive): only on the main thread. (XHTML that
 # opens with an XML declaration is read as plain text instead, but it's guarded all the same.)
@@ -94,7 +100,7 @@ def _reads_as_utf8(source: Path) -> bool:
         return False  # the other formats say their encoding themselves
     if source.suffix.lower() in _HTML_FORMATS:
         with open(str(source), "rb") as handle:
-            if _CHARSET.search(handle.read(4096)):
+            if _CHARSET.search(_COMMENT.sub(b"", handle.read(4096))):  # a commented-out <meta> names none
                 return False
     return _is_utf8(source)
 
@@ -260,13 +266,16 @@ def text(path: PathLike, *, resources: bool = True) -> str:
 
 
 def _save(document: int, target: Path, kind: str) -> None:
-    attributes = _objc.send(
-        _objc.cls("NSDictionary"),
-        "dictionaryWithObject:forKey:",
-        _objc.nsstring(kind),
-        _objc.nsstring("DocumentType"),
-        argtypes=(_objc.id, _objc.id),
-    )
+    if kind != "NSWebArchive":
+        # The other formats can't hold the pictures, and would keep a trace of them: an <img> of a file
+        # never written in HTML, a U+FFFC in plain text.
+        document = _without_attachments(document)
+    options = {"DocumentType": _objc.nsstring(kind)}
+    if kind == "NSPlainText":  # left out, AppKit writes MacRoman, and fails on what it can't hold (CJK, emoji)
+        options["CharacterEncoding"] = _objc.send(
+            _objc.cls("NSNumber"), "numberWithUnsignedInteger:", _UTF8, argtypes=(ctypes.c_ulong,)
+        )
+    attributes = _objc.nsdictionary_of(options)
     length = _objc.send(document, "length", restype=ctypes.c_ulong)
     error = ctypes.c_void_p()
     data = _objc.send(
@@ -281,6 +290,19 @@ def _save(document: int, target: Path, kind: str) -> None:
         raise MacOSError("could not write {}: {}".format(target, _objc.error_message(error)))
     payload = _objc.pybytes(data) or b""
     _files.write_atomically(target, lambda name: Path(name).write_bytes(payload))
+
+
+def _check_layout(paper: object, margin: object) -> None:
+    """
+    Before anything is read: a bad ``paper`` or ``margin`` fails the call itself. A NaN margin passes
+    the check against the paper, and the print operation then never returns.
+    """
+    if paper is not None and (not isinstance(paper, str) or paper.lower() not in _PAPERS):
+        raise ValueError("paper is 'a4', 'letter' or 'legal', not {!r}".format(paper))
+    if isinstance(margin, bool) or not isinstance(margin, numbers.Real):
+        raise TypeError("margin must be a number of points, not {!r}".format(margin))
+    if not math.isfinite(margin) or margin < 0:
+        raise ValueError("margin must leave room on the page, not {}".format(margin))
 
 
 def _paper(paper: Optional[str], info: int) -> Tuple[float, float]:
@@ -366,11 +388,14 @@ def convert(
     addresses of its choosing, or pull local files into the document.
     ``resources=False`` reads the page alone, fetching nothing it refers to,
     and leaves its pictures and attachments out (a web archive's own ones
-    too): use it for HTML you don't trust. HTML pages, web archives and PDF
-    output need the main thread (AppKit lays out and prints only there), as
-    does ``resources=False`` for anything but ``.txt`` and ``.rtf`` files:
-    from another thread they raise
-    :class:`~macos.MainThreadError`.
+    too): use it for HTML you don't trust. HTML pages and web archives, read
+    or written, and PDF output need the main thread (AppKit lays out and
+    prints only there, and WebKit writes web archives only there), as does
+    ``resources=False`` for anything but ``.txt`` and ``.rtf`` files: from
+    another thread they raise :class:`~macos.MainThreadError`.
+
+    Plain text (``.txt``) is written as UTF-8. Pictures and other
+    attachments are kept only in web archives and PDFs.
     """
     origin = _existing(source)
     target = Path(output).expanduser().absolute()
@@ -379,7 +404,10 @@ def convert(
         known = ", ".join(sorted({".pdf", *_TYPES}))
         raise ValueError("can't write {!r} files; the formats are {}".format(kind or target.name, known))
     if kind == ".pdf":
+        _check_layout(paper, margin)
         _files.require_main_thread("converting to PDF (it lays the text out in a text view, and prints it)")
+    elif kind == ".webarchive":
+        _files.require_main_thread("writing a web archive (WebKit serializes it, only on the main thread)")
     with _objc.autorelease_pool():
         document = _load(origin, resources)
         if kind == ".pdf":

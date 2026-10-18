@@ -33,6 +33,46 @@ def test_unknown_attributes_raise_attribute_error():
         macos.nope
 
 
+@pytest.mark.parametrize("name", ["", ".", "..", ".pdf", "x.y", "pdf.x", "no such"])
+def test_names_no_submodule_could_have_raise_attribute_error(name):
+    with pytest.raises(AttributeError, match="has no attribute"):
+        getattr(macos, name)
+    assert not hasattr(macos, name)
+    assert getattr(macos, name, None) is None
+
+
+def test_type_checkers_see_every_lazy_name():
+    import ast
+    import pathlib
+
+    # __getattr__ is hidden from type checkers, so the TYPE_CHECKING imports are all they know of
+    # the lazy names: one missing there would be a false type error for every user.
+    tree = ast.parse(pathlib.Path(macos.__file__).read_text(encoding="utf-8"))
+    block = next(
+        node for node in tree.body
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+    )
+    typed = {alias.asname or alias.name for node in block.body if isinstance(node, ast.ImportFrom) for alias in node.names}
+    assert typed == macos._SUBMODULES | set(macos._SHORTCUTS)
+    errors = {name for name in macos.__all__ if name.endswith("Error")}
+    assert set(macos.__all__) - errors <= typed
+
+
+def test_every_error_class_is_exported_at_the_top_level():
+    # A class added to macos.errors but left out of the package's import list would only be reachable as
+    # macos.errors.X, unlike all the others.
+    from macos import errors
+
+    classes = {name for name, value in vars(errors).items() if isinstance(value, type) and issubclass(value, Exception)}
+    assert classes <= set(macos.__all__)
+    assert all(getattr(macos, name) is getattr(errors, name) for name in classes)
+
+
+def test_app_launch_timeout_error_is_both_a_lookup_and_a_timeout():
+    assert issubclass(macos.AppLaunchTimeoutError, macos.AppNotFoundError)
+    assert issubclass(macos.AppLaunchTimeoutError, TimeoutError)
+
+
 def test_dir_lists_the_lazy_names():
     assert {"pdf", "notify", "MacOSError"} <= set(dir(macos))
 

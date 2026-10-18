@@ -19,6 +19,10 @@ as in System Settings › Sound:
 macos.sound.names()   # ['Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', ...]
 ```
 
+They come from `~/Library/Sounds`, `/Library/Sounds` and
+`/System/Library/Sounds`, searched in that order: your own sound wins over a
+system one of the same name, for `play` and `set_alert_sound` alike.
+
 ## Audio files
 
 Any format macOS plays works: MP3, AAC/M4A, WAV, AIFF...
@@ -30,6 +34,16 @@ macos.sound.play("~/Music/fanfare.m4a", volume=0.5)
 `volume` goes from 0.0 to 1.0, relative to the system volume (see
 [Volume](volume.md) to change that).
 
+A `pathlib.Path` always means a file, even with no extension
+(`Path("chime")`). Text means a file when it has a folder in it or an
+extension (`"./chime"`, `"done.mp3"`), and a sound name otherwise; a name with
+a dot in it, such as `"My.Sound"` from `My.Sound.aiff`, still plays when no
+file of that name exists.
+
+A file the app isn't allowed to read (its permissions, or a folder such as
+Desktop without access) raises `PermissionError`, and one that isn't audio
+`ValueError`.
+
 ## Waiting
 
 {func}`~macos.sound.play` returns when the sound ends. Pass `wait=False` to
@@ -39,6 +53,9 @@ return right away while it plays:
 macos.sound.play("Submarine", wait=False)
 start_long_task()
 ```
+
+The sound plays in your script's process: if the script ends first, the sound
+stops with it. Keep the default `wait=True` for a script's last sound.
 
 ## Sound settings
 

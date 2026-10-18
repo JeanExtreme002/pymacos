@@ -1,6 +1,9 @@
 """Tests of :mod:`macos.audio` against the real system. Skipped outside macOS."""
 
+import array
+import math
 import os
+import wave
 from pathlib import Path
 
 import pytest
@@ -55,8 +58,6 @@ def test_microphone_record_and_level(tmp_path):
 
 
 def _samples(path):
-    import array
-
     return array.array("h", macos.audio._read_wav(Path(path).read_bytes())[2])
 
 
@@ -90,6 +91,22 @@ def test_audio_editing(speech, tmp_path):
     assert abs(audio.info(fast).duration - details.duration / 2) < 0.02
     # Some macOS versions count AAC's padding in the duration they read back (up to about 0.15 s).
     assert abs(audio.info(audio.speed(speech, tmp_path / "fast.m4a", 2)).duration - details.duration / 2) < 0.2
+    # A clip under about 3 s, whose end the time-pitch algorithm once held back: the whole of it, to the frame.
+    # A tone, loud to its last sample (speech may go quiet near its end): what's missing would be silence
+    # here, as speed() writes silence for what the reader never gives, so the length alone can't tell.
+    clip = tmp_path / "clip.wav"
+    with wave.open(str(clip), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(44100)
+        out.writeframes(array.array("h", (round(16000 * math.sin(2 * math.pi * 440 * i / 44100)) for i in range(44100))))
+    for factor in (2, 0.5):
+        for keep_pitch in (True, False):
+            target = audio.speed(clip, tmp_path / "clip-stretched.wav", factor, keep_pitch=keep_pitch)
+            _, rate, data = audio._read_wav(target.read_bytes())
+            stretched = array.array("h", data)
+            assert len(stretched) == round(44100 / factor), (factor, keep_pitch)
+            assert max(map(abs, stretched[-round(0.02 * rate) :])) > 2000, (factor, keep_pitch)
 
     # Shorter than the classifier's usual 3-second window: still heard.
     assert audio.classify("/System/Library/Sounds/Tink.aiff")
@@ -122,7 +139,6 @@ def test_ctrl_c_stops_a_sound_analysis_at_once(tmp_path):
     import subprocess
     import sys
     import textwrap
-    import wave
 
     # Five minutes of sound: some hundred of the classifier's overlapping windows.
     source = tmp_path / "long.wav"

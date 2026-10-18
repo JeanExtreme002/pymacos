@@ -32,10 +32,12 @@ macos.screenshot("pointer.png", cursor=True)             # include the mouse poi
 ```
 
 - `region` is in points, measured from the top-left corner of the main display.
-- `display` counts from `1`, the main display.
+- `display` counts from `1`, the main display. It's a position, not a
+  {class}`~macos.screen.Display`: passing one raises `TypeError` (use
+  `macos.screen.displays().index(d) + 1`).
 
 The format follows the file extension: `.png`, `.jpg` (or `.jpeg`), `.heic`,
-`.tiff`, `.gif` or `.pdf`. Anything else raises `ValueError`.
+`.tiff` (or `.tif`), `.gif` or `.pdf`. Anything else raises `ValueError`.
 
 When `screencapture` saves nothing (it can end without an error and without
 an image, when a display goes away), {class}`~macos.MacOSError` is raised
@@ -78,6 +80,8 @@ macos.screen.wait_for_text("Export complete", timeout=120)
 {func}`~macos.screen.wait_for_text` looks again every `interval` seconds (0.5
 by default) until the text shows up. `region` or `display` limit where to look;
 by default, the main display. A search of a whole display takes a second or two.
+`languages` works as in {func}`macos.vision.lines`: a list such as `["en-US"]`
+(a str raises `TypeError`).
 
 {func}`~macos.screen.color_at` reads the color of one point, as `'#rrggbb'`:
 
@@ -138,8 +142,11 @@ macos.screen.set_display_mode(2560, 1440, refresh_rate=144, display=external)
 Here `display` is a {class}`~macos.screen.Display` from
 {func}`~macos.screen.displays`, or its `id`, and the main display when left
 out. It's not the position that {func}`~macos.screenshot`'s `display` counts
-from 1. With `refresh_rate`, it picks the closest one; without, the highest.
-Without `hidpi`, it picks the sharp Retina mode when there's one. The change
+from 1. With `refresh_rate`, it picks the closest one, however far: check the
+returned mode's `refresh_rate` (`144` on a 60 Hz panel gets 60). Without, the
+highest. Without `hidpi`, it picks the sharp Retina mode when there's one,
+among the rates within 0.5 Hz of the closest (so `144` still takes a Retina
+mode at 143.86 Hz). The change
 stays after a restart: to go back, call it with the
 {func}`~macos.screen.display_mode` read before.
 
@@ -171,8 +178,16 @@ The length is rounded to whole seconds, at least one: `screencapture` counts
 no finer, so `2.5` records 2 seconds. `region` and `display` work as for
 screenshots. `audio=True` also records the
 default microphone, and `clicks=True` shows mouse clicks. It needs the Screen
-Recording permission, like screenshots. To make it smaller or an `.mp4`, see
+Recording permission, like screenshots. One that doesn't finish within a
+minute past the recording raises {class}`~macos.CommandTimeoutError`, a
+`TimeoutError`, and isn't saved. To make it smaller or an `.mp4`, see
 {func}`macos.video.convert`.
+
+Ctrl-C, a Jupyter interrupt or a `kill` of Python's pid stops the recording
+early and lets `screencapture` finish the movie, which is kept; a key typed in
+the terminal doesn't stop it. A recording outlives Python only when Python is
+killed (SIGKILL), handles or ignores SIGHUP or SIGTERM itself, or records off
+the main thread: it then runs until its own `seconds` end.
 
 ## Wallpaper
 
@@ -249,7 +264,8 @@ user needs their password or Touch ID to come back. It uses a private macOS
 framework, since there's no public one.
 
 {func}`~macos.screen.is_locked` tells whether the screen is locked, and
-{func}`~macos.screen.is_asleep` whether a display is off to save energy, so a
+{func}`~macos.screen.is_asleep` whether a display is off to save energy (a
+display that isn't connected, unplugged since, raises `ValueError`), so a
 script can wait for the user to come back:
 
 ```python

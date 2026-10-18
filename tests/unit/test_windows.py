@@ -71,6 +71,11 @@ def test_tile_grid():
     assert top + height == 820
 
 
+def _displays(*usable):
+    """Displays as :func:`macos.windows._displays` gives them, each as large as its usable area."""
+    return [(area, area) for area in usable]
+
+
 class _FakeWindow:
     def __init__(self, x, y):
         self.frame = (x, y, 300, 200)
@@ -88,7 +93,7 @@ def test_tile_keeps_each_display_and_the_order(monkeypatch):
 
     from macos import windows
 
-    monkeypatch.setattr(windows, "_usable_areas", lambda: [(0, 25, 1000, 800), (1000, 0, 800, 600)])
+    monkeypatch.setattr(windows, "_displays", lambda: _displays((0, 25, 1000, 800), (1000, 0, 800, 600)))
     right, left, other = _FakeWindow(500, 100), _FakeWindow(20, 100), _FakeWindow(1100, 50)
 
     windows.tile([right, left, other])
@@ -124,7 +129,7 @@ def test_tile_all_ignores_an_app_that_quits(monkeypatch):
     monkeypatch.setattr(windows, "_list", lambda targets, title: [])
     monkeypatch.setattr(windows.apps, "running", lambda **options: pytest.fail("the apps are scanned once, by _targets"))
     tiled = []
-    monkeypatch.setattr(windows, "tile", lambda chosen, **options: tiled.append(chosen))
+    monkeypatch.setattr(windows, "_tile", lambda chosen, *options, **flags: tiled.append(chosen) or chosen)
 
     assert windows.tile_all("Terminal") == [] and tiled == [[]] and scans == ["Terminal"]
 
@@ -136,7 +141,7 @@ def test_tile_with_too_large_a_gap_moves_nothing(monkeypatch):
 
     with pytest.raises(ValueError, match="gap of 400 points leaves no room"):
         windows._grid(2, (0, 0, 1000, 800), None, 400)
-    monkeypatch.setattr(windows, "_usable_areas", lambda: [(0, 25, 1000, 800), (1000, 0, 400, 300)])
+    monkeypatch.setattr(windows, "_displays", lambda: _displays((0, 25, 1000, 800), (1000, 0, 400, 300)))
     first, second = _FakeWindow(10, 100), _FakeWindow(1100, 50)
     with pytest.raises(ValueError, match="no room"):
         windows.tile([first, second], gap=160)  # fits the first display, not the second
@@ -159,7 +164,7 @@ def test_center_keeps_clear_of_the_menu_bar_and_the_dock(monkeypatch):
             self._frame = (x, y) + self._frame[2:]
 
     # A display 1000 x 800 whose menu bar takes 25 points at the top and the Dock 75 at the bottom.
-    monkeypatch.setattr(windows, "_usable_areas", lambda: [(0, 25, 1000, 700), (1000, 0, 800, 600)])
+    monkeypatch.setattr(windows, "_displays", lambda: _displays((0, 25, 1000, 700), (1000, 0, 800, 600)))
     window = Window((0, 0, 400, 300))
     window.center()
     assert window.frame == (300, 225, 400, 300)
@@ -177,6 +182,10 @@ def test_set_fullscreen_tells_a_window_that_cannot_go_full_screen(monkeypatch):
         def __init__(self, status):
             self._element, self.app, self.pid = 0, "Test", 1
             self.status = status
+
+        @property
+        def fullscreen(self):
+            return False
 
         def _set_flag(self, attribute, on, what):
             windows._check(self.status, what)
@@ -259,6 +268,7 @@ class _FakeAX:
 
     def __init__(self):
         self.refs, self.attributes, self.failing, self.trusted = {}, {}, {}, True
+        self.broken = {}  # element: the AXError reading any of its attributes answers with
         self.set, self.performed = [], []
 
     def ref(self, value):
@@ -286,6 +296,8 @@ class _FakeAX:
     def AXUIElementCopyAttributeValue(self, element, name, out):
         if not self.trusted:
             return _API_DISABLED
+        if element in self.broken:
+            return self.broken[element]
         holder = self.refs[element]
         for pid, status in self.failing.items():
             if holder is self.attributes.get(pid, None) or (pid not in self.attributes and holder == {}):
@@ -388,7 +400,7 @@ def test_windows_of_an_app_read_their_titles_frames_and_state(fake_ax):
 
 def test_windows_of_an_app_found_by_name(fake_ax, monkeypatch):
     terminal = _two_windows(fake_ax)
-    monkeypatch.setattr(macos.apps, "get", lambda name: terminal if name == "Terminal" else None)
+    monkeypatch.setattr(macos.apps, "running", lambda include_background=False: [terminal])
 
     assert [window.title for window in macos.windows.list("Terminal")] == ["Notes", "Scratch"]
     assert macos.windows.list("Typo") == []  # not running by that name: as documented, no windows
@@ -454,3 +466,169 @@ def test_window_actions_reach_the_right_element(fake_ax):
     fake_ax.refs[front._element]["AXCloseButton"] = button
     front.close()
     assert fake_ax.performed[-1][1] == "AXPress" and fake_ax.refs[fake_ax.performed[-1][0]] is fake_ax.refs[button]
+
+
+def test_a_window_that_closes_while_titles_are_read_is_left_out(fake_ax):
+    terminal = _two_windows(fake_ax)
+    gone = fake_ax.element(AXTitle="Gone")
+    busy_front, busy_back = fake_ax.element(AXTitle="Save"), fake_ax.element(AXTitle="Save as")
+    fake_ax.app(9, AXWindows=[busy_front, busy_back])
+    busy = macos.apps.App("Busy", "com.example.busy", 9, None)
+    fake_ax.attributes[7]["AXWindows"].insert(0, gone)
+    fake_ax.broken[gone] = -25202  # kAXErrorInvalidUIElement: closed since it was listed
+    fake_ax.broken[busy_front] = _CANNOT_COMPLETE  # its app went busy after listing its windows
+
+    asked = []
+    copy = fake_ax.AXUIElementCopyAttributeValue
+    fake_ax.AXUIElementCopyAttributeValue = lambda element, name, out: asked.append(element) or copy(element, name, out)
+
+    assert macos.windows.list(busy, title="s") == []
+    assert busy_back not in asked  # the busy app's other window isn't asked: two seconds each, for nothing
+    assert [window.title for window in macos.windows.list(terminal, title="notes")] == ["Notes"]
+    fake_ax.trusted = False
+    with pytest.raises(macos.PermissionDeniedError):
+        _windows._list([terminal], "notes")
+
+
+def test_a_name_covers_every_running_app_that_goes_by_it(fake_ax, monkeypatch):
+    first = fake_ax.element(AXTitle="probe", AXPosition=(0.0, 0.0), AXSize=(10.0, 10.0))
+    fake_ax.app(20, AXWindows=[first])
+    fake_ax.app(21, AXWindows=[])
+    older = macos.apps.App("Python", "org.python.python", 20, "/usr/local/bin/Python.app")
+    newer = macos.apps.App("Python", "org.python.python", 21, "/usr/local/bin/Python.app")
+    other = macos.apps.App("Terminal", "com.apple.Terminal", 22, None)
+    monkeypatch.setattr(macos.apps, "running", lambda include_background=False: [newer, other, older])
+
+    assert [window.pid for window in macos.windows.list("python")] == [20]
+    assert macos.windows.wait_for("Python", title="probe", timeout=0).pid == 20
+    assert macos.windows.list(newer) == []  # an App: that one only
+    assert macos.windows.list("Typo") == []
+
+
+def test_a_translocated_app_is_found_by_its_own_path_too(fake_ax, monkeypatch):
+    window = fake_ax.element(AXTitle="probe", AXPosition=(0.0, 0.0), AXSize=(10.0, 10.0))
+    fake_ax.app(20, AXWindows=[window])
+    copy_path = "/private/var/folders/xy/AppTranslocation/UUID/d/Tool.app"
+    tool = macos.apps.App("Tool", "com.example.tool", 20, copy_path)
+    monkeypatch.setattr(macos.apps, "running", lambda include_background=False: [tool])
+    original = {copy_path: "/Users/me/Downloads/Tool.app"}
+    monkeypatch.setattr(macos.apps, "_real_bundle_path", lambda path: original.get(path, path))
+
+    assert [found.pid for found in macos.windows.list(copy_path)] == [20]  # the path App.path holds
+    assert [found.pid for found in macos.windows.list("/Users/me/Downloads/Tool.app")] == [20]  # where it was opened
+
+
+def test_a_window_over_a_displays_dock_stays_on_that_display(monkeypatch):
+    from macos import windows
+
+    # Display 2 at x=1440 shows its Dock at the bottom: its usable area ends 70 points above its edge.
+    displays = [((0, 0, 1440, 900), (0, 25, 1440, 875)), ((1440, 0, 1920, 1080), (1440, 25, 1920, 985))]
+    assert windows._index_of((1600, 1040, 400, 60), displays) == 1  # its middle over display 2's Dock
+    assert windows._index_of((1600, 5, 400, 30), displays) == 1  # over its menu bar
+    assert windows._index_of((1500, 1050, 300, 200), displays) == 1  # half off its bottom edge: the one it overlaps
+    assert windows._index_of((5000, 5000, 10, 10), displays) == 0  # off every display: the main one
+    assert windows._area_of((1600, 1040, 400, 60), displays) == (1440, 25, 1920, 985)
+
+
+def test_wait_for_checks_its_timeout(monkeypatch):
+    windows = macos.windows
+    with pytest.raises(ValueError, match="nan"):
+        windows.wait_for("TextEdit", timeout=float("nan"))
+    with pytest.raises(ValueError, match="interval"):
+        windows.wait_for("TextEdit", interval=float("nan"))
+    answers = iter([[]] * 50 + [["the window"]])
+    monkeypatch.setattr(windows, "list", lambda app=None, title=None: next(answers))
+    monkeypatch.setattr(windows.time, "sleep", lambda seconds: None)
+    assert windows.wait_for(title="Save", timeout=None) == "the window"  # None: until it shows up
+
+
+def test_set_fullscreen_already_in_that_state_asks_nothing(monkeypatch):
+    class Window(macos.windows.Window):
+        def __init__(self):
+            self._element, self.app, self.pid = 0, "Test", 1
+            self.requests = 0
+
+        @property
+        def fullscreen(self):
+            return False
+
+        def _set_flag(self, attribute, on, what):
+            self.requests += 1
+
+    monkeypatch.setattr(macos.windows.time, "sleep", lambda seconds: pytest.fail("no animation to wait for"))
+    window = Window()
+    window.set_fullscreen(False)
+    assert window.requests == 0
+
+
+def test_sizes_and_positions_must_be_finite(fake_ax):
+    front, _ = macos.windows.list(_two_windows(fake_ax))
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and positive"):
+            front.resize(bad, 600)
+        with pytest.raises(ValueError, match="finite"):
+            front.move(0, bad)
+        with pytest.raises(ValueError, match="finite"):
+            front.set_frame(bad, 0, 800, 600)
+    assert front.frame == (10, 25, 640, 480)  # nothing changed, not even the size
+    front.move(-1440, -200)  # displays left of or above the main one
+    assert front.position == (-1440, -200)
+
+
+def test_tile_all_goes_on_when_a_window_closes(monkeypatch):
+    from macos import windows
+
+    class Shown(_FakeWindow):
+        """A regular window that shows, as tile_all keeps."""
+
+        pid, _standard, minimized, fullscreen = 1, True, False, False
+
+    class Closing(Shown):
+        def set_frame(self, x, y, width, height):
+            raise windows._AXError("could not resize the window: the window is gone", -25202)
+
+    class Closed(Shown):
+        @property
+        def frame(self):
+            raise windows._AXError("could not read the window's AXPosition: the window is gone", -25202)
+
+        @frame.setter
+        def frame(self, value):
+            pass
+
+    class Refused(Shown):
+        def set_frame(self, x, y, width, height):
+            windows._check(-25211, "resize the window")
+
+    first, closing, closed, last = Shown(0, 100), Closing(300, 100), Closed(0, 0), Shown(600, 100)
+    chosen = [first, closing, closed, last]
+    monkeypatch.setattr(windows, "has_permission", lambda: True)
+    monkeypatch.setattr(windows, "_targets", lambda app: [])
+    monkeypatch.setattr(windows, "_list", lambda targets, title: chosen)
+    monkeypatch.setattr(windows, "_displays", lambda: _displays((0, 0, 900, 600)))
+
+    assert windows.tile_all() == [first, last]  # the ones moved
+    assert first.frame == (0, 0, 450, 300) and last.frame == (0, 300, 900, 300)  # the closing one's cell left empty
+    with pytest.raises(macos.MacOSError, match="gone"):
+        windows.tile([first, closing])  # windows passed by hand: still said
+    chosen[:] = [Refused(0, 0)]
+    with pytest.raises(macos.PermissionDeniedError):
+        windows.tile_all()
+
+
+@pytest.mark.parametrize("written", ["NO", "false", "0", False, 0])
+def test_window_settings_written_as_text_read_as_macos_reads_them(monkeypatch, written):
+    # ``defaults write ... Key NO`` stores the text "NO", which bool() takes for true
+    monkeypatch.setattr(_windows.defaults, "read", lambda domain, key, default=None: written)
+
+    assert _windows.tiling() is False
+    assert _windows.click_wallpaper_to_show_desktop() is False
+    assert _windows.animations() is False
+
+
+def test_window_settings_unset_or_unreadable_are_on(monkeypatch):
+    monkeypatch.setattr(_windows.defaults, "read", lambda domain, key, default=None: default)
+    assert _windows.tiling() and _windows.click_wallpaper_to_show_desktop() and _windows.animations()
+
+    monkeypatch.setattr(_windows.defaults, "read", lambda domain, key, default=None: ["junk"])
+    assert _windows.tiling() and _windows.click_wallpaper_to_show_desktop() and _windows.animations()

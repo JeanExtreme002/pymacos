@@ -27,13 +27,15 @@ macos.shortcuts.run("Make GIF", input=[Path("a.png"), Path("b.png")])
 ```
 
 A plain string on its own is always text, even if it looks like a path: wrap a
-single file name in `Path(...)`.
+single file name in `Path(...)`. Input of any other type, `bytes` among them,
+raises `TypeError`.
 
 ## Output
 
 {func}`~macos.shortcuts.run` returns the shortcut's text output, or `None` if
-it produced none. When the shortcut outputs a file (an image, a PDF...), pass
-`output` to save it; `run` then returns `None`:
+it produced none, its line endings as the shortcut wrote them (a `\r\n` CSV
+comes back with `\r\n`). When the shortcut outputs a file (an image, a
+PDF...), pass `output` to save it; `run` then returns `None`:
 
 ```python
 macos.shortcuts.run("Make GIF", input=[Path("a.png"), Path("b.png")], output="animation.gif")
@@ -54,7 +56,13 @@ doesn't print the command's usage.
 ```python
 macos.shortcuts.list()                  # every shortcut
 macos.shortcuts.list(folder="Work")     # only the ones in a folder
+macos.shortcuts.list(folder="none")     # only the ones in no folder
 ```
+
+`folder` is a folder's name or its identifier. `"none"` stands for the
+shortcuts in no folder, so a folder actually named "none" is listed by its
+identifier. A folder that doesn't exist raises `LookupError`; an empty one
+gives `[]`.
 
 ## Errors
 

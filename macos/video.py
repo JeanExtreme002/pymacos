@@ -16,6 +16,7 @@ Uses AVFoundation, the framework behind QuickTime Player, and the
 """
 
 import ctypes
+import math
 import os
 import re
 import struct
@@ -28,7 +29,7 @@ from typing import Generator, Iterable, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _cg, _files, _media, _objc
 from ._system import framework, run as _run
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = [
     "VideoInfo",
@@ -98,7 +99,8 @@ def _load() -> None:
     framework("AppKit")
 
 
-_existing = _files.existing
+def _existing(path: PathLike) -> Path:
+    return _media.source(path, "video")
 
 
 def _asset(path: Path) -> int:
@@ -160,6 +162,29 @@ def _upright_size(track: int) -> Tuple[int, int]:
     return (height, width) if abs(transform.b) > 0.5 and abs(transform.c) > 0.5 else (width, height)
 
 
+def _picture_end(asset: int, duration: float) -> float:
+    """
+    Where the picture of ``asset`` ends, in seconds: at most ``duration``, the asset's own.
+
+    The duration counts the sound too, which may go on after the picture's
+    last frame: that frame is what plays then, and nothing is there to read
+    past the picture's own end.
+    """
+    ends = [
+        _seconds(span.start) + _seconds(span.duration)
+        for span in (_objc.send(track, "timeRange", restype=_media.CMTimeRange) for track in _media.tracks(asset, "vide"))
+    ]
+    return min(max(ends, default=duration), duration)
+
+
+def _last_moment(path: Path) -> float:
+    """A time inside the last frame of the video at ``path``: a millisecond before its picture ends."""
+    _load()
+    with _objc.autorelease_pool():
+        asset = _asset(path)
+        return max(_picture_end(asset, _seconds(_objc.send(asset, "duration", restype=_CMTime))) - 0.001, 0.0)
+
+
 def info(path: PathLike) -> VideoInfo:
     """Return the duration, size, frame rate and codec of a video file, and whether it has sound."""
     _load()
@@ -200,8 +225,8 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
     The frame is turned upright, like the video plays. ``at`` may be the
     video's duration, as :func:`info` gives it: that's its last frame.
     """
-    if at < 0:
-        raise ValueError("at must not be negative, not {}".format(at))
+    if not math.isfinite(at) or at < 0:
+        raise ValueError("at must be a number of seconds, not negative, not {}".format(at))
     if size is not None and size <= 0:
         raise ValueError("size must be positive, not {}".format(size))
     _load()
@@ -214,13 +239,8 @@ def frame(path: PathLike, at: float = 0.0, *, size: Optional[int] = None) -> byt
         # frames() does: that's inside the last frame, where the very end isn't.
         if round(at, 3) > round(duration, 3):
             raise ValueError("at={} is past the end of the {:.3f}-second video".format(at, duration))
-        # The duration counts the sound too, which may go on after the picture's last frame: that frame is
-        # what plays then, and nothing is there to read past the picture's own end.
-        ends = [
-            _seconds(span.start) + _seconds(span.duration)
-            for span in (_objc.send(track, "timeRange", restype=_media.CMTimeRange) for track in _media.tracks(asset, "vide"))
-        ]
-        moment = min(at, max(min(max(ends, default=duration), duration) - 0.001, 0.0))
+        # Past the picture's last frame (the sound may go on after it), that frame is the one read.
+        moment = min(at, max(_picture_end(asset, duration) - 0.001, 0.0))
         generator = _objc.send(
             _objc.cls("AVAssetImageGenerator"), "assetImageGeneratorWithAsset:", asset, argtypes=(_objc.id,)
         )
@@ -288,8 +308,9 @@ def convert(
     if quality not in _QUALITY:
         raise ValueError("quality must be 'high', 'medium' or 'low', not {!r}".format(quality))
     for label, value in (("start", start), ("duration", duration)):
-        if value is not None and (value < 0 or (label == "duration" and value == 0)):
-            raise ValueError("{} must be positive, not {}".format(label, value))
+        # NaN passes both comparisons, and avconvert would be handed "nan" or "inf".
+        if value is not None and (not math.isfinite(value) or value < 0 or (label == "duration" and value == 0)):
+            raise ValueError("{} must be a finite, positive number of seconds, not {}".format(label, value))
     if extension == ".m4a":
         if not info(original).has_audio:
             raise ValueError("{} has no sound to keep".format(original))
@@ -307,12 +328,19 @@ def convert(
         preset = "PresetHEVCHighestQuality" if hevc and quality == "high" else _QUALITY[quality]
         if hevc and quality != "high":
             raise ValueError("hevc=True only has the 'high' quality; pass height= to make it smaller")
+    _check_playable(original)
     args = ["avconvert", "--source", str(original), "--preset", preset]
     if start is not None:
         args += ["--start", str(start)]
     if duration is not None:
         args += ["--duration", str(duration)]
     return _avconvert(original, target, args)
+
+
+def _check_playable(path: Path) -> None:
+    """``ValueError`` for a file that isn't a video, before avconvert, which would say only that it failed."""
+    with _objc.autorelease_pool():
+        _asset(path)
 
 
 def _avconvert(source: Path, target: Path, args: List[str]) -> Path:
@@ -438,8 +466,9 @@ def to_gif(
     if width <= 0:
         raise ValueError("width must be positive, not {}".format(width))
     for label, value in (("start", start), ("duration", duration)):
-        if value is not None and (value < 0 or (label == "duration" and value == 0)):
-            raise ValueError("{} must be positive, not {}".format(label, value))
+        # NaN passes both comparisons, and avconvert would be handed "nan" or "inf".
+        if value is not None and (not math.isfinite(value) or value < 0 or (label == "duration" and value == 0)):
+            raise ValueError("{} must be a finite, positive number of seconds, not {}".format(label, value))
     target = Path(output).expanduser().absolute()
     if target.suffix.lower() != ".gif":
         raise ValueError("the output must be a .gif, not {!r}".format(target.suffix))
@@ -449,9 +478,11 @@ def to_gif(
         raise ValueError("start={} is past the end of the {:.3f}-second video".format(begin, details.duration))
     end = min(details.duration, begin + duration) if duration is not None else details.duration
     step = 1.0 / fps
-    times = [begin + index * step for index in range(max(1, int((end - begin) * fps)))]
-
     original = _existing(source)
+    # Where the sound goes on after the picture, its last frame is what shows, as it does playing.
+    last = _last_moment(original)
+    times = [min(begin + index * step, last) for index in range(max(1, int((end - begin) * fps)))]
+
     io = image._io()
     scaled = width if width < details.width else None
     high = round(details.height * scaled / details.width) if scaled and details.width else details.height
@@ -488,13 +519,15 @@ def frames(path: PathLike, every: float = 1.0, *, size: Optional[int] = None) ->
         for index, png in enumerate(macos.video.frames("clip.mov", every=5, size=640)):
             Path("frame-{:03}.png".format(index)).write_bytes(png)
     """
-    if every <= 0:
-        raise ValueError("every must be positive, not {}".format(every))
+    if not math.isfinite(every) or every <= 0:
+        raise ValueError("every must be a finite, positive number of seconds, not {}".format(every))
     if size is not None and size <= 0:
         raise ValueError("size must be positive, not {}".format(size))
     details = info(path)
     count = max(1, int(details.duration / every) + (1 if details.duration % every else 0))
-    times = [min(index * every, max(details.duration - 0.001, 0)) for index in range(count)]
+    # A millisecond before the picture's end at most: the last frame, even where the sound goes on after it.
+    last = _last_moment(_existing(path))
+    times = [min(index * every, last) for index in range(count)]
     width = None
     if size is not None and details.width and details.height:
         width = size if details.width >= details.height else max(1, round(size * details.width / details.height))
@@ -531,8 +564,10 @@ def trim(source: PathLike, output: PathLike, start: float = 0.0, duration: Optio
     ``output`` may be the source itself; a cut that fails leaves the file
     that was there as it was.
     """
-    if start < 0 or (duration is not None and duration <= 0):
-        raise ValueError("start must not be negative and duration must be positive")
+    if not math.isfinite(start) or start < 0:
+        raise ValueError("start must be a finite number of seconds, not negative, not {}".format(start))
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
+        raise ValueError("duration must be a finite, positive number of seconds, not {}".format(duration))
     original = _existing(source)
     target = _target(output)
     length = info(original).duration
@@ -565,6 +600,7 @@ def concat(videos: Sequence[PathLike], output: PathLike) -> Path:
         picture = _media.add_track(joined, "vide")
         sound: Optional[int] = None
         at = 0.0
+        first: Optional[int] = None
         for index, source in enumerate(sources):
             media = _media.asset(source)
             length = _media.duration(media)
@@ -573,6 +609,7 @@ def concat(videos: Sequence[PathLike], output: PathLike) -> Path:
                 raise ValueError("{} has no video".format(source))
             _media.insert(picture, videos_in[0], 0, length, at)
             if index == 0:
+                first = media
                 transform = _objc.send(videos_in[0], "preferredTransform", restype=_objc.CGAffineTransform)
                 _objc.send(picture, "setPreferredTransform:", transform, argtypes=(_objc.CGAffineTransform,), restype=None)
             sounds = _media.tracks(media, "soun")
@@ -582,7 +619,8 @@ def concat(videos: Sequence[PathLike], output: PathLike) -> Path:
                 sound_length = _media.seconds(_objc.send(sounds[0], "timeRange", restype=_media.CMTimeRange).duration)
                 _media.insert(sound, sounds[0], 0, min(length, sound_length), at)
             at += length
-        return _media.export(joined, target, length=at)
+        # The first clip's metadata (when and where it was shot...): a composition has none.
+        return _media.export(joined, target, length=at, source=first)
 
 
 def speed(source: PathLike, output: PathLike, factor: float) -> Path:
@@ -593,13 +631,24 @@ def speed(source: PathLike, output: PathLike, factor: float) -> Path:
     Re-encodes at the highest quality::
 
         macos.video.speed("walk.mov", "timelapse.mp4", 8)
+
+    A ``factor`` that would make the video last less than 1/600 of a second
+    raises :class:`ValueError`.
     """
-    if factor <= 0:
+    if not math.isfinite(factor) or factor <= 0:
         raise ValueError("factor must be positive, not {}".format(factor))
     target = _target(output)
     with _objc.autorelease_pool():
-        edited = _media.editable(_media.asset(_existing(source)))
+        media = _media.asset(_existing(source))
+        edited = _media.editable(media, keep_state=False)  # re-encoded: a second language that's off would be lost
         length = _media.duration(edited)
+        # Rounded to no time at all, the new length would leave the video as it was: not sped up, and no error.
+        if length > 0 and _media.time(length / factor).value == 0:
+            raise ValueError(
+                "factor {} is too large: the {:.3f}-second video would last less than 1/{} s".format(
+                    factor, length, _media.TIMESCALE
+                )
+            )
         _objc.send(
             edited,
             "scaleTimeRange:toDuration:",
@@ -608,7 +657,7 @@ def speed(source: PathLike, output: PathLike, factor: float) -> Path:
             argtypes=(_media.CMTimeRange, _media.CMTime),
             restype=None,
         )
-        return _media.export(edited, target, time_pitch="Spectral", length=length / factor)
+        return _media.export(edited, target, time_pitch="Spectral", length=length / factor, source=media)
 
 
 def _concat_transforms(first: _objc.CGAffineTransform, second: _objc.CGAffineTransform) -> _objc.CGAffineTransform:
@@ -656,7 +705,7 @@ def rotate(source: PathLike, output: PathLike, degrees: int) -> Path:
                 argtypes=(_objc.CGAffineTransform,),
                 restype=None,
             )
-        return _media.export(edited, target, preset="AVAssetExportPresetPassthrough")
+        return _media.export(edited, target, preset="AVAssetExportPresetPassthrough", source=media)
 
 
 def crop(source: PathLike, output: PathLike, box: Tuple[int, int, int, int]) -> Path:
@@ -665,7 +714,8 @@ def crop(source: PathLike, output: PathLike, box: Tuple[int, int, int, int]) -> 
 
     The box is measured on the upright picture, as it plays. Video encoders
     need even sizes, so an odd width or height loses its last pixel.
-    Re-encodes at the highest quality, sound included::
+    Re-encodes at the highest quality, sound included, at the video's own
+    frame rate (up to 240 frames per second)::
 
         macos.video.crop("screen.mov", "window.mov", (100, 80, 1280, 720))
     """
@@ -675,7 +725,7 @@ def crop(source: PathLike, output: PathLike, box: Tuple[int, int, int, int]) -> 
     target = _target(output)
     with _objc.autorelease_pool():
         media = _media.asset(_existing(source))
-        edited = _media.editable(media)
+        edited = _media.editable(media, keep_state=False)  # re-encoded: a second language that's off would be lost
         videos = _media.tracks(edited, "vide")
         if not videos:
             raise ValueError("{} has no video to crop".format(source))
@@ -712,15 +762,16 @@ def crop(source: PathLike, output: PathLike, box: Tuple[int, int, int, int]) -> 
         composition = _objc.new("AVMutableVideoComposition")
         _objc.send(composition, "setRenderSize:", render, argtypes=(_objc.CGSize,), restype=None)
         rate = float(_objc.send(videos[0], "nominalFrameRate", restype=ctypes.c_float)) or 30.0
+        # In thousandths of a frame per second: exact for 48, 23.976 or 120 fps, where 1/600 s units aren't.
         _objc.send(
             composition,
             "setFrameDuration:",
-            _media.CMTime(_media.TIMESCALE // max(1, min(int(round(rate)), 60)), _media.TIMESCALE, 1, 0),
+            _media.CMTime(1000, max(1000, min(round(rate * 1000), 240000)), 1, 0),
             argtypes=(_media.CMTime,),
             restype=None,
         )
         _objc.send(composition, "setInstructions:", _objc.nsarray_of([instruction]), argtypes=(_objc.id,), restype=None)
-        return _media.export(edited, target, video_composition=composition)
+        return _media.export(edited, target, video_composition=composition, source=media)
 
 
 def mute(source: PathLike, output: PathLike) -> Path:
@@ -738,7 +789,7 @@ def mute(source: PathLike, output: PathLike) -> Path:
             _media.insert(copy, track, 0, length, 0)
             transform = _objc.send(track, "preferredTransform", restype=_objc.CGAffineTransform)
             _objc.send(copy, "setPreferredTransform:", transform, argtypes=(_objc.CGAffineTransform,), restype=None)
-        return _media.export(silent, target, preset="AVAssetExportPresetPassthrough")
+        return _media.export(silent, target, preset="AVAssetExportPresetPassthrough", source=media)
 
 
 def add_audio(
@@ -761,8 +812,8 @@ def add_audio(
         macos.video.add_audio("timelapse.mov", "music.m4a", "timelapse-music.mp4", volume=0.5)
         macos.video.add_audio("talk.mov", "dub.m4a", "dubbed.mov", replace=True)
     """
-    if at < 0:
-        raise ValueError("at must not be negative, not {}".format(at))
+    if not math.isfinite(at) or at < 0:
+        raise ValueError("at must be a number of seconds, not negative, not {}".format(at))
     if not 0.0 <= volume <= 1.0:
         raise ValueError("volume must be from 0.0 to 1.0, not {}".format(volume))
     target = _target(output)
@@ -776,7 +827,8 @@ def add_audio(
         _copy_picture(picture, mixed, length)
         if not replace:
             for track in _media.tracks(picture, "soun"):
-                _media.copy_track(mixed, track, "soun", length)
+                # Re-encoded with the mix: every track on, or one that's off (a second language) is left out.
+                _media.copy_track(mixed, track, "soun", length, keep_state=False)
         added_tracks = _media.tracks(sound, "soun")
         if not added_tracks:
             raise ValueError("{} has no sound".format(audio))
@@ -795,7 +847,7 @@ def add_audio(
         )
         mix = _objc.new("AVMutableAudioMix")
         _objc.send(mix, "setInputParameters:", _objc.nsarray_of([parameters]), argtypes=(_objc.id,), restype=None)
-        return _media.export(mixed, target, audio_mix=mix)
+        return _media.export(mixed, target, audio_mix=mix, source=picture)
 
 
 def _copy_picture(source: int, target: int, length: float) -> None:
@@ -870,6 +922,9 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
     """
     _load()
     width, height = width - width % 2, height - height % 2  # encoders need even sizes
+    # Checked here: the writer would throw an Objective-C exception for an empty size, which aborts Python.
+    if width < 2 or height < 2:
+        raise ValueError("a video needs a size of at least 2 x 2 pixels, not {} x {}".format(width, height))
     # Beside the target, at a path where nothing is yet: the writer refuses to replace a file.
     with _files.replacing(target) as temporary:
         name = str(temporary)
@@ -910,7 +965,7 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
             if not _objc.send(writer, "startWriting", restype=_objc.BOOL):
                 raise MacOSError("could not start writing {}".format(target))
             try:
-                _feed_frames(writer, writer_input, adaptor, pictures, fps, width, height)
+                count = _feed_frames(writer, writer_input, adaptor, pictures, fps, width, height)
             except BaseException:
                 # Whatever stopped it (a bad frame, Ctrl-C): the writer is told, so it closes its file
                 # and frees the encoder now, not when the pool drains. Only here, before the finish is
@@ -920,15 +975,27 @@ def _write_frames(pictures: Iterable[int], target: Path, fps: float, width: int,
                 if _objc.send(writer, "status", restype=_objc.NSInteger) == _WRITING:
                     _objc.send(writer, "cancelWriting", restype=None)
                 raise
-            _finish_writing(writer, writer_input)
+            _finish_writing(writer, writer_input, _frame_time(count, fps) if count else None)
     return target
+
+
+_FRAME_TIMESCALE = 600000  # units of a second the frames are timed in: 1/600 s would round 1/7 s, and more
+
+
+def _frame_time(index: int, fps: float) -> _CMTime:
+    """When frame ``index`` shows, ``fps`` frames a second: each one from its index, so no error adds up."""
+    value = round(index * _FRAME_TIMESCALE / fps)
+    if value >= 2**63:  # ctypes would wrap it without a word
+        raise ValueError("frame {} at {} fps is too far into the video".format(index + 1, fps))
+    return _media.CMTime(value, _FRAME_TIMESCALE, 1, 0)
 
 
 def _feed_frames(
     writer: int, writer_input: int, adaptor: int, pictures: Iterable[int], fps: float, width: int, height: int
-) -> None:
-    """Feed ``pictures`` to a started ``writer``, one every ``1 / fps`` seconds."""
+) -> int:
+    """Feed ``pictures`` to a started ``writer``, one every ``1 / fps`` seconds, and return how many."""
     _objc.send(writer, "startSessionAtSourceTime:", _media.time(0), argtypes=(_media.CMTime,), restype=None)
+    count = 0
     for index, picture in enumerate(pictures):
         # A pool per frame: what encoding one autoreleases goes with it, not after the last.
         with _objc.autorelease_pool():
@@ -937,17 +1004,17 @@ def _feed_frames(
                 if _objc.send(writer, "status", restype=_objc.NSInteger) != _WRITING:
                     raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
                 if time.monotonic() > deadline:
-                    raise MacOSError("the video encoder stopped taking frames")
+                    raise WaitTimeoutError(
+                        "the video encoder didn't take a frame within {} seconds".format(int(_WRITER_PATIENCE))
+                    )
                 time.sleep(0.005)
             buffer = _pixel_buffer(picture, width, height)
             try:
-                # index / fps seconds, exactly: value index * 600, timescale fps * 600.
-                moment = _media.CMTime(index * 600, int(round(fps * 600)), 1, 0)
                 appended = _objc.send(
                     adaptor,
                     "appendPixelBuffer:withPresentationTime:",
                     buffer,
-                    moment,
+                    _frame_time(index, fps),
                     argtypes=(ctypes.c_void_p, _media.CMTime),
                     restype=_objc.BOOL,
                 )
@@ -955,10 +1022,19 @@ def _feed_frames(
                 _cf.release(buffer)
             if not appended:
                 raise MacOSError("could not add frame {} to the video".format(index + 1))
+            count += 1
+    return count
 
 
-def _finish_writing(writer: int, writer_input: int) -> None:
-    """Tell a fed ``writer`` the frames are over, and wait for it to finish the file."""
+def _finish_writing(writer: int, writer_input: int, end: Optional[_CMTime] = None) -> None:
+    """
+    Tell a fed ``writer`` the frames are over, at ``end`` if given, and wait for it to finish the file.
+
+    Without an end the last frame lasts as long as the one before it, and a
+    lone frame next to nothing (1/15 s): with one, it lasts until ``end``.
+    """
+    if end is not None:
+        _objc.send(writer, "endSessionAtSourceTime:", end, argtypes=(_media.CMTime,), restype=None)
     _objc.send(writer_input, "markAsFinished", restype=None)
     _objc.send(
         writer,
@@ -969,7 +1045,7 @@ def _finish_writing(writer: int, writer_input: int) -> None:
     )
     status = lambda: _objc.send(writer, "status", restype=_objc.NSInteger)  # noqa: E731
     if not _objc.run_until(lambda: status() != _WRITING, 600):
-        raise MacOSError("the video didn't finish writing")
+        raise WaitTimeoutError("the video didn't finish writing within 600 seconds")
     if status() != _WRITTEN:
         raise MacOSError("could not write the video: {}".format(_writer_failure(writer)))
 
@@ -988,27 +1064,28 @@ def from_images(
     Make a video from images, one after another, ``fps`` of them per second, and return ``output``.
 
     For timelapses and slideshows: at ``fps=1`` each image shows for a
-    second. The video takes the first image's size (or ``width``, keeping its
-    proportions); images of other shapes are fitted in, on black::
+    second, and ``fps=0.1`` for ten. ``fps`` is at most 1000. The video takes
+    the first image's size (or ``width``, keeping its proportions), at least
+    2 x 2 pixels; images of other shapes are fitted in, on black::
 
         photos = sorted(Path("~/Pictures/Garden").expanduser().glob("*.jpg"))
         macos.video.from_images(photos, "garden.mp4", fps=12, width=1280)
     """
     if not images:
         raise ValueError("from_images() needs at least one image")
-    if fps <= 0:
-        raise ValueError("fps must be positive, not {}".format(fps))
+    if not (math.isfinite(fps) and 0 < fps <= 1000):
+        raise ValueError("fps must be above 0 and at most 1000, not {}".format(fps))
     if width is not None and width < 2:
         raise ValueError("width must be at least 2, not {}".format(width))
     target = _target(output)
-    sources = [_existing(image) for image in images]
+    sources = [_files.existing(image) for image in images]
     from . import image as image_module
 
     first = image_module.info(sources[0])
     first_width, first_height = first.width, first.height
     if first.orientation in (5, 6, 7, 8):
         first_width, first_height = first_height, first_width
-    frame_width = width or first_width
+    frame_width = max(2, width or first_width)  # a 1-pixel-wide image is drawn 2 wide, as a 1-pixel-tall one is tall
     frame_height = max(2, round(frame_width * first_height / first_width))
     longest = max(frame_width, frame_height)
 
@@ -1032,7 +1109,8 @@ def reverse(source: PathLike, output: PathLike) -> Path:
     Save a video played backwards, sound included, and return ``output``.
 
     Every frame is read and written again, so it's slow on long or large
-    videos: a few seconds of clip is the sweet spot.
+    videos: a few seconds of clip is the sweet spot. A video of more than 60
+    frames per second is reversed at 60.
     """
     from . import audio
 
@@ -1041,7 +1119,9 @@ def reverse(source: PathLike, output: PathLike) -> Path:
     details = info(original)
     rate = min(details.fps or 30.0, 60.0)
     count = max(1, int(details.duration * rate))
-    times = [max(0.0, details.duration - (index + 0.5) / rate) for index in range(count)]
+    # Where the sound goes on after the picture, the reversed video holds its last frame until the picture starts.
+    last = _last_moment(original)
+    times = [min(max(0.0, details.duration - (index + 0.5) / rate), last) for index in range(count)]
     # From the end, a batch at a time, each read forwards and handed out backwards: never more than about
     # 256 MB of frames decoded at once, where reading them all first would hold the whole video (some 20 GB
     # for ten seconds of 4K at 60 fps).
@@ -1063,7 +1143,8 @@ def reverse(source: PathLike, output: PathLike) -> Path:
         return add_audio(silent, backwards, target, replace=True)
 
 
-_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")  # "en", "fr-CA", "es-419"...
+# "en", "fr-CA", "es-419"... Checked with fullmatch: `$` alone also matches before a trailing newline.
+_LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")
 
 
 def _set_language(track: int, tag: str) -> None:
@@ -1097,7 +1178,9 @@ def add_language_track(
     from . import audio as audio_module
 
     for label, tag in (("language", language), ("original_language", original_language)):
-        if tag is not None and not _LANGUAGE_TAG.match(tag):
+        if tag is not None and not isinstance(tag, str):
+            raise TypeError("{} must be a language tag (a str) such as 'en', not {!r}".format(label, tag))
+        if tag is not None and not _LANGUAGE_TAG.fullmatch(tag):
             raise ValueError("{} must be a language tag such as 'en' or 'fr-CA', not {!r}".format(label, tag))
     target = _target(output)
     sound_path = _existing(audio)
@@ -1128,4 +1211,4 @@ def add_language_track(
             _set_language(added, language)
             # Off by default when there's an original to play; the only sound otherwise.
             _objc.send(added, "setEnabled:", not originals, argtypes=(_objc.BOOL,), restype=None)
-            return _media.export(dubbed, target, preset="AVAssetExportPresetPassthrough")
+            return _media.export(dubbed, target, preset="AVAssetExportPresetPassthrough", source=picture)

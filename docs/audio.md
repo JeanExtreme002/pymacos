@@ -43,7 +43,9 @@ macos.audio.set_output("AirPods")                  # part of the name
 macos.audio.set_input("MacBook Pro Microphone")
 ```
 
-A name that matches several devices raises `ValueError`, listing them. For
+A name that matches several devices raises `ValueError`, listing them with
+their `uid`. So does a full name two devices share (two identical USB
+microphones): pass the `uid` or the {class}`~macos.audio.Device` then. For
 example, to go back to the built-in speakers after a call:
 
 ```python
@@ -96,7 +98,9 @@ while macos.audio.input_level() > 0.05:   # wait for quiet
 
 Both need the [Microphone permission](permissions.md#camera-and-microphone),
 which macOS asks for the first time. They keep nothing but the file you ask
-for.
+for. Without it, or when a configuration profile or Screen Time restricts
+the microphone (only an administrator can allow it then), they raise
+{class}`~macos.PermissionDeniedError`.
 
 To record just what someone says, {func}`~macos.audio.record_until_silence`
 waits for speech and stops after a pause:

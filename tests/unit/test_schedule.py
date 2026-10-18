@@ -17,6 +17,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: 501, raising=False)
     script = tmp_path / "backup.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # only yours, whatever the umask: no warning about other users
     return tmp_path
 
 
@@ -54,6 +55,7 @@ def test_schedule_at_times_and_weekdays(fake_run, home):
 def test_schedule_at_login_jobs_and_remove(fake_run, home):
     (home / "venv/bin").mkdir(parents=True)
     (home / "venv/bin/python").write_text("")
+    (home / "venv/bin/python").chmod(0o755)
     macos.schedule.add("hello", home / "backup.py", at_login=True, python=home / "venv/bin/python")
     macos.schedule.add("daily", home / "backup.py", at="07:15")
 
@@ -73,7 +75,14 @@ def test_schedule_reads_the_job_state(fake_run, home):
 
     job = macos.schedule.get("backup")
 
-    assert job.running is True and job.last_exit_status == 256
+    # launchctl list <label> prints the wait status: 256 is an exit with 1.
+    assert job.running is True and job.last_exit_status == 1
+    fake_run.stdout = '{\n\t"LastExitStatus" = 9;\n\t"Label" = "pymacos.backup";\n};\n'
+    assert macos.schedule.get("backup").last_exit_status == -9  # killed by SIGKILL, as the table form says
+    fake_run.stdout = '{\n\t"LastExitStatus" = 0;\n\t"Label" = "pymacos.backup";\n};\n'
+    assert macos.schedule.get("backup").last_exit_status == 0
+    fake_run.stdout = '{\n\t"LastExitStatus" = -1;\n\t"Label" = "pymacos.backup";\n};\n'
+    assert macos.schedule.get("backup").last_exit_status == -1  # not a wait status: as it is
 
 
 def test_schedule_argument_checks(fake_run, home):
@@ -127,7 +136,8 @@ def test_schedule_pause_and_resume(fake_run, home):
     macos.schedule.add("backup", home / "backup.py", every=60)
     fake_run.calls.clear()
     macos.schedule.resume("backup")
-    assert [call["args"][1] for call in fake_run.calls] == ["print-disabled", "bootout", "enable", "bootstrap"]
+    # Not paused, and loaded: left alone, rather than reloaded, which would stop a run in progress.
+    assert [call["args"][1] for call in fake_run.calls] == ["print-disabled", "list"]
     with pytest.raises(ValueError, match="no job named"):
         macos.schedule.pause("missing")
 
@@ -517,6 +527,7 @@ def test_schedule_warns_when_other_users_could_change_the_script(fake_run, home)
     shared.chmod(0o777)  # writable by anyone, no sticky bit: the script could be swapped
     script = shared / "job.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # whatever the umask: only the folder is open to others
     with pytest.warns(RuntimeWarning, match="other users may replace what's in"):
         macos.schedule.add("swapped", script, every=60)
 
@@ -537,6 +548,7 @@ def test_schedule_trusts_folders_only_the_admin_group_may_write_in(monkeypatch, 
 
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
+    script.chmod(0o644)  # whatever the umask
     real_stat = os.stat
 
     def stat_as(gid):
@@ -637,14 +649,16 @@ def test_schedule_resume_says_when_a_paused_job_couldnt_be_paused_again(fake_run
 
 def test_schedule_resume_says_when_a_loaded_job_stays_unloaded(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
-    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap")  # not paused: resume() reloads it
+    # Not paused, nor loaded: resume() loads it.
+    calls = _refusing_launchctl(monkeypatch, fake_run, "bootstrap", also=("list",))
 
     with warnings.catch_warnings(record=True) as reported:
         warnings.simplefilter("always")
         with pytest.raises(macos.errors.CommandError, match="bootstrap failed") as caught:
             macos.schedule.resume("backup")
 
-    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable", "bootstrap"]  # not paused by mistake
+    # Not paused by mistake.
+    assert [call[1] for call in calls] == ["print-disabled", "list", "bootout", "enable", "bootstrap"]
     assert "stays unloaded until the next login" in _notes_of(caught.value, reported)
 
 
@@ -715,14 +729,15 @@ def test_schedule_resume_says_so_when_launchctl_wont_tell_whether_the_job_was_pa
 
 def test_schedule_resume_says_when_it_couldnt_enable_a_job_it_unloaded(fake_run, home, monkeypatch):
     macos.schedule.add("backup", home / "backup.py", every=60)
-    calls = _refusing_launchctl(monkeypatch, fake_run, "enable")  # not paused: unloaded to be reloaded
+    # Not paused, nor loaded: unloaded to be reloaded.
+    calls = _refusing_launchctl(monkeypatch, fake_run, "enable", also=("list",))
 
     with warnings.catch_warnings(record=True) as reported:
         warnings.simplefilter("always")
         with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
             macos.schedule.resume("backup")
 
-    assert [call[1] for call in calls] == ["print-disabled", "bootout", "enable"]
+    assert [call[1] for call in calls] == ["print-disabled", "list", "bootout", "enable"]
     assert "stays unloaded until the next login" in _notes_of(caught.value, reported)
 
     # A paused job whose enabling failed is still paused: disabled again, which changes nothing, and no note.
@@ -753,3 +768,123 @@ def test_schedule_resume_tells_whether_enabling_took_effect(fake_run, home, monk
         with pytest.raises(macos.errors.CommandError, match="enable failed") as caught:
             macos.schedule.resume("backup")
     assert "unless it is, it comes back at the next login" in _notes_of(caught.value, reported)
+
+
+def test_schedule_resume_reloads_a_job_that_isnt_loaded(fake_run, home, monkeypatch):
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    calls = _refusing_launchctl(monkeypatch, fake_run, "list")  # not paused, but not loaded either
+
+    macos.schedule.resume("backup")
+
+    assert [call[1] for call in calls] == ["print-disabled", "list", "bootout", "enable", "bootstrap"]
+
+
+def test_schedule_writes_a_plist_only_you_may_write(fake_run, home):
+    import stat
+
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    old = os.umask(0o002)  # a new file would be 0o664, which launchd refuses
+    try:
+        macos.schedule.add("backup", home / "backup.py", every=60)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        path.chmod(0o666)  # nor does replacing a job keep the old file's mode
+        macos.schedule.add("backup", home / "backup.py", every=120)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    finally:
+        os.umask(old)
+
+
+def test_schedule_writes_the_replaced_plist_back_only_you_may_write(fake_run, home, monkeypatch):
+    import stat
+
+    macos.schedule.add("backup", home / "backup.py", every=3600)
+    path = home / "Library/LaunchAgents/pymacos.backup.plist"
+    _failing_bootstrap(monkeypatch, fake_run, fail=False)
+    write_plist = macos.schedule._write_plist
+    writes = []
+
+    def full_disk(target, plist):
+        writes.append(target)
+        if len(writes) == 1:  # the new job's, after the old plist was deleted
+            raise OSError(28, "No space left on device")
+        write_plist(target, plist)
+
+    monkeypatch.setattr(macos.schedule, "_write_plist", full_disk)
+    old = os.umask(0o002)  # the old plist is put back as a new file: 0o664, which launchd refuses
+    try:
+        with pytest.raises(OSError, match="No space left"):
+            macos.schedule.add("backup", home / "backup.py", every=60)
+    finally:
+        os.umask(old)
+
+    assert _plist(home, "backup")["StartInterval"] == 3600
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_schedule_says_what_is_wrong_with_at_and_weekdays_of_another_type(fake_run, home):
+    script = home / "backup.py"
+    with pytest.raises(TypeError, match="at must be a time"):
+        macos.schedule.add("x", script, at=["09:00", 9])
+    with pytest.raises(TypeError, match="at must be a time"):
+        macos.schedule.add("x", script, at=9)
+    with pytest.raises(TypeError, match="weekdays must be names"):
+        macos.schedule.add("x", script, at="09:00", weekdays=[1])
+    with pytest.raises(TypeError, match="weekdays must be names"):
+        macos.schedule.add("x", script, at="09:00", weekdays=[b"mon"])
+    assert not (home / "Library" / "LaunchAgents").exists()
+
+
+def test_schedule_checks_the_interpreter_is_executable_and_looks_a_command_up_on_path(fake_run, home, monkeypatch):
+    script = home / "backup.py"
+    (home / "venv/bin").mkdir(parents=True)
+    activate = home / "venv/bin/activate"
+    activate.write_text("")
+    with pytest.raises(ValueError, match="executable interpreter"):
+        macos.schedule.add("x", script, every=60, python=activate)  # launchd couldn't start it
+
+    python = home / "venv/bin/python3.99"
+    python.write_text("")
+    python.chmod(0o755)
+    monkeypatch.setenv("PATH", str(home / "venv/bin"))
+    monkeypatch.chdir(home)
+    macos.schedule.add("x", script, every=60, python="python3.99")
+    assert _plist(home, "x")["ProgramArguments"][0] == str(python)
+    with pytest.raises(FileNotFoundError, match="isn't a command on PATH"):
+        macos.schedule.add("x", script, every=60, python="python0")  # not <cwd>/python0
+
+
+def test_schedule_says_what_is_wrong_with_args_a_long_name_and_a_huge_every(fake_run, home):
+    script = home / "backup.py"
+    with pytest.raises(ValueError, match="args can't hold control characters"):
+        macos.schedule.add("x", script, every=60, args=["a\x01b"])
+    with pytest.raises(ValueError, match="at most 200 characters"):
+        macos.schedule.add("a" * 300, script, every=60)
+    for huge in (1e30, 2 ** 40, 2 ** 31):
+        with pytest.raises(ValueError, match="at most 2147483647 seconds"):
+            macos.schedule.add("x", script, every=huge)
+    assert not (home / "Library" / "LaunchAgents").exists()
+    macos.schedule.add("x", script, every=2 ** 31 - 1, args=["tab\there", "two\nlines"])
+    assert _plist(home, "x")["ProgramArguments"][2:] == ["tab\there", "two\nlines"]
+
+
+def test_schedule_run_now_says_when_the_job_is_paused_or_not_loaded(fake_run, home, monkeypatch):
+    import subprocess
+
+    from macos import _system
+
+    macos.schedule.add("backup", home / "backup.py", every=60)
+    listing = ""
+
+    def launchctl(args, **kwargs):
+        if args[1] == "kickstart":
+            return subprocess.CompletedProcess(args, 113, "", 'Could not find service "pymacos.backup" in domain')
+        return subprocess.CompletedProcess(args, 0, listing if args[1] == "print-disabled" else "", "")
+
+    monkeypatch.setattr(_system.subprocess, "run", launchctl)
+    listing = '\t\t"pymacos.backup" => disabled\n'
+    with pytest.raises(macos.errors.CommandError, match="is paused: resume") as caught:
+        macos.schedule.run_now("backup")
+    assert caught.value.returncode == 113 and "Could not find service" in str(caught.value)
+    listing = ""
+    with pytest.raises(macos.errors.CommandError, match="isn't loaded: resume"):
+        macos.schedule.run_now("backup")

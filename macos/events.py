@@ -23,7 +23,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from . import _cf, _events, _files, _iokit, _objc, _sc, apps
 from ._system import framework
@@ -133,16 +133,20 @@ def on(name: str, callback: Callable[..., object]) -> Handler:
 
     The callback may also take no arguments. One registered for several
     events can tell them apart by ``event.name``. Registered while
-    :func:`run` runs, it's called from the next event on.
+    :func:`run` runs, it's called from the next event on. Raises
+    :class:`TypeError` when ``callback`` isn't callable, here rather than at
+    the first event.
     """
     _check(name)
+    if not callable(callback):
+        raise TypeError("callback must be callable, not {!r}".format(callback))
     handler = Handler(name, callback)
     with _lock:
         _handlers.append(handler)
     return handler
 
 
-def off(handler: "Handler | str") -> None:
+def off(handler: Union[Handler, str]) -> None:
     """Remove a :class:`Handler`, or every callback of an event name."""
     with _lock:
         if isinstance(handler, Handler):
@@ -452,19 +456,28 @@ def _observer(listener: _events.Listener, cleanup: ExitStack) -> int:
 
 
 def _listen(
-    names: List[str], on_event: Callable[[Event], bool], timeout: Optional[float], *, required: Optional[Set[str]] = None
+    names: List[str],
+    on_event: Callable[[Event], bool],
+    timeout: Optional[float],
+    *,
+    required: Optional[Set[str]] = None,
+    listener: Optional[_events.Listener] = None,
 ) -> None:
     """
     Observe ``names`` and turn the run loop until ``stop()``, the timeout, or ``on_event`` returning ``True``.
 
     A system source (the power, network, USB or display watcher) that can't be set up fails the
     call when one of the ``required`` events needs it (all of ``names``, by default); for the other
-    events it's a :class:`RuntimeWarning`, and those events don't come.
+    events it's a :class:`RuntimeWarning`, and those events don't come. ``listener`` is the one to
+    feed (a new one by default): given, ``on_event`` can see its stop flag between two callbacks.
     """
+    # Before anything is set up: drain() checks it too, but only once the observers and watchers exist.
+    _events.check_timeout(timeout)
     # The notification centers deliver on the main thread's run loop, which only this thread turns
     # when it is the main one: elsewhere nothing would ever arrive, and the wait would never end.
     _files.require_main_thread("macos.events.run() and wait()")
-    listener = _events.Listener()
+    if listener is None:
+        listener = _events.Listener()
     # Counted in first: a stop() while the observers are being set up is kept.
     with _listeners.listening(listener), _objc.autorelease_pool(), ExitStack() as cleanup:
         framework("AppKit")
@@ -548,34 +561,46 @@ def run(*, timeout: Optional[float] = None) -> None:
 
     Every event is listened for, so a callback registered with :func:`on`
     while it runs (from another callback, or from another thread) is called
-    from the next event on, and one removed isn't called again. A system
+    from the next event on. One removed, and :func:`stop`, take effect at
+    once, even between the callbacks of the event being handled: the rest
+    aren't called. Raises :class:`ValueError` for a ``timeout`` that's not
+    ``None`` or a number of seconds, 0 or more, before listening. A system
     source that can't be set up (the USB or network watcher, on a Mac that
     refuses it) fails the call when an event registered at the start needs
     it; otherwise it's a :class:`RuntimeWarning`, and those events don't come.
     """
+    _events.check_timeout(timeout)
     with _lock:
         registered = {handler.name for handler in _handlers}
     if not registered:
         raise ValueError("no callbacks registered: add some with macos.events.on() first")
+    listener = _events.Listener()
 
     def call(event: Event) -> bool:
         with _lock:
-            callbacks = [handler.callback for handler in _handlers if handler.name == event.name]
-        for callback in callbacks:
-            if _takes_event(callback):
-                callback(event)
+            handlers = [handler for handler in _handlers if handler.name == event.name]
+        for handler in handlers:
+            # An earlier callback (or another thread) may have stopped this run, or removed this one.
+            if listener.stop.is_set():
+                return True
+            with _lock:
+                if handler not in _handlers:
+                    continue
+            if _takes_event(handler.callback):
+                handler.callback(event)
             else:
-                callback()
+                handler.callback()
         return False
 
-    _listen(list(NAMES), call, timeout, required=registered)
+    _listen(list(NAMES), call, timeout, required=registered, listener=listener)
 
 
 def wait(name: str, *, timeout: Optional[float] = None) -> Optional[Event]:
     """
     Wait until ``name`` happens, and return the :class:`Event`; ``None`` if ``timeout`` seconds pass first.
 
-    Call it from the main thread, like :func:`run`.
+    Call it from the main thread, like :func:`run`, which also says which
+    ``timeout`` values raise :class:`ValueError`.
 
     ::
 
@@ -583,6 +608,7 @@ def wait(name: str, *, timeout: Optional[float] = None) -> Optional[Event]:
         print("welcome back")
     """
     _check(name)
+    _events.check_timeout(timeout)
     found: List[Event] = []
 
     def check(event: Event) -> bool:

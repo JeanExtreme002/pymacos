@@ -158,6 +158,16 @@ def _app_element(pid: int) -> int:
     return int(element)
 
 
+def _check_position(x: float, y: float) -> None:
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise ValueError("x and y must be finite, not {}, {}".format(x, y))
+
+
+def _check_size(width: float, height: float) -> None:
+    if not (math.isfinite(width) and math.isfinite(height)) or width <= 0 or height <= 0:
+        raise ValueError("width and height must be finite and positive, not {} x {}".format(width, height))
+
+
 class Window:
     """
     A window of a running app.
@@ -255,6 +265,8 @@ class Window:
         happen within a few seconds :class:`~macos.errors.WaitTimeoutError`
         (a ``MacOSError`` too).
         """
+        if self.fullscreen == bool(on):
+            return  # nothing to ask, nor an animation to wait for
         what = "{} full screen".format("enter" if on else "leave")
 
         def request() -> None:
@@ -283,6 +295,7 @@ class Window:
 
     def move(self, x: float, y: float) -> None:
         """Move its top-left corner to ``(x, y)``."""
+        _check_position(x, y)
         point = CGPoint(x, y)
         value = _accessibility().AXValueCreate(_POINT, ctypes.byref(point))
         with _cf.owned(value):
@@ -295,8 +308,7 @@ class Window:
         Apps may refuse sizes below their minimum or above the screen, and
         keep the closest size they accept.
         """
-        if width <= 0 or height <= 0:
-            raise ValueError("width and height must be positive, not {} x {}".format(width, height))
+        _check_size(width, height)
         size = CGSize(width, height)
         value = _accessibility().AXValueCreate(_SIZE, ctypes.byref(size))
         with _cf.owned(value):
@@ -304,6 +316,9 @@ class Window:
 
     def set_frame(self, x: float, y: float, width: float, height: float) -> None:
         """Move and resize it at once: ``window.set_frame(0, 25, 1280, 800)``."""
+        # All four checked before anything changes: a bad x mustn't leave the window resized.
+        _check_size(width, height)
+        _check_position(x, y)
         # Resized first: moved while still large, it could stick out of the
         # screen, and macOS would cut it to fit, over the size asked for.
         self.resize(width, height)
@@ -321,7 +336,7 @@ class Window:
         leave. A window taller than that keeps its top edge below the menu bar.
         """
         frame = self.frame
-        area_x, area_y, area_width, area_height = _area_of(frame, _usable_areas())
+        area_x, area_y, area_width, area_height = _area_of(frame, _displays())
         _, _, width, height = frame
         left = area_x + (area_width - width) / 2
         top = max(area_y + (area_height - height) / 2, area_y)
@@ -346,13 +361,13 @@ class Window:
         """
         if layout not in LAYOUTS:
             raise ValueError("layout must be one of {}, not {!r}".format(", ".join(LAYOUTS), layout))
-        areas = _usable_areas()
+        displays = _displays()
         if display is not None:
-            if not 1 <= display <= len(areas):
-                raise ValueError("there's no display {}: there are {}".format(display, len(areas)))
-            area = areas[display - 1]
+            if not 1 <= display <= len(displays):
+                raise ValueError("there's no display {}: there are {}".format(display, len(displays)))
+            area = displays[display - 1][1]
         else:
-            area = _area_of(self.frame, areas)
+            area = _area_of(self.frame, displays)
         left, top, wide, tall = LAYOUTS[layout]
         area_x, area_y, area_width, area_height = area
         self.set_frame(
@@ -458,37 +473,62 @@ LAYOUTS = {
 """The layouts :meth:`Window.snap` takes: ``(x, y, width, height)`` as fractions of the display's usable area."""
 
 
-def _index_of(frame: Tuple[int, int, int, int], areas: Sequence[Tuple[float, float, float, float]]) -> int:
-    """Which of ``areas`` holds the middle of ``frame``: the main display's (0) when none does."""
+_Rect = Tuple[float, float, float, float]
+
+
+def _index_of(frame: Tuple[int, int, int, int], displays: Sequence[Tuple[_Rect, _Rect]]) -> int:
+    """
+    Which of ``displays`` ``frame`` is on: the one holding its middle, else the one it overlaps most, else the main (0).
+
+    Whole displays, menu bar and Dock included: a window over a display's Dock is on that display.
+    """
     x, y, width, height = frame
     middle_x, middle_y = x + width / 2, y + height / 2
-    for index, (left, top, wide, tall) in enumerate(areas):
+    for index, ((left, top, wide, tall), _) in enumerate(displays):
         if left <= middle_x < left + wide and top <= middle_y < top + tall:
             return index
-    return 0  # off every display: the main one
+    overlaps = [
+        max(0.0, min(x + width, left + wide) - max(x, left)) * max(0.0, min(y + height, top + tall) - max(y, top))
+        for (left, top, wide, tall), _ in displays
+    ]
+    best = max(range(len(overlaps)), key=overlaps.__getitem__, default=0)
+    return best if overlaps and overlaps[best] > 0 else 0  # off every display: the main one
 
 
-def _area_of(
-    frame: Tuple[int, int, int, int], areas: Sequence[Tuple[float, float, float, float]]
-) -> Tuple[float, float, float, float]:
-    return areas[_index_of(frame, areas)]
+def _area_of(frame: Tuple[int, int, int, int], displays: Sequence[Tuple[_Rect, _Rect]]) -> _Rect:
+    """The usable area of the display ``frame`` is on."""
+    return displays[_index_of(frame, displays)][1]
 
 
-def _usable_areas() -> "builtins.list[Tuple[float, float, float, float]]":
-    """Each display's area without the menu bar and the Dock, main first, in points from the main display's top-left."""
+def _displays() -> "builtins.list[Tuple[_Rect, _Rect]]":
+    """
+    Each display's whole frame and its area without the menu bar and the Dock, main first.
+
+    In points from the main display's top-left.
+    """
     framework("AppKit")
-    areas = []
+    found = []
     with _objc.autorelease_pool():
         screens = builtins.list(_objc.nsarray(_objc.send(_objc.cls("NSScreen"), "screens")))
         if not screens:
             raise MacOSError("no display is connected")
         main_height = _objc.send(screens[0], "frame", restype=_objc.CGRect).size.height
-        for screen_ in screens:
-            usable = _objc.send(screen_, "visibleFrame", restype=_objc.CGRect)
+
+        def flipped(rect: Any) -> _Rect:
             # AppKit measures from the main display's bottom-left corner, going up.
-            top = main_height - (usable.origin.y + usable.size.height)
-            areas.append((usable.origin.x, top, usable.size.width, usable.size.height))
-    return areas
+            top = main_height - (rect.origin.y + rect.size.height)
+            return (rect.origin.x, top, rect.size.width, rect.size.height)
+
+        for screen_ in screens:
+            whole = _objc.send(screen_, "frame", restype=_objc.CGRect)
+            usable = _objc.send(screen_, "visibleFrame", restype=_objc.CGRect)
+            found.append((flipped(whole), flipped(usable)))
+    return found
+
+
+def _usable_areas() -> "builtins.list[_Rect]":
+    """Each display's area without the menu bar and the Dock, main first, in points from the main display's top-left."""
+    return [usable for _, usable in _displays()]
 
 
 @lru_cache(maxsize=None)
@@ -536,27 +576,60 @@ def _targets(app: Union[str, apps.App, None]) -> "builtins.list[apps.App]":
         return _apps_with_windows()
     if isinstance(app, apps.App):
         return [app]
-    found = apps.get(app)
-    return [found] if found is not None else []
+    return _named(app)
+
+
+def _named(name: str) -> "builtins.list[apps.App]":
+    """Every running app :func:`macos.apps.get` would find by ``name``, not only the first: copies of one app share it."""
+    running = apps.running(include_background=True)
+    if apps._is_path(name):
+        # Both sides go through the same mapping, as in apps.get: a translocated app's own path finds it too.
+        wanted_path = apps._real_bundle_path(os.path.expanduser(name))
+        return [app for app in running if app.path and apps._real_bundle_path(app.path) == wanted_path]
+    wanted = name.casefold()
+    found = []
+    for app in running:
+        file_name = os.path.basename(app.path or "")
+        candidates = (app.name, app.bundle_id, file_name, os.path.splitext(file_name)[0])
+        if wanted in {part.casefold() for part in candidates if part}:
+            found.append(app)
+    return found
 
 
 def _list(targets: Sequence[apps.App], title: Optional[str]) -> "builtins.list[Window]":
     windows = [window for target in targets for window in _windows_of(target)]
-    if title is not None:
-        wanted = title.casefold()
-        windows = [window for window in windows if wanted in window.title.casefold()]
-    return windows
+    if title is None:
+        return windows
+    wanted = title.casefold()
+    kept, busy = [], set()
+    for window in windows:
+        if window.pid in busy:
+            continue  # its app already didn't answer: its other windows would each wait as long
+        try:
+            if wanted in window.title.casefold():
+                kept.append(window)
+        except _AXError as error:
+            # Closed since it was listed, or its app went busy: as if it weren't there, like list() without a title.
+            if error.status == _CANNOT_COMPLETE:
+                busy.add(window.pid)
+        except PermissionDeniedError:
+            raise
+        except MacOSError:
+            continue
+    return kept
 
 
 def list(app: Union[str, apps.App, None] = None, *, title: Optional[str] = None) -> "builtins.list[Window]":
     """
     Return the windows of the running apps (menu bar apps included), or only of ``app``, front to back within each app.
 
-    ``app`` is an :class:`~macos.apps.App` or an app's name (``"Safari"``).
-    ``title`` keeps the windows whose title contains it, ignoring case.
-    Minimized windows are included; check :attr:`Window.minimized`. An app
-    that doesn't answer within two seconds (busy, or still starting) counts
-    as having no windows: ask again, or use :func:`wait_for`. So does a name
+    ``app`` is an :class:`~macos.apps.App` or an app's name (``"Safari"``);
+    a name covers every running app that goes by it (several copies of one
+    app, or several Python processes), an ``App`` only that one. ``title``
+    keeps the windows whose title contains it, ignoring case. A window that
+    closes while it's read is left out. Minimized windows are included;
+    check :attr:`Window.minimized`. An app that doesn't answer within two
+    seconds (busy, or still starting) counts as having no windows: ask again, or use :func:`wait_for`. So does a name
     no running app goes by (not open, or misspelt): :func:`macos.apps.get`
     tells the two apart.
     """
@@ -569,7 +642,7 @@ def wait_for(
     app: Union[str, apps.App, None] = None,
     *,
     title: Optional[str] = None,
-    timeout: float = 10.0,
+    timeout: Optional[float] = 10.0,
     interval: float = 0.25,
 ) -> Optional[Window]:
     """
@@ -577,18 +650,24 @@ def wait_for(
 
     ``app`` and ``title`` work as in :func:`list`, which is asked again every
     ``interval`` seconds; a name no running app goes by waits out the
-    ``timeout``. Handy after an action that opens a window::
+    ``timeout``. ``timeout=None`` waits until a window shows up. Handy after
+    an action that opens a window::
 
         macos.keyboard.press("cmd+s")
         dialog = macos.windows.wait_for("TextEdit", title="Save")
     """
-    if interval <= 0:
+    if not interval > 0:
         raise ValueError("interval must be positive, not {}".format(interval))
-    deadline = time.monotonic() + timeout
+    if timeout is not None and math.isnan(timeout):
+        raise ValueError("timeout must be a number of seconds or None, not nan")
+    deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         found = list(app, title=title)
         if found:
             return found[0]
+        if deadline is None:
+            time.sleep(interval)
+            continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
@@ -647,7 +726,7 @@ def _restart_window_manager() -> None:
 
 def tiling() -> bool:
     """Whether dragging a window to an edge of the screen tiles it there (macOS 15 and later)."""
-    return bool(defaults.read(_WINDOW_MANAGER, "EnableTilingByEdgeDrag", default=True))
+    return defaults._as_bool(defaults.read(_WINDOW_MANAGER, "EnableTilingByEdgeDrag", default=True), True)
 
 
 def set_tiling(on: bool = True) -> None:
@@ -663,7 +742,7 @@ def set_tiling(on: bool = True) -> None:
 
 def click_wallpaper_to_show_desktop() -> bool:
     """Whether a click on the wallpaper moves the windows away to show the desktop (macOS 14 and later)."""
-    return bool(defaults.read(_WINDOW_MANAGER, "EnableStandardClickToShowDesktop", default=True))
+    return defaults._as_bool(defaults.read(_WINDOW_MANAGER, "EnableStandardClickToShowDesktop", default=True), True)
 
 
 def set_click_wallpaper_to_show_desktop(on: bool = True) -> None:
@@ -674,7 +753,7 @@ def set_click_wallpaper_to_show_desktop(on: bool = True) -> None:
 
 def animations() -> bool:
     """Whether windows, sheets and panels open with an animation."""
-    return bool(defaults.read(defaults.GLOBAL, "NSAutomaticWindowAnimationsEnabled", default=True))
+    return defaults._as_bool(defaults.read(defaults.GLOBAL, "NSAutomaticWindowAnimationsEnabled", default=True), True)
 
 
 def set_animations(on: bool = True) -> None:
@@ -720,10 +799,6 @@ def _grid(
     return frames
 
 
-def _display_of(window: Window, areas: Sequence[Tuple[float, float, float, float]]) -> int:
-    return _index_of(window.frame, areas)
-
-
 def tile(
     windows: Sequence[Window], *, display: Optional[int] = None, columns: Optional[int] = None, gap: int = 0
 ) -> None:
@@ -742,33 +817,57 @@ def tile(
     leaves that many points between windows and around them. The menu bar
     and the Dock stay clear, and apps with a minimum size may stay larger.
     """
+    _tile(windows, display, columns, gap, skip_gone=False)
+
+
+def _tile(
+    windows: Sequence[Window], display: Optional[int], columns: Optional[int], gap: int, *, skip_gone: bool
+) -> "builtins.list[Window]":
+    """:func:`tile`, returning the windows moved; ``skip_gone`` passes over those that close or stop answering."""
     if columns is not None and columns < 1:
         raise ValueError("columns must be at least 1, not {}".format(columns))
     if gap < 0:
         raise ValueError("gap can't be negative, not {}".format(gap))
-    areas = _usable_areas()
-    if display is not None and not 1 <= display <= len(areas):
-        raise ValueError("there's no display {}: there are {}".format(display, len(areas)))
+    displays = _displays()
+    if display is not None and not 1 <= display <= len(displays):
+        raise ValueError("there's no display {}: there are {}".format(display, len(displays)))
     groups: "dict[int, builtins.list[Tuple[Tuple[int, int], Window]]]" = {}
     for window in windows:
-        x, y = window.position
-        target = display - 1 if display is not None else _display_of(window, areas)
-        groups.setdefault(target, []).append(((y, x), window))
+        try:
+            frame = window.frame
+        except PermissionDeniedError:
+            raise
+        except MacOSError:
+            if not skip_gone:
+                raise
+            continue  # closed meanwhile
+        target = display - 1 if display is not None else _index_of(frame, displays)
+        groups.setdefault(target, []).append(((frame[1], frame[0]), window))
     # Every frame worked out before the first window moves: a gap too large
     # for one display raises with nothing tiled, rather than half the windows.
     moves: "builtins.list[Tuple[Window, Tuple[int, int, int, int]]]" = []
     for index, members in groups.items():
         members.sort(key=lambda member: member[0])  # as they're arranged now, so tiling again keeps them in place
-        moves.extend(zip((window for _, window in members), _grid(len(members), areas[index], columns, gap)))
+        moves.extend(zip((window for _, window in members), _grid(len(members), displays[index][1], columns, gap)))
+    moved = []
     for window, frame in moves:
-        window.set_frame(*frame)
+        try:
+            window.set_frame(*frame)
+        except PermissionDeniedError:
+            raise
+        except MacOSError:
+            if not skip_gone:
+                raise
+            continue  # closed, or its app went busy, since: the others still go in place, its cell left empty
+        moved.append(window)
+    return moved
 
 
 def tile_all(
     app: Union[str, apps.App, None] = None, *, display: Optional[int] = None, columns: Optional[int] = None, gap: int = 0
 ) -> "builtins.list[Window]":
     """
-    Arrange every window on screen side by side, in a grid, and return them.
+    Arrange every window on screen side by side, in a grid, and return the ones moved.
 
     ::
 
@@ -778,7 +877,8 @@ def tile_all(
     Takes the regular windows that show: not minimized ones, full-screen
     ones, those of hidden apps, nor panels and dialogs. ``app`` keeps one
     app's, as in :func:`list`; ``display``, ``columns`` and ``gap`` work as
-    in :func:`tile`.
+    in :func:`tile`. A window that closes (or whose app stops answering)
+    while they're arranged is left out, and the others still go in place.
     """
     if not has_permission():
         _check(_API_DISABLED, "list the windows")
@@ -799,5 +899,4 @@ def tile_all(
                 chosen.append(window)
         except MacOSError:
             continue  # closed meanwhile
-    tile(chosen, display=display, columns=columns, gap=gap)
-    return chosen
+    return _tile(chosen, display, columns, gap, skip_gone=True)

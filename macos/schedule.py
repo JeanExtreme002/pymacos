@@ -20,7 +20,10 @@ is plugged in, with launchd: the Mac's cron.
 
 Jobs are launch agents (``~/Library/LaunchAgents/pymacos.<name>.plist``):
 they keep running after your script ends and after a restart, while you're
-logged in. A job missed while the Mac slept runs when it wakes up.
+logged in. An ``at`` run missed while the Mac slept happens when it wakes up
+(several missed runs count as one); ``every`` counts the time the Mac is
+awake, and a run due while it sleeps, or while the last run is still going,
+is skipped: for something that must run daily or hourly, use ``at``.
 """
 
 import datetime
@@ -28,6 +31,7 @@ import math
 import os
 import plistlib
 import re
+import shutil
 import stat
 import sys
 import warnings
@@ -49,6 +53,13 @@ _PREFIX = "pymacos."
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _TIME = re.compile(r"([01]?\d|2[0-3]):([0-5]\d)")
 _WEEKDAYS = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")  # launchd counts from Sunday = 0
+# What plistlib refuses in a string: control characters but tab, newline and carriage return.
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# The plist's file name, "pymacos.<name>.plist", fits the disk's 255 bytes with room for the
+# temporary folder write_atomically() writes it in first.
+_NAME_LENGTH = 200
+_MAX_INTERVAL = 2 ** 31 - 1  # launchd's StartInterval is a C int
+_PLIST_MODE = 0o644  # launchd refuses a job whose plist others may write
 
 
 @dataclass(frozen=True)
@@ -76,7 +87,10 @@ class Job:
     running: bool
     """Whether the script is running right now."""
     last_exit_status: Optional[int]
-    """How the last run ended (0 is success), or ``None`` before the first run."""
+    """
+    How the last run ended: its exit code (0 is success), or minus the signal that stopped it
+    (``-15`` for a run :func:`pause` or :func:`remove` stopped); ``None`` before the first run.
+    """
 
 
 def _agents() -> Path:
@@ -149,6 +163,8 @@ def _path() -> str:
 def _check_name(name: str) -> None:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ValueError("name must be letters, digits, '.', '_' or '-', not {!r}".format(name))
+    if len(name) > _NAME_LENGTH:
+        raise ValueError("name must be at most {} characters, not {}".format(_NAME_LENGTH, len(name)))
 
 
 Moment = Union[str, datetime.time]
@@ -157,11 +173,18 @@ Moment = Union[str, datetime.time]
 def _times(at: Union[Moment, Sequence[Moment], None]) -> List[Tuple[int, int]]:
     if at is None:
         return []
+    wrong = "at must be a time such as '09:00', a datetime.time, or a list of them, not {!r}"
+    try:
+        moments = [at] if isinstance(at, (str, datetime.time)) else list(at)
+    except TypeError:
+        raise TypeError(wrong.format(at)) from None
     found = []
-    for moment in [at] if isinstance(at, (str, datetime.time)) else list(at):
+    for moment in moments:
         if isinstance(moment, datetime.time):
             found.append((moment.hour, moment.minute))
             continue
+        if not isinstance(moment, str):
+            raise TypeError(wrong.format(moment))
         text = moment
         match = _TIME.fullmatch(text.strip())
         if not match:
@@ -188,6 +211,8 @@ def _days(weekdays: Optional[Sequence[str]]) -> List[int]:
         raise TypeError("weekdays must be a list of days, not a single string: use [{!r}]".format(weekdays))
     days = []
     for day in weekdays:
+        if not isinstance(day, str):  # not numbers: launchd's count from Sunday isn't datetime's from Monday
+            raise TypeError("weekdays must be names such as 'mon' or 'friday', not {!r}".format(day))
         short = day.strip().lower()[:3]
         if short not in _WEEKDAYS:
             raise ValueError("weekdays are 'mon', 'tue', 'wed', 'thu', 'fri', 'sat' or 'sun', not {!r}".format(day))
@@ -211,7 +236,10 @@ def add(
     """
     Run the Python ``script`` on a schedule, from now on, and return the :class:`Job`.
 
-    - ``every``: seconds between runs, or a :class:`~datetime.timedelta`.
+    - ``every``: seconds between runs, or a :class:`~datetime.timedelta`,
+      counted while the Mac is awake: a run due while it sleeps, or while
+      the last one is still going, is skipped. (A run ``at`` missed while it
+      slept happens when it wakes up.)
     - ``at``: a time of day, ``"09:00"`` or a :class:`~datetime.time`, or
       several, ``["09:00", "18:00"]``; with ``weekdays`` (``["mon", "fri"]``),
       only on those days. Seconds are ignored: launchd counts minutes.
@@ -231,7 +259,8 @@ def add(
     ``every=3600, when_changed="~/Inbox"`` runs hourly and on changes.
 
     It runs with this Python (``python=`` picks another, such as a virtual
-    environment's), in the script's folder, with ``args`` as its
+    environment's: a path, or a command on ``PATH`` such as ``"python3.12"``,
+    which must be executable), in the script's folder, with ``args`` as its
     arguments; its output goes to :attr:`Job.log`. ``args`` are written to the
     job's file and show in the process list at every run, so keep secrets out
     of them: the script can read them from :mod:`macos.keychain` instead.
@@ -253,6 +282,10 @@ def add(
     _check_name(name)
     if isinstance(args, (str, bytes)):
         raise TypeError("args must be a list of arguments, not a single string: use [{!r}]".format(args))
+    arguments = [str(arg) for arg in args]
+    for argument in arguments:
+        if _CONTROL.search(argument):
+            raise ValueError("args can't hold control characters (but tab and newline), not {!r}".format(argument))
     if every is not None and at is not None:
         raise ValueError("use either every or at, not both")
     interval = _interval(every)
@@ -271,7 +304,7 @@ def add(
     _warn_if_swappable(source, Path(interpreter) if python is not None else None)
     log = _log(name)
     log.parent.mkdir(parents=True, exist_ok=True)
-    job = _agent(name, interpreter, source, args, log, at_login=at_login, at_mount=at_mount)
+    job = _agent(name, interpreter, source, arguments, log, at_login=at_login, at_mount=at_mount)
     if interval is not None:
         job["StartInterval"] = interval
     if times:
@@ -293,7 +326,7 @@ def add(
         # plist (a full disk): those also put the old job back.
         _remove(name, paused)  # unload the old one first (and forget it was paused)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_atomically(path, lambda temporary: Path(temporary).write_bytes(plist))  # never half a plist
+        _write_plist(path, plist)
         _run(["launchctl", "bootstrap", _domain(), str(path)])
     except BaseException as error:
         problem = _restore(name, path, previous, was_paused)
@@ -316,19 +349,44 @@ def _interval(every: Union[float, datetime.timedelta, None]) -> Optional[int]:
         raise TypeError("every must be a number of seconds or a timedelta, not {!r}".format(every))
     if not math.isfinite(every) or every < 1:
         raise ValueError("every must be at least 1 second, not {}".format(every))
+    if every > _MAX_INTERVAL:
+        raise ValueError("every must be at most {} seconds (launchd's limit), not {}".format(_MAX_INTERVAL, every))
     if every != int(every):
         raise ValueError("every must be whole seconds (launchd counts seconds), not {}".format(every))
     return int(every)
 
 
 def _interpreter(python: Optional[PathLike]) -> str:
-    """The Python the job runs with: ``python``, checked to exist, or this one."""
+    """
+    The Python the job runs with: ``python``, checked to be an executable file, or this one.
+
+    A bare command ("python3.12") is looked up on the ``PATH`` the job gets, not in the current folder.
+    """
     if python is None:
         return sys.executable
-    chosen = Path(python).expanduser().absolute()
+    text = os.fspath(python)
+    if os.sep not in text and not text.startswith("~"):
+        found = shutil.which(text, path=_path())
+        if found is None:
+            raise FileNotFoundError("python={!r} isn't a command on PATH".format(text))
+        text = found
+    chosen = Path(text).expanduser().absolute()
     if not chosen.is_file():
         raise FileNotFoundError(str(chosen))
+    if not os.access(str(chosen), os.X_OK):  # launchd couldn't start it, and would say so in no log of the job's
+        raise ValueError("python must be an executable interpreter, not {}".format(chosen))
     return str(chosen)
+
+
+def _write_plist(path: Path, plist: bytes) -> None:
+    """
+    Write the job's plist, never half of one, readable by all and writable only by you.
+
+    Neither the umask's permissions (0o664 under a umask of 002) nor an old file's: launchd refuses a
+    plist others may write. Set before it's bootstrapped, so launchd never sees another mode.
+    """
+    write_atomically(path, lambda temporary: Path(temporary).write_bytes(plist))
+    os.chmod(str(path), _PLIST_MODE)
 
 
 def _warn_if_swappable(source: Path, interpreter: Optional[Path]) -> None:
@@ -349,7 +407,7 @@ def _agent(
     """The launch agent for the job, as launchd reads it, without its schedule: :func:`add` adds that."""
     job: Dict[str, Any] = {
         "Label": _PREFIX + name,
-        "ProgramArguments": [interpreter, str(source), *[str(arg) for arg in args]],
+        "ProgramArguments": [interpreter, str(source), *args],
         "WorkingDirectory": str(source.parent),
         "StandardOutPath": str(log),
         "StandardErrorPath": str(log),
@@ -443,7 +501,7 @@ def _restore(name: str, path: Path, previous: Optional[bytes], was_paused: bool)
         except OSError:
             unchanged = False
         if not unchanged:
-            write_atomically(path, lambda temporary: Path(temporary).write_bytes(previous))  # only when it changed
+            _write_plist(path, previous)  # only when it changed
         if was_paused:
             _run(["launchctl", "disable", _target(name)])  # a paused job stays unloaded
         else:
@@ -482,14 +540,36 @@ def _paused(*, strict: bool = False) -> List[str]:
 
 
 def _state(name: str) -> Tuple[bool, Optional[int]]:
-    """Whether the job is running, and its last exit status, from ``launchctl list``."""
+    """Whether the job is running, and how its last run ended (:attr:`Job.last_exit_status`), from ``launchctl list``."""
     try:
         output = _run(["launchctl", "list", _PREFIX + name])
     except CommandError:
         return False, None
     pid = re.search(r'"PID"\s*=\s*(\d+);', output)
     status = re.search(r'"LastExitStatus"\s*=\s*(-?\d+);', output)
-    return bool(pid), int(status.group(1)) if status else None
+    return bool(pid), _exit_code(int(status.group(1))) if status else None
+
+
+def _exit_code(status: int) -> int:
+    """
+    The exit code in ``launchctl list <label>``'s wait status (256 for an exit with 1), or minus the signal.
+
+    As the table ``launchctl list`` prints: -9 for a run killed by SIGKILL. A value that isn't a wait
+    status of a run that ended stays as it is.
+    """
+    try:
+        return os.waitstatus_to_exitcode(status)
+    except ValueError:
+        return status
+
+
+def _loaded(name: str) -> bool:
+    """Whether launchd has the job loaded: ``False`` when it hasn't, or won't say."""
+    try:
+        _run(["launchctl", "list", _PREFIX + name])
+    except (CommandError, CommandTimeoutError):
+        return False
+    return True
 
 
 def _job(path: Path, paused: Sequence[str]) -> Optional[Job]:
@@ -556,10 +636,27 @@ def get(name: str) -> Optional[Job]:
     return _job(path, _paused())
 
 
+_NOT_FOUND = 113  # launchctl kickstart: "Could not find service"
+
+
 def run_now(name: str) -> None:
-    """Start the job ``name`` right away, besides its schedule. Does nothing if it's already running."""
+    """
+    Start the job ``name`` right away, besides its schedule. Does nothing if it's already running.
+
+    A paused job doesn't run: :func:`resume` it first. That, or a job launchd doesn't have loaded (a
+    :func:`resume` that failed), raises :class:`~macos.errors.CommandError` saying so.
+    """
     _existing_job(name)
-    _run(["launchctl", "kickstart", _target(name)])
+    try:
+        _run(["launchctl", "kickstart", _target(name)])
+    except CommandError as error:
+        if error.returncode != _NOT_FOUND:
+            raise
+        if name in _paused():
+            why = "the job {!r} is paused: resume() it first".format(name)
+        else:
+            why = "the job {!r} isn't loaded: resume() loads it again, or it comes back at the next login".format(name)
+        raise CommandError(error.cmd, error.returncode, "{} ({})".format(why, error.stderr)) from error
 
 
 def pause(name: str) -> None:
@@ -613,9 +710,10 @@ def resume(name: str) -> None:
     """
     Put a job paused with :func:`pause` back on its schedule (with ``at_login``, it also runs now).
 
-    When launchd refuses to load it again, a paused job stays paused (and the error is raised); one that
-    wasn't paused is reloaded at the next login, which the error says (as it says when launchctl wouldn't
-    tell whether the job was paused).
+    A job that isn't paused, and is loaded, is left alone (a run in progress goes on); one that isn't
+    loaded (a resume that failed) is loaded again. When launchd refuses to load it again, a paused job
+    stays paused (and the error is raised); one that wasn't paused is reloaded at the next login, which
+    the error says (as it says when launchctl wouldn't tell whether the job was paused).
     """
     path = _existing_job(name)
     was_paused: Optional[bool]
@@ -623,7 +721,9 @@ def resume(name: str) -> None:
         was_paused = name in _paused(strict=True)  # read first: resuming is what changes it
     except (CommandError, CommandTimeoutError):
         was_paused = None  # launchctl wouldn't say: only the rollback below needs it, and the error says so
-    _bootout(name)  # resuming a job that isn't paused: reload it
+    if was_paused is False and _loaded(name):
+        return  # on its schedule already: reloading it would stop a run in progress, and rerun an at_login job
+    _bootout(name)  # not loaded, or not known to be: (re)load it
     enabled = False  # once launchctl enable has returned: no longer paused
     try:
         _run(["launchctl", "enable", _target(name)])

@@ -19,7 +19,7 @@ never sees them, it only learns whether the user confirmed.
 
 {func}`~macos.auth.confirm` returns `True` when the user confirms, and `False`
 when they cancel, fail, or don't answer within `timeout` seconds (2 minutes by
-default), and when macOS takes the prompt away (another app came to the front,
+default; `None` waits however long it takes), and when macOS takes the prompt away (another app came to the front,
 the Mac slept). `reason` completes the prompt's sentence, so write it as what the
 script is about to do.
 
@@ -53,6 +53,11 @@ def deploy():
 
 deploy()   # asks first: Touch ID, the password or the Apple Watch
 ```
+
+An `async def` function stays one, so frameworks that await it still do: the
+prompt shows when the call is awaited, not when the coroutine is made, and
+blocks the event loop until it's answered. An async generator function can't
+be guarded before it runs, so decorating one raises `TypeError`.
 
 ## What it protects
 

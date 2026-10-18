@@ -92,7 +92,7 @@ def test_defaults_restored_restores_every_key_of_a_whole_domain_before_raising(m
         tried.append(name)
         raise macos.PermissionDeniedError("isn't writable")
 
-    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_check", lambda domain, key=None: None)
     monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: default)  # nothing set when it starts
     monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: ["a", "b", "c"])  # set in the block
     monkeypatch.setattr(defaults, "delete", refuse)
@@ -130,7 +130,7 @@ def test_defaults_restored_goes_on_after_any_error(monkeypatch):
         tried.append(name)
         raise ValueError("can't hold it")
 
-    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_check", lambda domain, key=None: None)
     monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: {"a": 1, "b": 2}[key])
     monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: ["a", "b"])
     monkeypatch.setattr(defaults, "write", broken)
@@ -157,7 +157,7 @@ def test_defaults_restored_snapshots_the_domains_own_values_only(monkeypatch):
     in_effect = {"size": 48, "managed": True}  # what read() gives, a configuration profile's key included
     written = []
 
-    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_check", lambda domain, key=None: None)
     monkeypatch.setattr(defaults, "read", lambda domain, key=None, **kwargs: in_effect if key is None else in_effect.get(key))
     monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: own.get(key, default))
     monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: sorted(own))
@@ -180,7 +180,7 @@ def test_defaults_restored_puts_back_a_value_that_only_changed_type(monkeypatch)
 
     own = {"enabled": True, "sizes": [1.0, 2], "nested": {"on": False}}
     written = []
-    monkeypatch.setattr(defaults, "_check", lambda domain: None)
+    monkeypatch.setattr(defaults, "_check", lambda domain, key=None: None)
     monkeypatch.setattr(defaults, "_own", lambda domain, key, default, current_host: own.get(key, default))
     monkeypatch.setattr(defaults, "keys", lambda domain, current_host=False: sorted(own))
 
@@ -275,3 +275,109 @@ def test_defaults_restored_takes_each_pair_once(monkeypatch):
     with macos.defaults.restored(iter(("com.example.app", "key"))):
         own["key"] = 2
     assert own == {"key": 1}
+
+
+def test_defaults_name_the_wrong_type_of_a_domain_or_key():
+    with pytest.raises(TypeError, match="domain must be a str, not bytes"):
+        macos.defaults.read(b"com.apple.dock", "key")
+    with pytest.raises(TypeError, match="domain must be a str, not int"):
+        macos.defaults.keys(5)
+    with pytest.raises(TypeError, match="key must be a str, not int"):
+        macos.defaults.write("com.example.app", 5, 1)
+    with pytest.raises(TypeError, match="key must be a str, not NoneType"):
+        macos.defaults.delete("com.example.app", None)
+    with pytest.raises(TypeError, match="key must be a str, not int"):
+        macos.defaults.read("com.example.app", 5)
+
+
+@pytest.mark.parametrize("value", [["a", None], [1, None], {"x": None}, {"x": [1, {"y": None}]}])
+def test_defaults_write_refuses_a_none_inside_before_any_cf_call(monkeypatch, value):
+    # CFPreferences aborts the process on the kCFNull a nested None turns into: refused before it's reached.
+    from macos import defaults
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("reached CoreFoundation")
+
+    monkeypatch.setattr(defaults, "_store", unreachable)
+    monkeypatch.setattr(defaults._cf, "lib", unreachable)
+    with pytest.raises(ValueError, match="None"):
+        macos.defaults.write("com.example.app", "key", value)
+
+
+def test_defaults_write_takes_dates_as_utc(monkeypatch):
+    import plistlib
+    from contextlib import contextmanager
+    from datetime import datetime, timedelta, timezone
+
+    from macos import defaults
+
+    class Fake:
+        def CFPropertyListCreateWithData(self, *args):
+            return 7
+
+    @contextmanager
+    def owned(ref):
+        yield ref
+
+    written = []
+    stored = []
+    monkeypatch.setattr(defaults._cf, "lib", lambda: Fake())
+    monkeypatch.setattr(defaults._cf, "owned", owned)
+    monkeypatch.setattr(defaults._cf, "data", lambda raw: written.append(plistlib.loads(raw)) or 6)
+    monkeypatch.setattr(defaults, "_store", lambda domain, key, value, current_host: stored.append(value))
+    noon = datetime(2026, 10, 17, 12, 0)
+    for value in (noon, noon.replace(tzinfo=timezone.utc), datetime(2026, 10, 17, 9, 0, tzinfo=timezone(timedelta(hours=-3)))):
+        macos.defaults.write("com.example.app", "when", value)
+    macos.defaults.write("com.example.app", "when", {"at": [datetime(2026, 10, 17, 14, 0, tzinfo=timezone(timedelta(hours=2)))]})
+    assert written == [noon, noon, noon, {"at": [noon]}]
+    assert stored == [7, 7, 7, 7]
+
+
+@pytest.mark.parametrize("key", ["", " ", None, 5])
+def test_defaults_restored_checks_every_key_before_the_block_runs(monkeypatch, key):
+    from macos import defaults
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("read before the checks")
+
+    monkeypatch.setattr(defaults, "_own", unreachable)
+    ran = []
+    with pytest.raises((ValueError, TypeError)):
+        with macos.defaults.restored(("com.example.app", "fine"), ("com.example.app", key)):
+            ran.append(True)
+    assert ran == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (True, True),
+        (False, False),
+        ("YES", True),
+        (" true ", True),
+        ("No", False),
+        ("FALSE", False),
+        (1, True),
+        (0, False),
+        (2.5, True),
+        (0.5, True),  # CF reads a real number as true unless it's zero, text by its whole part
+        (-0.5, True),
+        (0.0, False),
+        ("1", True),
+        ("0", False),
+        ("0.5", False),
+        ("-3", True),
+    ],
+)
+def test_defaults_as_bool_reads_a_flag_as_macos_does(value, expected):
+    from macos import defaults
+
+    assert defaults._as_bool(value, not expected) is expected
+
+
+@pytest.mark.parametrize("value", ["maybe", "", [1], {"a": 1}, b"1", None, float("nan"), float("inf"), "inf"])
+def test_defaults_as_bool_falls_back_for_anything_else(value):
+    from macos import defaults
+
+    assert defaults._as_bool(value, True) is True
+    assert defaults._as_bool(value, False) is False

@@ -93,9 +93,14 @@ autodoc_default_options = {
 # Class members in alphabetical order, as the modules and their entries in api.md.
 autodoc_member_order = "alphabetical"
 autodoc_typehints = "description"
-# Internal, not documented: the type variable that keeps a decorated function's signature, and the
-# default of set_desktop_view's sort, which tells "left out" from None.
-nitpick_ignore = [("py:class", "macos.auth._Function"), ("py:class", "macos.finder._Unchanged")]
+# Internal, not documented: the type variable that keeps a decorated function's signature, the
+# default of set_desktop_view's sort, which tells "left out" from None, and what keep_awake
+# returns, a context manager and decorator in one.
+nitpick_ignore = [
+    ("py:class", "macos.auth._Function"),
+    ("py:class", "macos.finder._Unchanged"),
+    ("py:class", "macos.power._KeepAwake"),
+]
 
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True

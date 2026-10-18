@@ -23,7 +23,10 @@ Printers & Scanners, the default one first. Each
 {class}`~macos.printer.Printer` has its queue `name`, the `description`
 System Settings shows, its `model`, `location`, whether it `is_default`, and
 its `state` (`"idle"`, `"printing"`, `"stopped"`, or `None` when the printer
-doesn't say, as network printers often don't).
+doesn't say, as network printers often don't). When your default is a saved
+set of options for a printer (an `lpoptions` instance such as
+`Office/duplex`), that printer is the default; printing without naming one
+sends the job to it without the instance's options.
 
 ```python
 macos.printer.default()                     # Printer(name='Office_LaserJet', ...), or None
@@ -51,7 +54,9 @@ queue; it's the file's name by default.
 {func}`~macos.printer.jobs` lists the jobs waiting or printing, on every
 printer or on one; `finished=True` adds those done, canceled or aborted.
 {meth}`PrintJob.cancel() <macos.printer.PrintJob.cancel>` or
-{func}`~macos.printer.cancel` takes one out:
+{func}`~macos.printer.cancel` takes one out. A job's `id` is 1 or more:
+`cancel()` refuses 0 and negative numbers with `ValueError`, which CUPS would
+read as the job printing now or every job on the printer.
 
 ```python
 for job in macos.printer.jobs("Office LaserJet"):

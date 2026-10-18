@@ -13,6 +13,8 @@ Uses the ``mdfind`` and ``mdls`` commands, so results come instantly from the
 index Spotlight already keeps, and match what the Spotlight bar finds.
 """
 
+import math
+import operator
 import os
 import plistlib
 import subprocess
@@ -49,10 +51,21 @@ def _invalid(query: str) -> ValueError:
 
 def _mdfind(args: List[str], limit: Optional[int], timeout: Optional[float] = None) -> List[Path]:
     query = args[-1]
-    if limit is not None and limit < 0:
-        raise ValueError("limit must be zero or more, not {}".format(limit))
-    if timeout is not None and timeout <= 0:
-        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
+    if limit is not None:
+        try:
+            # An int, or an integer of numpy's: a float would only fail in islice, after mdfind started.
+            if isinstance(limit, bool):
+                raise TypeError
+            limit = operator.index(limit)
+        except TypeError:
+            raise TypeError("limit must be an int, or None, not {!r}".format(limit)) from None
+        if limit < 0:
+            raise ValueError("limit must be zero or more, not {}".format(limit))
+    if timeout is not None:
+        if isinstance(timeout, bool) or math.isnan(timeout) or timeout <= 0:
+            raise ValueError("timeout must be positive, or None, not {!r}".format(timeout))
+        if timeout > threading.TIMEOUT_MAX:  # inf among them: no timer takes it, and it's as good as waiting
+            timeout = None
     if query.startswith("-"):
         # mdfind has no "--": a query such as "-onlyin" or "-s name" would be
         # taken as its option. A leading space keeps it the query, and the
@@ -148,7 +161,8 @@ def search(
     the search to one folder (recursively), and ``limit`` to that many results.
     With ``timeout``, a search still going after that many seconds (Spotlight
     stuck, a slow network volume) is stopped, and
-    :class:`~macos.CommandTimeoutError` raised; by default it waits.
+    :class:`~macos.CommandTimeoutError` raised; by default (or with
+    ``math.inf``) it waits.
     """
     return _mdfind([*_folder(folder), query], limit, timeout)
 
@@ -178,13 +192,29 @@ def metadata(path: PathLike) -> Dict[str, Any]:
     zone) and lists are lists. Files
     outside the index (e.g. in a folder Spotlight skips) only have the basic
     ``kMDItemFS...`` attributes.
+
+    A missing path, a broken symbolic link and ``""`` raise
+    :class:`FileNotFoundError`; a path in a folder you can't open,
+    :class:`PermissionError`.
     """
+    if not os.fspath(path):
+        raise FileNotFoundError("")  # as os.stat("") does: Path("") would be the current folder
     target = Path(path).expanduser().absolute()
-    if not os.path.lexists(target):
-        raise FileNotFoundError(str(target))
+    # os.stat, not os.path.exists: that says "missing" for a file it may not look at, too.
+    # It follows links, as mdls does: a broken one is missing.
+    try:
+        os.stat(target)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FileNotFoundError(str(target)) from None
 
     # The plist as mdls wrote it, in bytes: plistlib reads its encoding from its header.
-    raw = run_bytes(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT)
+    try:
+        raw = run_bytes(["mdls", "-plist", "-", str(target)], timeout=_MDLS_TIMEOUT)
+    except CommandError as error:
+        if error.stderr:
+            raise
+        # mdls says why (as "could not find", even for a file privacy protects) on stdout, which a failure drops.
+        raise CommandError(error.cmd, error.returncode, "couldn't read the metadata of {}".format(target)) from None
     try:
         found = plistlib.loads(raw)
     except (plistlib.InvalidFileException, ValueError) as error:  # ValueError: expat's, for text that isn't XML

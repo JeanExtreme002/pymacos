@@ -216,3 +216,140 @@ def test_bluetooth_refuses_to_connect_a_device_listed_without_an_address(fake_bl
     with pytest.raises(macos.MacOSError, match="can't be disconnected from here"):
         macos.bluetooth.disconnect("Pencil")
     assert fake_bluetooth.requests == []  # IOBluetoothDevice was never asked about ""
+
+
+def test_bluetooth_several_matches_list_only_the_matching_devices(commands):
+    import json
+
+    commands.answers["SPBluetoothDataType"] = (0, json.dumps(_BLUETOOTH), "")
+
+    with pytest.raises(ValueError, match="several") as raised:
+        macos.bluetooth._find("Magic")
+    message = str(raised.value)
+    assert "AA:BB:CC:DD:EE:02" in message and "AA:BB:CC:DD:EE:03" in message
+    assert "AirPods" not in message and "Speaker" not in message
+
+
+def _two_pairs(commands, names=("AirPods Pro", "AirPods Pro")):
+    import json
+
+    listed = {
+        "SPBluetoothDataType": [
+            {
+                "device_connected": [{names[0]: {"device_address": "AA:BB:CC:DD:EE:01"}}],
+                "device_not_connected": [
+                    {names[1]: {"device_address": "AA:BB:CC:DD:EE:02"}},
+                    {names[1]: {"device_address": "AA:BB:CC:DD:EE:02"}},  # listed twice, still one device
+                ],
+            }
+        ]
+    }
+    commands.answers["SPBluetoothDataType"] = (0, json.dumps(listed), "")
+
+
+def test_bluetooth_refuses_a_name_two_devices_share(commands):
+    _two_pairs(commands)
+
+    with pytest.raises(ValueError, match="several paired Bluetooth devices are named") as raised:
+        macos.bluetooth.connect("AirPods Pro")
+    assert "AA:BB:CC:DD:EE:01" in str(raised.value) and "AA:BB:CC:DD:EE:02" in str(raised.value)
+    assert macos.bluetooth._find("AA:BB:CC:DD:EE:02").address == "AA:BB:CC:DD:EE:02"
+
+
+def test_bluetooth_names_match_whatever_the_apostrophe(commands):
+    _two_pairs(commands, ("Jean’s AirPods", "Ana's Mouse"))
+    find = macos.bluetooth._find
+
+    assert find("Jean's AirPods").address == "AA:BB:CC:DD:EE:01"
+    assert find("jean's airpods").address == "AA:BB:CC:DD:EE:01"
+    assert find("Ana’s Mouse").address == "AA:BB:CC:DD:EE:02"
+
+
+def test_bluetooth_names_match_whatever_the_unicode_form(commands):
+    import unicodedata
+
+    # One name stored composed (NFC), the other decomposed (NFD), so each
+    # lookup only matches if _fold normalizes both sides.
+    stored = unicodedata.normalize("NFD", "Zoë Keyboard")
+    assert stored != "Zoë Keyboard"
+    _two_pairs(commands, ("José’s Mouse", stored))
+    find = macos.bluetooth._find
+
+    query = unicodedata.normalize("NFD", "José's Mouse")
+    assert query != unicodedata.normalize("NFC", query)
+    assert find(query).address == "AA:BB:CC:DD:EE:01"
+    assert find(unicodedata.normalize("NFC", "Zoë Keyboard")).address == "AA:BB:CC:DD:EE:02"
+
+
+def test_bluetooth_exact_name_wins_over_a_folded_one(commands):
+    _two_pairs(commands, ("Desk Mouse", "desk mouse"))
+    find = macos.bluetooth._find
+
+    assert find("Desk Mouse").address == "AA:BB:CC:DD:EE:01"
+    assert find("desk mouse").address == "AA:BB:CC:DD:EE:02"
+    with pytest.raises(ValueError, match="several paired Bluetooth devices are named"):
+        find("DESK MOUSE")
+
+
+def test_bluetooth_odd_sections_and_device_lists(commands):
+    import json
+
+    listed = {
+        "SPBluetoothDataType": [
+            "not a section",
+            {
+                "device_connected": {"AirPods": {"device_address": "AA:BB:CC:DD:EE:01"}},
+                "device_not_connected": "none",
+            },
+        ]
+    }
+    commands.answers["SPBluetoothDataType"] = (0, json.dumps(listed), "")
+
+    assert [device.name for device in macos.bluetooth.devices()] == ["AirPods"]
+
+
+@pytest.mark.parametrize("target", [None, 123])
+def test_bluetooth_refuses_a_device_that_is_not_a_name(commands, target):
+    with pytest.raises(TypeError, match="Device or a str"):
+        macos.bluetooth.connect(target)
+    with pytest.raises(TypeError, match="Device or a str"):
+        macos.bluetooth.disconnect(target)
+    assert commands.calls == []
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, 0])
+def test_bluetooth_refuses_a_timeout_that_never_ends(commands, timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        macos.bluetooth.connect("AirPods", timeout=timeout)
+    with pytest.raises(ValueError, match="timeout"):
+        macos.bluetooth.set_power(False, timeout=timeout)
+    assert commands.calls == []
+
+
+@pytest.mark.parametrize("timeout", ["10", True, [10]])
+def test_bluetooth_refuses_a_timeout_that_is_not_a_number(timeout):
+    # ValueError, as the other waits in pymacos raise for one.
+    with pytest.raises(ValueError, match="timeout"):
+        macos.bluetooth.disconnect("AirPods", timeout=timeout)
+    with pytest.raises(ValueError, match="timeout"):
+        macos.bluetooth.set_power(True, timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [None, float("inf")])
+def test_bluetooth_set_power_waits_without_limit_for_none_or_inf(monkeypatch, timeout):
+    from types import SimpleNamespace
+
+    from macos import bluetooth
+
+    states = iter([1] * 500 + [0])  # turns off after 50 seconds of polling
+    fake = SimpleNamespace(
+        IOBluetoothPreferenceSetControllerPowerState=lambda state: None,
+        IOBluetoothPreferenceGetControllerPowerState=lambda: next(states),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(bluetooth, "_bluetooth", lambda: fake)
+    monkeypatch.setattr(bluetooth, "_require_controller", lambda: None)
+    monkeypatch.setattr(bluetooth.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bluetooth.time, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
+    macos.bluetooth.set_power(False, timeout=timeout)
+    assert clock["now"] > 49

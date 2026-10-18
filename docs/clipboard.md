@@ -49,7 +49,9 @@ macos.clipboard.copy_image(png_bytes)
 ```
 
 {func}`~macos.clipboard.paste_image` returns the image on the clipboard as PNG
-bytes, whatever format it was copied in, or `None` if there is no image:
+bytes, whatever format it was copied in, or `None` if there is no image. An
+image it can't read or convert (an empty or corrupt one) raises
+{class}`~macos.MacOSError`, rather than giving empty bytes:
 
 ```python
 from pathlib import Path
@@ -72,6 +74,11 @@ them. {func}`~macos.clipboard.paste_files` returns the files on the clipboard:
 macos.clipboard.copy_files(["report.pdf", "chart.png"])
 macos.clipboard.paste_files()   # [PosixPath('/Users/alice/report.pdf'), ...]
 ```
+
+It takes a list, even for one file: `copy_files(["report.pdf"])`. A single path
+raises `TypeError`, rather than being read as a list of one-letter names. A
+missing path (or `""`) raises `FileNotFoundError`, and one in a folder you can't
+open `PermissionError`; either way the clipboard keeps what it held.
 
 ## Waiting for a copy
 
@@ -101,6 +108,8 @@ password copied with `sensitive=True`, see above, or by a password manager), as
 clipboard managers do: a history shouldn't keep it. Say which you want: today
 every copy is yielded unless told otherwise, and pymacos 2.0 will skip the
 concealed ones by default, so leaving it out warns (`DeprecationWarning`).
+`timeout` is the total time, the loop's own included: it stops once it has
+passed, even while copies keep coming faster than you handle them.
 {func}`~macos.clipboard.wait_for_change` takes `include_sensitive=False` too, to
 wait on past a concealed copy for the next one; its default stays as it is,
 since one copy was asked for, not a history.

@@ -25,6 +25,10 @@ macos.apps.running(include_background=True)
 macos.apps.frontmost()   # App(name='Safari', bundle_id='com.apple.Safari', ...)
 ```
 
+When macOS won't list the running processes, as in some sandboxes, these
+(and {func}`~macos.apps.get` and {func}`~macos.apps.open`) raise
+{class}`~macos.MacOSError` rather than say nothing is running.
+
 ## Finding an app
 
 {func}`~macos.apps.get` finds a running app, or returns `None` if it isn't
@@ -41,6 +45,10 @@ Names are compared case-insensitively, against both the displayed name and the
 bundle's file name. So `"Calculator"` also finds the app on a Mac set to
 Portuguese, where it is displayed as "Calculadora".
 
+A downloaded app that hasn't been moved out of its folder yet runs from a
+hidden, read-only copy (macOS's App Translocation). It is still found by the
+path it was opened from; its `path` is the copy's, and that path finds it too.
+
 ## Opening an app
 
 {func}`~macos.apps.open` launches an app, or brings it to the front if it's
@@ -53,8 +61,12 @@ macos.apps.open("/Applications/Safari.app")
 macos.apps.open("Mail", background=True)   # launch without stealing focus
 ```
 
-It raises {class}`~macos.AppNotFoundError` if no installed app matches, or if
-the app doesn't show up within `timeout` seconds (10 by default). When a copy
+It raises {class}`~macos.AppNotFoundError` if no installed app matches. An
+app that doesn't show up within `timeout` seconds (10 by default) raises
+{class}`~macos.AppLaunchTimeoutError`, whose message says it "did not
+show up": a `TimeoutError`, and still an `AppNotFoundError` (a `LookupError`),
+so code that caught that before still does. A downloaded app macOS runs from a hidden copy (App Translocation) is
+returned like any other. When a copy
 of the app is already running from another path (an older version in another
 folder, say), macOS brings that one to the front rather than open the one
 asked for (with `background=True`, it stays behind), and that running copy is
@@ -85,6 +97,10 @@ app.activate()    # bring to the front; returns whether it is now frontmost
 app.hide()
 app.unhide()
 ```
+
+An `App` stands for one process. Once it has quit, its methods raise
+{class}`~macos.AppNotFoundError` and `is_running` is `False`, even after
+macOS gives its pid to another app.
 
 ## Quitting an app
 
@@ -124,7 +140,10 @@ macos.open_with("notes.md", "com.microsoft.VSCode")
 
 The app can be a name, a bundle identifier or a path, as for
 {func}`~macos.apps.open`. Pass `background=True` to open without bringing the
-app to the front. A path that doesn't exist raises `FileNotFoundError`. An
+app to the front. A path that doesn't exist raises `FileNotFoundError`, and
+an empty string raises `ValueError`. A string like `"Report:Q3.pdf"` that
+isn't an existing path is taken as a URL (`scheme:...`): pass a
+`pathlib.Path`, or `"./Report:Q3.pdf"`, to have it taken as a path. An
 app that isn't there raises {class}`~macos.AppNotFoundError`; one that's there
 but won't open (damaged, blocked by Gatekeeper, for another processor) raises
 {class}`~macos.CommandError`, with macOS's reason.
@@ -137,6 +156,9 @@ anything else; a file or folder counts as `"file"`:
 ```python
 macos.open(link_from_a_web_page, schemes={"https", "http"})   # not a file, nor zoommtg://...
 ```
+
+Its entries may be written `"https"`, `"https:"` or `"https://"`; anything
+that isn't a scheme name (such as `"https://python.org"`) raises `ValueError`.
 
 `macos.open` is not included in `from macos import *`, so it never replaces
 Python's built-in `open()`.
@@ -162,7 +184,7 @@ Since macOS 26, macOS asks the user to confirm the change, and the function
 waits for the answer (`timeout`, one minute by default); it raises
 {class}`~macos.MacOSError` when the change is declined, and
 {class}`~macos.WaitTimeoutError` (a `MacOSError` too) when the answer doesn't
-come. The default browser
+come. `timeout=None` waits as long as it takes. The default browser
 can't be changed this way: macOS asks for that one in System Settings.
 
 ## Login items
@@ -215,6 +237,10 @@ everything in it, like `xattr -dr com.apple.quarantine`:
 macos.apps.is_quarantined("/Applications/Tool.app")   # True
 macos.apps.unquarantine("/Applications/Tool.app")     # 1204 files
 ```
+
+Both raise `FileNotFoundError` for a path that isn't there, and for `""`
+(never taken for the current folder), and `PermissionError` for one in a
+folder you can't open.
 
 ## Threads
 

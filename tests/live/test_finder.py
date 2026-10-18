@@ -88,6 +88,17 @@ def test_finder_aliases(tmp_path):
         macos.finder.resolve_alias(alias)
 
 
+def test_make_alias_keeps_the_name_asked_for(tmp_path):
+    import unicodedata
+
+    original = tmp_path / "report.pdf"
+    original.write_text("x")
+    name = unicodedata.normalize("NFC", "Relatório")  # composed, as typed: not decomposed on the way
+    alias = macos.finder.make_alias(original, tmp_path / name)
+    assert alias.name == name and name in os.listdir(tmp_path)
+    assert macos.finder.resolve_alias(alias).name == "report.pdf"
+
+
 def test_watch_reports_changes_as_they_happen(tmp_path):
     import threading
     import time

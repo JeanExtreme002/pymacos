@@ -24,8 +24,11 @@ macos.vision.text(macos.clipboard.paste_image())      # text of a copied image
 macos.vision.text(macos.screenshot(region=(0, 0, 800, 600)))
 ```
 
-Vision reads images, not PDFs: a PDF raises `ValueError`. Draw the pages you
-want with {func}`macos.pdf.render` first:
+Anything that isn't an image (empty bytes, a text file, a FIFO) raises `ValueError`,
+and a folder `IsADirectoryError`, whichever function you call. A real image
+Vision can't work with, such as one 2 pixels high, raises `MacOSError` with
+Vision's reason. Vision reads images, not PDFs: a PDF raises `ValueError` too. Draw the pages you want with
+{func}`macos.pdf.render` first:
 
 ```python
 macos.vision.text(macos.pdf.render("scan.pdf", page=1, size=2048))
@@ -33,11 +36,23 @@ macos.vision.text(macos.pdf.render("scan.pdf", page=1, size=2048))
 
 ## Languages
 
-By default Vision detects the language. When you know it, pass `languages`,
-most likely first. This improves accents and language-specific characters:
+By default Vision detects the language, on macOS 13 or later. When you know
+it, pass `languages` as a list, most likely first. This improves accents and
+language-specific characters:
 
 ```python
 macos.vision.text("menu.jpg", languages=["fr-FR", "en-US"])
+```
+
+A single string such as `languages="zh-Hans"` raises `TypeError`: write
+`["zh-Hans"]`. Detection only works in accurate mode. With `fast=True`, or
+before macOS 13, Vision reads Latin script unless you pass `languages`, and
+fast mode supports only a few Latin languages anyway. So for Chinese,
+Japanese, Korean, Cyrillic or Arabic text on those, pass the language and keep
+the default accuracy:
+
+```python
+macos.vision.text("sign.jpg", languages=["ja-JP"])
 ```
 
 {func}`~macos.vision.languages` lists the supported codes:

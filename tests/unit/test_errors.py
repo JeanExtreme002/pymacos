@@ -103,3 +103,40 @@ def test_command_errors_still_cross_a_pickle(error):
     if isinstance(error, OSError):  # not the command and its time limit taken for an errno and its message
         assert (error.errno, error.strerror, copy.errno, copy.strerror) == (None, None, None, None)
     assert (str(copy), repr(copy)) == (str(error), repr(error))
+
+
+def test_command_errors_name_an_empty_or_one_shot_command():
+    # str() mustn't raise, or a traceback says "<exception str() failed>" in place of the failure.
+    for error in (macos.CommandError([], 1, "boom"), macos.CommandTimeoutError([], 1)):
+        assert "<command>" in str(error) and "<command>" in repr(error)
+    error = macos.CommandError((a for a in ["say", "x"]), 1)  # a generator, read once
+    assert error.cmd == ["say", "x"] and error.args[0] == error.cmd
+    assert str(error) == "'say' exited with status 1"
+    timeout = macos.CommandTimeoutError(iter(["say", "x"]), 2)
+    assert timeout.cmd == ["say", "x"] and str(timeout) == "'say' didn't finish within 2 seconds"
+
+
+@pytest.mark.parametrize(
+    "returncode, shown",
+    [(-9, "'say' was killed by SIGKILL"), (-15, "'say' was killed by SIGTERM"), (-200, "'say' was killed by signal 200")],
+)
+def test_command_error_says_a_signal_killed_the_command(returncode, shown):
+    # subprocess reports a child killed by signal N as returncode -N: it never exited with a status.
+    assert str(macos.CommandError(["say", "x"], returncode)) == shown
+    assert str(macos.CommandError(["say", "x"], returncode, "bye\n")) == shown + ": bye"
+    assert repr(macos.CommandError(["say"], returncode)) == "CommandError('say', returncode={}, stderr='')".format(returncode)
+
+
+def test_app_launch_timeout_is_still_an_app_not_found_error():
+    # apps.open raised AppNotFoundError when a launch didn't show up: its handlers keep catching it,
+    # and so does ``except TimeoutError``, as for every other wait that ran out of time.
+    import pickle
+
+    from macos.errors import AppLaunchTimeoutError
+
+    error = AppLaunchTimeoutError("'Foo' didn't show up within 5 seconds")
+    assert isinstance(error, macos.AppNotFoundError) and isinstance(error, LookupError)
+    assert isinstance(error, TimeoutError) and isinstance(error, macos.MacOSError)
+    assert str(error) == "'Foo' didn't show up within 5 seconds" and error.errno is None
+    copy = pickle.loads(pickle.dumps(error))
+    assert type(copy) is AppLaunchTimeoutError and str(copy) == str(error)

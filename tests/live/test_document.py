@@ -27,6 +27,28 @@ def test_convert_between_formats(report, tmp_path, extension):
     assert [path.name for path in output.parent.iterdir()] == [output.name]  # no temporary file left
 
 
+def test_convert_writes_plain_text_as_utf8(tmp_path):
+    source = tmp_path / "u.txt"
+    source.write_text("café 日本 😀 end", encoding="utf-8")
+    # The bytes themselves: text() would read AppKit's MacRoman back as well.
+    assert macos.document.convert(source, tmp_path / "out.txt").read_bytes().decode("utf-8") == "café 日本 😀 end"
+
+
+def test_pictures_are_kept_only_where_the_format_holds_them(tmp_path):
+    (tmp_path / "pic.png").write_bytes(small_png())
+    page = tmp_path / "page.html"
+    page.write_text('<p>a <img src="pic.png"> b</p>', encoding="utf-8")
+    assert macos.document.convert(page, tmp_path / "out.txt").read_text(encoding="utf-8") == "a  b\n"  # no U+FFFC
+    assert b"Attachment" not in macos.document.convert(page, tmp_path / "out.html").read_bytes()  # no dangling <img>
+    assert b"image/png" in macos.document.convert(page, tmp_path / "out.webarchive").read_bytes()
+
+
+def test_a_charset_attribute_doesnt_stop_utf8_detection(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text('<script src="a.js" charset="utf-8"></script><p>Use charset=utf-8. café ñ</p>', encoding="utf-8")
+    assert macos.document.text(page, resources=False) == "Use charset=utf-8. café ñ\n"
+
+
 def test_convert_keeps_tables_except_in_word_files(report, tmp_path):
     assert "<table:table " in zipfile.ZipFile(macos.document.convert(report, tmp_path / "a.odt")).read("content.xml").decode()
     assert b"\\trowd" in macos.document.convert(report, tmp_path / "a.rtf").read_bytes()

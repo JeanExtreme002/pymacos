@@ -19,7 +19,11 @@ macos.image.resize("IMG_0042.heic", "small.jpg", width=800)
 
 {func}`~macos.image.convert` writes the format of the output's extension:
 `.jpg`, `.png`, `.heic`, `.tiff`, `.gif` or `.bmp`. It reads anything macOS
-opens, WebP, AVIF and camera RAW files included.
+opens, WebP, AVIF and camera RAW files included. PDFs are documents, not
+images: every function here raises `ValueError` for one, so draw its pages
+with {func}`macos.pdf.render`. A file the app isn't allowed to read (its
+permissions, or a folder such as Desktop without access) raises
+`PermissionError`, and a folder `IsADirectoryError`.
 
 ```python
 macos.image.convert("photo.heic", "photo.jpg", quality=0.8)   # quality: 0.0 to 1.0
@@ -30,9 +34,18 @@ macos.image.convert("scan.tiff", "scan.png")
 is; GIF holds 256 colors at most, so a photo loses some of its colors.
 
 Metadata such as the date, camera and orientation is kept. Animated GIFs and
-multi-page TIFFs keep all their frames when converted to GIF or TIFF; the other
-formats hold a single image, so they get the first frame. To convert a whole
-folder of iPhone photos:
+multi-page TIFFs keep all their frames when converted to GIF or TIFF, and a
+GIF keeps how many times it loops; the other formats hold a single image, so
+they get the first frame.
+
+The functions that change the picture ({func}`~macos.image.resize`,
+{func}`~macos.image.crop`, {func}`~macos.image.rotate`,
+{func}`~macos.image.strip_metadata` and the others below) work on the first
+frame. Saved as a JPEG or PNG, that frame is what you get; saved as a GIF or
+TIFF, an image with several frames raises `ValueError` rather than quietly
+stop moving or lose pages.
+
+To convert a whole folder of iPhone photos:
 
 ```python
 from pathlib import Path
@@ -64,7 +77,9 @@ macos.image.flip("selfie.jpg", "mirrored.jpg")                         # left an
 macos.image.flip("photo.jpg", "upside-down.jpg", direction="vertical")
 ```
 
-The crop box is in pixels from the top-left corner. {func}`~macos.image.rotate`
+The crop box is in pixels from the top-left corner; a box in fractions of a
+pixel, as from {func}`macos.vision.faces` scaled to the image, has its edges
+rounded to the nearest pixel. {func}`~macos.image.rotate`
 turns by 90, 180 or 270 degrees; negative values turn counter-clockwise. As
 with {func}`~macos.image.resize`, photos are turned upright first, the
 metadata is kept, and the output's extension sets the format.
@@ -203,7 +218,13 @@ for photo in Path("~/Pictures/Trip").expanduser().glob("*.jpg"):
 They change the file itself, or save a copy with `output=`, in the format of
 its extension, as {func}`~macos.image.convert` does (a `.png` copy of a JPEG
 is a PNG). JPEG, PNG and TIFF keep their pixels untouched when the format
-stays the same; HEIC photos may be saved again. A
+stays the same; HEIC photos may be saved again. macOS reads WebP and AVIF
+but doesn't write them: those raise `ValueError` unless `output=` is in a
+format it writes. So do animated GIFs and multi-page TIFFs whose metadata
+can't be changed without saving them again, which would keep only their
+first frame. Changing the file itself replaces it with a new one, which
+keeps its permissions and Finder tags; a hard link to it keeps the old
+content. A
 `datetime` with a time zone records it too, and {func}`~macos.image.taken_at`
 returns it.
 

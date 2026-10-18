@@ -28,7 +28,8 @@ probability before trusting it.
 ## Sentiment
 
 {func}`~macos.language.sentiment` scores how positive a text sounds, from
-`-1.0` (very negative) to `1.0` (very positive), or `None` for empty text:
+`-1.0` (very negative) to `1.0` (very positive), or `None` when there's
+nothing to score:
 
 ```python
 macos.language.sentiment("This is terrible and I hate it.")   # -1.0
@@ -36,7 +37,9 @@ macos.language.sentiment("Adorei, ficou ótimo!")              # 0.8
 ```
 
 It's a rough signal, best for comparing texts such as reviews or messages: a
-neutral sentence won't always score exactly 0.
+neutral sentence won't always score exactly 0. Text with no words in it
+(`"!!!"`, `"12345"`, emoji only) and languages the sentiment model doesn't
+cover, such as Chinese, Japanese or Russian, give `None`.
 
 ## Similar meanings
 
@@ -60,7 +63,8 @@ macos.language.similarity("car", "banana", language="en")       # -0.26
 ```
 
 Opposites such as "happy" and "sad" often score as related, because they show
-up in similar sentences.
+up in similar sentences. An empty or blank text raises `ValueError`: there's
+nothing to compare it with.
 
 ## Embeddings
 
@@ -81,7 +85,9 @@ query = macos.language.embedding("groceries", language="en")
 print(max(zip(notes, vectors), key=lambda pair: cosine(query, pair[1]))[0])
 ```
 
-Only vectors from the same language can be compared.
+Only vectors from the same language can be compared. An empty or blank text
+raises `ValueError`, so leave blank notes out before indexing:
+`[note for note in notes if note.strip()]`.
 
 ## Names of people, places and organizations
 
@@ -92,7 +98,9 @@ macos.language.entities("Tim Cook, the CEO of Apple, visited Paris yesterday.")
 #  Entity(text='Paris', kind='place', start=36)]
 ```
 
-`start` is where the name begins in the text. It's a statistical model: common
+`start` is where the name begins in the text. Names written one after the
+other with only spaces between them can come back as one ("Paris London
+Berlin"); a comma, a newline or a tab keeps them apart. It's a statistical model: common
 names are found reliably, unusual ones can be missed. It relies on capital
 letters, so names typed in lowercase ("rob", as in chat messages) are usually
 missed.

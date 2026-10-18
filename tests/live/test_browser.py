@@ -1,14 +1,13 @@
 """Tests of :mod:`macos.browser` against the real system. Skipped outside macOS."""
 
-import os
-
 import pytest
 
 import macos
+from tests.helpers import switch
 
 
 @pytest.mark.skipif(
-    not os.environ.get("PYMACOS_BROWSER_TESTS"),
+    not switch("PYMACOS_BROWSER_TESTS"),
     reason="reads the tabs of your browser, which macOS asks permission for: set PYMACOS_BROWSER_TESTS=1 to run",
 )
 def test_browser_reads_the_running_browser():

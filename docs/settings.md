@@ -31,7 +31,12 @@ section: `keyboard`, `trackpad`, `mouse`, `dock`, `finder`,
 
 It's plain JSON, to keep in a repository and edit by hand.
 {func}`~macos.settings.names` lists every setting, and settings this Mac
-doesn't have (a keyboard backlight, Night Shift...) are left out.
+doesn't have (a keyboard backlight, Night Shift...) are left out. So is,
+with a `RuntimeWarning` naming it, a setting that can't be read (a preference
+edited by hand into something it can't make sense of) or whose value
+{func}`~macos.settings.apply` would refuse (a pointer speed set by hand beyond
+the slider's range, an alert sound kept outside the sound folders): what is
+exported always applies.
 
 ## Applying
 
@@ -44,13 +49,19 @@ macos.settings.apply({"dock": {"autohide": True, "size": 48}, "finder": {"show_e
 ```
 
 It only changes the settings that differ, restarts the Dock and Finder once
-at the end, and returns the names of those it changed. An unknown name or an
+at the end, and returns the names of those it changed. A value already in
+place counts as the same however it's written: `"JPEG"` for `"jpg"`, `"esc"`
+for `"escape"`, `"cmd+shift"` for `"shift+cmd"`, `null` for the part of
+`key_repeat` left as it is. An unknown name or an
 invalid value (a size out of range, an unknown hot corner action, a key that
-can't be remapped) raises `ValueError` before anything changes, naming every
-bad entry. If a change still fails midway (a missing permission, say), the
-settings already changed are put back before the error is raised. Settings
-this Mac doesn't have are skipped. Some settings wait for the next login, as
-their own pages say.
+can't be remapped, a folder or an alert sound this Mac doesn't have) raises
+`ValueError` before anything changes, naming every bad entry: create the
+folders an export names before applying it. If a change still fails midway
+(a missing permission, say), the settings already changed are put back
+before the error is raised. A setting whose current value can't be read is
+written anyway, since that's what repairs it, but it can't be put back, and
+the error says so. Settings this Mac doesn't have are skipped. Some settings
+wait for the next login, as their own pages say.
 
 Key remappings are swapped in as a whole: the new list replaces the old one in
 one step, so a bad entry never leaves the keyboard without its remappings.

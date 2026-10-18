@@ -31,7 +31,7 @@ when macOS moved the item without saying where it went.
 macos.finder.tags("report.pdf")                       # []
 macos.finder.add_tags("report.pdf", "Work", "Red")    # ['Work', 'Red']
 macos.finder.remove_tags("report.pdf", "Red")         # ['Work']
-macos.finder.set_tags("report.pdf", ["Done"])         # replace them all
+macos.finder.set_tags("report.pdf", ["Done"])         # replace them all ("Done" alone is the same)
 macos.finder.set_tags("report.pdf", [])               # remove them all
 ```
 
@@ -99,7 +99,8 @@ matches. Under heavy load macOS may lose track of what changed: then a
 `'rescan'` event, whatever the pattern, names the folder to look through
 again: `wait_for_change` then looks there for a matching file changed since it began waiting.
 Subfolders are watched too, unless `recursive=False`. It goes on until you
-`break` out of the loop, or `timeout` seconds pass. To wait for one change,
+`break` out of the loop, or `timeout` seconds pass, or the folder itself is
+moved or deleted: a last `'deleted'` event names it. To wait for one change,
 such as a download finishing:
 
 ```python
@@ -110,6 +111,11 @@ It uses FSEvents, like Spotlight and Time Machine. Paths come with symbolic
 links resolved (`/private/tmp/...` for `/tmp/...`). No permission is needed,
 except that the Desktop, Documents and Downloads folders ask for access the
 first time, like any access to them.
+
+Watching begins when the loop starts (at the first `next()`), not when
+`watch()` is called: changes made in between aren't reported, and a missing
+folder raises only then. Go through the loop in the thread that started it,
+whose run loop the events come through: another thread raises `RuntimeError`.
 
 ## The selection
 
@@ -141,14 +147,16 @@ Unlike plain zip tools, they keep what macOS stores with files: tags, extended
 attributes and permissions.
 
 An archive already there is replaced only once the new one is complete (one
-kept inside the folder it zips is written in place); tags set on the old
-archive itself don't carry over. When unzipping would
+kept inside the folder it zips is written in place), and the new one keeps
+the tags, comment and other extended attributes set on the old archive itself.
+When unzipping would
 write over files already in the destination, say whether to replace them:
 `overwrite=False` raises `FileExistsError` before anything is unzipped (or
 `ValueError` when the destination has files and the archive's list of files
 can't be read to check them against), and
 `overwrite=True` replaces them. Left out, they're replaced with a
-`DeprecationWarning`, as pymacos 2.0 will refuse by default:
+`DeprecationWarning` (also when the archive's files can't be checked and the
+destination isn't empty), as pymacos 2.0 will refuse by default:
 
 ```python
 macos.finder.extract(archive, "~/Desktop/copy", overwrite=False)
@@ -233,7 +241,7 @@ And how new windows and searches behave:
 | Read | Change | Values |
 |---|---|---|
 | {func}`~macos.finder.default_view` | {func}`~macos.finder.set_default_view` | `"icons"`, `"list"`, `"columns"` or `"gallery"`, for folders not yet opened |
-| {func}`~macos.finder.new_window_folder` | {func}`~macos.finder.set_new_window_folder` | the folder a new window opens on |
+| {func}`~macos.finder.new_window_folder` | {func}`~macos.finder.set_new_window_folder` | the folder a new window opens on (`None` for Recents or Computer) |
 | {func}`~macos.finder.search_scope` | {func}`~macos.finder.set_search_scope` | `"this_mac"`, `"current_folder"` or `"previous"` |
 
 ```python

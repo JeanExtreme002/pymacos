@@ -324,3 +324,57 @@ def test_interfaces_read_each_sockaddr_by_its_family(monkeypatch):
     )
     assert (found["en1"].mac, found["en1"].ipv4, found["en1"].active) == (None, (), False)
     assert (found["utun3"].mac, found["utun3"].ipv6, found["utun3"].active) == (None, ("fe80::2",), False)
+
+
+@pytest.mark.parametrize(
+    "output, message",
+    [
+        ('{"error_code": -1009, "error_domain": "NSURLErrorDomain"}', r"not connected to the internet \(NSURLErrorDomain -1009"),
+        ('{"error_code": -1004, "error_domain": "NSURLErrorDomain"}', r"can't reach Apple's test server \(NSURLError"),
+        ('{"error_code": 7, "error_domain": "SomeDomain", "dl_throughput": 5}', r"could not run the test: SomeDomain 7$"),
+        ("[]", "isn't a result"),
+    ],
+)
+def test_speed_test_that_cant_run_raises(fake_run, output, message):
+    # networkQuality exits 0 and gives only the error: it's no measure of 0 Mbps.
+    fake_run.stdout = output
+    with pytest.raises(macos.MacOSError, match=message):
+        macos.network.speed_test()
+
+
+def test_connect_vpn_waits_out_a_disconnect_first(fake_run, monkeypatch):
+    office = "5E3C8DF5-5B2D-4F5E-9F1A-3A2B1C4D5E6F"
+    calls = _scutil(monkeypatch, ["Disconnecting", "Disconnecting", "Disconnected", "Connecting", "Connected"])
+    macos.network.connect_vpn("Office")  # the start goes once it's done disconnecting: macOS would drop it before
+    start = calls.index(["scutil", "--nc", "start", office])
+    assert calls[:start] == [["scutil", "--nc", "list"]] * 3
+    assert calls[start + 1:] == [["scutil", "--nc", "list"]] * 2
+
+    calls = _scutil(monkeypatch, ["Disconnecting", "Connected"])
+    macos.network.connect_vpn("Office", wait=False)  # it got connected meanwhile: nothing to send
+    assert ["scutil", "--nc", "start", office] not in calls
+
+    _scutil(monkeypatch, ["Disconnecting"])
+    with pytest.raises(macos.WaitTimeoutError, match="still disconnecting"):
+        macos.network.connect_vpn("Office", timeout=0)
+
+
+def test_disconnect_vpn_stops_a_connect_under_way(fake_run, monkeypatch):
+    calls = _scutil(monkeypatch, ["Connecting", "Connecting", "Disconnecting", "Disconnected"])
+    macos.network.disconnect_vpn("Office")
+    assert calls[1] == ["scutil", "--nc", "stop", "5E3C8DF5-5B2D-4F5E-9F1A-3A2B1C4D5E6F"]
+    assert calls[-1] == ["scutil", "--nc", "list"]
+
+
+@pytest.mark.parametrize(
+    "host, port, expected",
+    [
+        ("fd00::1", 3128, "[fd00::1]:3128"),
+        ("fd00::1", None, "[fd00::1]"),
+        ("[fd00::1]", 3128, "[fd00::1]:3128"),  # bracketed already
+        ("proxy.example.com", 8080, "proxy.example.com:8080"),
+    ],
+)
+def test_proxies_bracket_an_ipv6_host(host, port, expected):
+    found = {"HTTPEnable": 1, "HTTPProxy": host, **({"HTTPPort": port} if port else {})}
+    assert macos.network._proxies(found).http == expected

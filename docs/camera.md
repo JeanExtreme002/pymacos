@@ -17,6 +17,12 @@ which macOS asks for the first time.
 {func}`~macos.camera.request_permission` asks. The camera's green light is on
 while it works.
 
+Without the permission, {func}`~macos.camera.photo` and
+{func}`~macos.camera.record` raise {class}`~macos.PermissionDeniedError`,
+also when a configuration profile or Screen Time restricts the camera (or the
+microphone), which only an administrator can allow; the message says which.
+A permission prompt left unanswered raises {class}`~macos.PromptTimeoutError`.
+
 ## Cameras
 
 {func}`~macos.camera.devices` returns the connected cameras, the default one
@@ -32,9 +38,9 @@ macos.camera.photo("desk.png", camera="Logitech")  # another one, by name
 path = macos.camera.photo()                        # a temporary .jpg, yours to delete
 ```
 
-The extension sets the format: `.jpg`, `.png`, `.heic` or `.tiff`. The camera
-takes the photo as a JPEG, which the other formats are converted from: a
-`.png` or `.tiff` is no sharper than the `.jpg`, only bigger. The camera
+The extension sets the format: `.jpg`, `.png`, `.heic` or `.tiff` (or
+`.tif`). The camera takes the photo as a JPEG, which the other formats are
+converted from: a `.png` or `.tiff` is no sharper than the `.jpg`, only bigger. The camera
 turns on for about a second before the photo, so the exposure settles.
 `camera` is a {class}`~macos.camera.Camera`, its `id`, or its name, or part of
 it when only one camera matches.
@@ -58,10 +64,13 @@ finished first, then the `KeyboardInterrupt` goes on. If the camera then
 fails to finish it, the `KeyboardInterrupt` still goes on (one that says the
 recording is unfinished) and nothing is saved.
 
-The camera reports back on the main thread's run loop, which these functions
-turn while they wait: call {func}`~macos.camera.photo` and
-{func}`~macos.camera.record` from the main thread. From another one they raise
-{class}`~macos.MacOSError`, instead of waiting for a photo that never comes.
+Call {func}`~macos.camera.photo` and {func}`~macos.camera.record` from the
+main thread: they turn its run loop while they wait for the camera, so the
+work the capture sends there goes on. From another thread they raise
+{class}`~macos.MainThreadError`. A camera that doesn't deliver the photo, or
+doesn't start or finish the recording in time, raises
+{class}`~macos.WaitTimeoutError` (a `TimeoutError`, and a
+{class}`~macos.MacOSError`). `seconds` must be a positive, finite number.
 
 To know whether an app is using the camera right now, see
 {func}`macos.system.camera_in_use`.

@@ -57,7 +57,8 @@ macos.maps.directions("JFK Airport", by="transit")   # from where the Mac is
 macos.maps.directions((48.8584, 2.2945), start="Gare du Nord, Paris", by="walk")
 ```
 
-A place is an address, a {class}`~macos.maps.Place` or `(latitude, longitude)`;
+A place is an address, a {class}`~macos.maps.Place` or `(latitude, longitude)`,
+with the latitude from -90 to 90 and the longitude from -180 to 180;
 `by` is `"car"`, `"walk"` or `"transit"`.
 
 ## Limits
@@ -65,7 +66,9 @@ A place is an address, a {class}`~macos.maps.Place` or `(latitude, longitude)`;
 Apple limits how many requests an app makes in a short time: space out
 large batches, or a request raises {class}`~macos.MacOSError`. A request
 that gets no answer within `timeout` seconds (15 by default) raises
-{class}`~macos.WaitTimeoutError` (a `TimeoutError`). Call these functions from the main thread, where the answers
+{class}`~macos.WaitTimeoutError` (a `TimeoutError`); `timeout` must be a
+positive number. A request that times out, or that Ctrl-C interrupts, is
+canceled, and its answer is dropped when it comes. Call these functions from the main thread, where the answers
 arrive.
 
 ## Reference

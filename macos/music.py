@@ -22,7 +22,7 @@ from typing import List, Optional
 
 from . import apps
 from ._system import applescript
-from .errors import MacOSError
+from .errors import AppNotFoundError, MacOSError
 
 __all__ = ["Track", "now_playing", "play", "pause", "play_pause", "next", "previous", "volume", "set_volume", "seek"]
 
@@ -31,6 +31,11 @@ __all__ = ["Track", "now_playing", "play", "pause", "play_pause", "next", "previ
 _BUNDLE_IDS = {"Music": "com.apple.Music", "Spotify": "com.spotify.client"}
 PLAYERS = tuple(_BUNDLE_IDS)
 _SEPARATOR = "\x1f"  # ASCII unit separator: never in a song's title
+# What a script answers when its player quit after Python saw it running: telling a player that
+# isn't running anything opens it, so the scripts that mustn't open one ask first.
+_NOT_RUNNING = "pymacos: not running"
+# Every player state of Music's and Spotify's dictionaries, as `player state as string` writes them.
+_STATES = ("playing", "paused", "stopped", "fast forwarding", "rewinding")
 
 
 @dataclass(frozen=True)
@@ -59,30 +64,77 @@ def _running() -> List[str]:
     return [player for player in PLAYERS if _BUNDLE_IDS[player] in identifiers]
 
 
+def _if_running(app: str, script: str) -> str:
+    """``script`` (it tells ``app`` something), run only if ``app`` still runs: else it returns ``_NOT_RUNNING``."""
+    return 'if application id "{}" is running then\n{}\nelse\n    return "{}"\nend if'.format(
+        _BUNDLE_IDS[app], script.strip("\n"), _NOT_RUNNING
+    )
+
+
+def _tell(app: str, command: str) -> str:
+    """Tell a running ``app`` ``command``, and return its answer; raises :class:`MacOSError` if it quit meanwhile."""
+    output = _osascript(app, _if_running(app, 'tell application "{}" to {}'.format(app, command)))
+    if output.strip() == _NOT_RUNNING:
+        raise MacOSError("{} isn't running".format(app))
+    return output
+
+
 def _state(app: str) -> str:
-    return _osascript(app, 'tell application "{}" to player state as string'.format(app)).strip()
+    state = _osascript(app, _if_running(app, 'tell application "{}" to player state as string'.format(app))).strip()
+    return "" if state == _NOT_RUNNING else state
+
+
+def _check(app: Optional[str]) -> None:
+    if app is not None and app not in PLAYERS:
+        raise ValueError("app must be one of {}, not {!r}".format(", ".join(PLAYERS), app))
 
 
 def _player(app: Optional[str], running: Optional[List[str]] = None) -> str:
-    """``app``, or the running player (the one playing, if both run), or Music. ``running``: when already known."""
+    """
+    ``app``, or the running player (the one playing, if both run), or Music. ``running``: when already known.
+
+    A player that can't be asked (its Automation permission denied, say) is passed over for the
+    other; only when every running player fails is the first error raised.
+    """
+    _check(app)
     if app is not None:
-        if app not in PLAYERS:
-            raise ValueError("app must be one of {}, not {!r}".format(", ".join(PLAYERS), app))
         return app
     if running is None:
         running = _running()
-    playing = [player for player in running if _state(player) == "playing"]
-    return (playing or running or ["Music"])[0]
+    answered: List[str] = []
+    playing: List[str] = []
+    errors: List[MacOSError] = []
+    for player in running:
+        try:
+            state = _state(player)
+        except MacOSError as error:
+            errors.append(error)
+            continue
+        answered.append(player)
+        if state == "playing":
+            playing.append(player)
+    if errors and not answered:
+        raise errors[0]
+    return (playing or answered or ["Music"])[0]
 
 
 # Not "song": Music's dictionary has a constant of that name (a media kind), which can't be set,
 # and the script wouldn't compile.
+# A stream or an ad may have no name, artist or album: "missing value", which `&` would turn into a
+# list (on its left) or the words "missing value" (on its right). Each becomes "" first, and the
+# leading "" & keeps the whole a text.
 _TRACK = """
 tell application "{app}"
     if player state is stopped then return ""
     set sep to ASCII character 31
     set theTrack to current track
-    return (name of theTrack) & sep & (artist of theTrack) & sep & (album of theTrack) & sep & ¬
+    set trackName to name of theTrack
+    if trackName is missing value then set trackName to ""
+    set trackArtist to artist of theTrack
+    if trackArtist is missing value then set trackArtist to ""
+    set trackAlbum to album of theTrack
+    if trackAlbum is missing value then set trackAlbum to ""
+    return "" & trackName & sep & trackArtist & sep & trackAlbum & sep & ¬
         (duration of theTrack as string) & sep & (player position as string) & sep & (player state as string)
 end tell
 """
@@ -95,40 +147,56 @@ def _number(text: str) -> Optional[float]:
         return None
 
 
+def _track(player: str) -> Optional[Track]:
+    output = _osascript(player, _if_running(player, _TRACK.format(app=player))).rstrip("\n")
+    if not output or output.strip() == _NOT_RUNNING:
+        return None
+    parts = output.split(_SEPARATOR)
+    # The state is checked too: a field that isn't text would leave the count right and the state wrong.
+    if len(parts) != 6 or parts[5].strip() not in _STATES:
+        raise MacOSError("{} returned something unexpected: {!r}".format(player, output))
+    title, artist, album, duration, position, state = parts
+    seconds = _number(duration)
+    if seconds is not None and player == "Spotify":
+        seconds /= 1000  # Spotify counts milliseconds
+    return Track(
+        title=title,
+        artist=artist,
+        album=album,
+        duration=seconds if seconds else None,
+        position=_number(position),
+        playing=state.strip() == "playing",
+        app=player,
+    )
+
+
 def now_playing(app: Optional[str] = None) -> Optional[Track]:
     """
     Return the song Music or Spotify is on (playing or paused), or ``None``.
 
     ``app`` is ``"Music"`` or ``"Spotify"``; by default, the one playing.
     This never opens a player: when none is running, it returns ``None``.
+    Without ``app``, a player that can't be read (its Automation permission
+    denied, say) is passed over; only when every running one fails is the
+    error raised.
     """
-    if app is not None and app not in PLAYERS:
-        raise ValueError("app must be one of {}, not {!r}".format(", ".join(PLAYERS), app))
+    _check(app)
     running = _running()
     candidates = [player for player in ([app] if app is not None else running) if player in running]
     found: List[Track] = []
+    errors: List[MacOSError] = []
     for player in candidates:
-        output = _osascript(player, _TRACK.format(app=player)).rstrip("\n")
-        if not output:
+        try:
+            track = _track(player)
+        except MacOSError as error:
+            if app is not None:
+                raise
+            errors.append(error)
             continue
-        parts = output.split(_SEPARATOR)
-        if len(parts) != 6:
-            raise MacOSError("{} returned something unexpected: {!r}".format(player, output))
-        title, artist, album, duration, position, state = parts
-        seconds = _number(duration)
-        if seconds is not None and player == "Spotify":
-            seconds /= 1000  # Spotify counts milliseconds
-        found.append(
-            Track(
-                title=title,
-                artist=artist,
-                album=album,
-                duration=seconds if seconds else None,
-                position=_number(position),
-                playing=state.strip() == "playing",
-                app=player,
-            )
-        )
+        if track is not None:
+            found.append(track)
+    if errors and len(errors) == len(candidates):
+        raise errors[0]
     playing = [track for track in found if track.playing]
     if playing:
         return playing[0]
@@ -137,7 +205,19 @@ def now_playing(app: Optional[str] = None) -> Optional[Track]:
 
 def _command(command: str, app: Optional[str], *, may_open: bool = False) -> None:
     # Only play() may open a player: pausing or skipping in one that isn't running makes no sense.
-    player = _player(app) if may_open else _running_player(app)
+    if not may_open:
+        _tell(_running_player(app), command)
+        return
+    _check(app)
+    running = _running()
+    player = _player(app, running)
+    if player not in running:
+        # Told to play, a player that isn't installed has AppleScript ask "Where is Spotify?"
+        # and wait for an answer: say so instead.
+        try:
+            apps._locate(_BUNDLE_IDS[player])
+        except AppNotFoundError:
+            raise AppNotFoundError("{} isn't installed".format(player)) from None
     _osascript(player, 'tell application "{}" to {}'.format(player, command))
 
 
@@ -145,7 +225,8 @@ def play(app: Optional[str] = None) -> None:
     """
     Play (or resume), in ``app`` (``"Music"`` or ``"Spotify"``) or the running player.
 
-    With no player running, it opens Music.
+    With no player running, it opens Music. Raises
+    :class:`~macos.errors.AppNotFoundError` when the player isn't installed.
     """
     _command("play", app, may_open=True)
 
@@ -192,7 +273,7 @@ def volume(app: Optional[str] = None) -> int:
     when the player isn't running.
     """
     player = _running_player(app)
-    output = _osascript(player, 'tell application "{}" to sound volume'.format(player))
+    output = _tell(player, "sound volume")
     level = _number(output)
     if level is None:
         raise MacOSError("{} returned something unexpected: {!r}".format(player, output))
@@ -200,11 +281,18 @@ def volume(app: Optional[str] = None) -> int:
 
 
 def set_volume(level: int, app: Optional[str] = None) -> None:
-    """Set the player's own volume, from 0 to 100. ``app`` works as in :func:`volume`."""
+    """
+    Set the player's own volume, from 0 to 100. ``app`` works as in :func:`volume`.
+
+    A fraction is rounded, as :func:`volume` reads it; anything but a number
+    (``True`` too) raises :class:`TypeError`.
+    """
+    if isinstance(level, bool) or not isinstance(level, (int, float)):
+        raise TypeError("volume must be a number, not {!r}".format(level))
     if not 0 <= level <= 100:
         raise ValueError("volume must be from 0 to 100, not {}".format(level))
     player = _running_player(app)
-    _osascript(player, 'tell application "{}" to set sound volume to {}'.format(player, int(level)))
+    _tell(player, "set sound volume to {}".format(int(round(level))))
 
 
 def seek(seconds: float, app: Optional[str] = None) -> None:
@@ -218,4 +306,4 @@ def seek(seconds: float, app: Optional[str] = None) -> None:
         raise ValueError("seconds must be a number, zero or more, not {}".format(seconds))
     player = _running_player(app)
     # A plain decimal point, whatever the user's locale: AppleScript reads numbers in code that way.
-    _osascript(player, 'tell application "{}" to set player position to {}'.format(player, float(seconds)))
+    _tell(player, "set player position to {}".format(float(seconds)))

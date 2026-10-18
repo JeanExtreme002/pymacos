@@ -36,6 +36,9 @@ and links. The page layout of a Word document doesn't (columns, headers and
 footers, text boxes), so a converted PDF looks like the document opened in
 TextEdit, not in Word. Tables are lost when writing Word files (`.docx`,
 `.doc`): their cells become lines; they're kept in the other formats.
+Pictures and other attachments are kept only in web archives (`.webarchive`)
+and drawn in PDFs: the other formats leave them out. Plain text (`.txt`) is
+written as UTF-8.
 
 HTML is read by WebKit, as a browser reads it: a page's pictures, style
 sheets and frames are fetched while it's read, from the web and from the files
@@ -50,9 +53,10 @@ macos.document.text("mail.html", resources=False)
 macos.document.convert("mail.html", "mail.pdf", resources=False)
 ```
 
-Reading HTML or web archives, and writing PDFs, use AppKit's text views and
-printing, which work only on the main thread: called from another thread, they
-raise {class}`~macos.MainThreadError` (a {class}`~macos.MacOSError`) instead of hanging.
+Reading HTML or web archives, and writing PDFs or web archives, use AppKit's
+text views and printing, and WebKit, which work only on the main thread:
+called from another thread, they raise {class}`~macos.MainThreadError`
+(a {class}`~macos.MacOSError`) instead of hanging.
 So does `resources=False` for any file but `.txt` and `.rtf` ones, Word
 documents included: macOS reads a file through WebKit when it holds HTML,
 whatever its extension.

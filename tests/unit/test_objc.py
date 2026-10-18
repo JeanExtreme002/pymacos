@@ -412,5 +412,137 @@ def test_file_url_takes_a_name_that_isnt_utf8():
     with _objc.autorelease_pool():
         url = _objc.file_url("/Volumes/share/caf\udce9.mov")
         assert _objc.pystring(_objc.send(url, "absoluteString")) == "file:///Volumes/share/caf%E9.mov"
-        url = _objc.file_url("/tmp/café.mov")  # a UTF-8 name, as before (decomposed, as the file system keeps it)
-        assert unicodedata.normalize("NFC", _objc.pystring(_objc.send(url, "path"))) == "/tmp/café.mov"
+        # A UTF-8 name keeps its bytes: fileURLWithPath: would decompose the accent, and a file macOS
+        # creates at the URL (an alias, say) would be named otherwise than asked.
+        composed = unicodedata.normalize("NFC", "/tmp/café.mov")
+        url = _objc.file_url(composed)
+        assert _objc.pystring(_objc.send(url, "absoluteString")) == "file:///tmp/caf%C3%A9.mov"
+        assert _objc.pystring(_objc.send(url, "path")) == composed
+        decomposed = unicodedata.normalize("NFD", composed)
+        assert _objc.pystring(_objc.send(_objc.file_url(decomposed), "path")) == decomposed
+        assert _objc.pystring(_objc.send(_objc.file_url("/tmp"), "absoluteString")).endswith("/")  # a folder
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_file_url_of_a_relative_path_is_absolute():
+    import os
+
+    from macos import _objc
+
+    with _objc.autorelease_pool():
+        url = _objc.file_url("relative.txt")
+        assert _objc.pystring(_objc.send(url, "path")) == os.path.join(os.getcwd(), "relative.txt")
+
+
+def test_file_url_keeps_dot_dots_and_refuses_a_nul(monkeypatch, tmp_path):
+    import os
+
+    from macos import _objc
+
+    sent = []
+    monkeypatch.setattr(_objc, "cls", lambda name: 1)
+    monkeypatch.setattr(_objc, "send", lambda *args, **kwargs: sent.append(args[2]) or 2)
+    monkeypatch.chdir(tmp_path)
+    # abspath would drop "link/.." by name, where the kernel goes to the parent of the link's target.
+    _objc.file_url("/base/link/../target.txt")
+    _objc.file_url("link/../target.txt")
+    assert sent == [b"/base/link/../target.txt", os.fsencode(os.path.join(os.getcwd(), "link/../target.txt"))]
+    # C would read the bytes only up to the NUL, and the URL would name "/tmp/a".
+    with pytest.raises(ValueError, match="null byte"):
+        _objc.file_url("/tmp/a\0b")
+    assert len(sent) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_file_url_through_a_symlinked_folder_names_the_file_python_opens(tmp_path):
+    import ctypes
+
+    from macos import _objc
+
+    (tmp_path / "real" / "sub").mkdir(parents=True)
+    (tmp_path / "real" / "target.txt").write_bytes(b"REAL")
+    (tmp_path / "target.txt").write_bytes(b"DECOY")
+    (tmp_path / "link").symlink_to(tmp_path / "real" / "sub")
+    path = str(tmp_path / "link" / ".." / "target.txt")
+    with open(path, "rb") as file:
+        assert file.read() == b"REAL"
+    with _objc.autorelease_pool():
+        data = _objc.send(_objc.cls("NSData"), "dataWithContentsOfURL:", _objc.file_url(path), argtypes=(_objc.id,))
+        assert data
+        length = _objc.send(data, "length", restype=ctypes.c_ulong)
+        bytes_ = _objc.send(data, "bytes")
+        assert ctypes.string_at(bytes_, length) == b"REAL"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_pystring_keeps_a_string_holding_half_an_emoji():
+    import ctypes
+
+    from macos import _objc
+
+    # "a", the high half of an emoji with no low half, "b": UTF-8 can't hold it, the text is still there.
+    units = (ctypes.c_uint16 * 3)(0x61, 0xD83D, 0x62)
+    with _objc.autorelease_pool():
+        string = _objc.send(_objc.cls("NSString"), "alloc")
+        string = _objc.send(
+            string, "initWithCharacters:length:", units, 3, argtypes=(ctypes.c_void_p, _objc.NSUInteger)
+        )
+        _objc.send(string, "autorelease")
+        assert _objc.pystring(string) == "a\ufffdb"
+        assert _objc.pystring(_objc.nsstring("")) == ""
+
+
+def test_a_struct_from_nil_is_all_zeros(monkeypatch):
+    from macos import _objc
+
+    def never(*args):
+        raise AssertionError("objc_msgSend called for nil")
+
+    # Its nil path leaves the buffer a big struct comes back through as it was: garbage.
+    monkeypatch.setattr(_objc, "_prototype", never)
+    transform = _objc.send(None, "preferredTransform", restype=_objc.CGAffineTransform)
+    assert [getattr(transform, name) for name in ("a", "b", "c", "d", "tx", "ty")] == [0.0] * 6
+    rect = _objc.send(0, "frame", restype=_objc.CGRect)
+    assert (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height) == (0.0, 0.0, 0.0, 0.0)
+    with pytest.raises(TypeError):  # the arguments are still checked first
+        _objc.send(None, "frame:", 1, restype=_objc.CGRect)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls the Objective-C runtime")
+def test_ciimage_tells_a_folder_or_an_unreadable_file_from_one_that_isnt_an_image(tmp_path):
+    import os
+
+    from macos import _objc
+
+    with _objc.autorelease_pool():
+        with pytest.raises(IsADirectoryError):
+            _objc.ciimage(tmp_path)
+        junk = tmp_path / "junk.png"
+        junk.write_bytes(b"not a picture")
+        with pytest.raises(ValueError, match="not an image macOS can read"):
+            _objc.ciimage(junk)
+        if os.geteuid() != 0:  # root reads any file
+            junk.chmod(0)
+            try:
+                with pytest.raises(PermissionError):
+                    _objc.ciimage(junk)
+            finally:
+                junk.chmod(0o600)
+
+
+def test_run_until_refuses_a_nan_timeout_rather_than_wait_forever(monkeypatch):
+    from macos import _cf, _objc
+
+    monkeypatch.setattr(_cf, "run_loop", lambda *args, **kwargs: pytest.fail("the run loop turned"))
+    with pytest.raises(ValueError, match="NaN"):
+        _objc.run_until(lambda: False, float("nan"))
+    assert _objc.run_until(lambda: True, float("inf")) is True  # inf still waits for done()
+
+
+def test_path_annotations_resolve_on_every_supported_python():
+    import typing
+
+    from macos import _objc
+
+    for function in (_objc.file_url, _objc.ciimage):
+        typing.get_type_hints(function)

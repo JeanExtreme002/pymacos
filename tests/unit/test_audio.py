@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.audio`. They run on any platform."""
 
+import os
+
 import pytest
 
 import macos
@@ -20,6 +22,25 @@ def test_audio_device_matching():
         find("p", devices, "output")
     with pytest.raises(ValueError, match="no output device"):
         find("Headphones", devices, "output")
+
+
+def test_audio_device_matching_tells_apart_devices_of_the_same_name():
+    first = macos.audio.Device(4, "USB Audio Device", "usb-1", "usb", True, False)
+    second = macos.audio.Device(5, "USB Audio Device", "usb-2", "usb", True, False)
+    speakers = macos.audio.Device(1, "MacBook Pro Speakers", "BuiltInSpeakerDevice", "builtin", True, False)
+    devices = [speakers, first, second]
+    find = macos.audio._find
+
+    with pytest.raises(ValueError, match="several") as raised:
+        find("USB Audio Device", devices, "output")  # not whichever CoreAudio lists first
+    assert "'usb-1'" in str(raised.value) and "'usb-2'" in str(raised.value)
+    assert find("usb-2", devices, "output") is second
+    assert find(second, devices, "output") is second
+    with pytest.raises(ValueError, match="several") as raised:
+        find("u", devices, "output")
+    assert "MacBook" not in str(raised.value)  # only the devices that match
+    with pytest.raises(TypeError, match="Device or a str"):
+        find(4, devices, "output")
 
 
 class _FakeCoreAudio:
@@ -423,6 +444,141 @@ def test_audio_argument_checks(tmp_path):
         macos.audio.record_until_silence(tmp_path / "out.mp3")
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_audio_refuses_numbers_that_are_not_finite(tmp_path, monkeypatch, bad):
+    def no_microphone(kind):
+        raise AssertionError("the microphone was asked for")
+
+    monkeypatch.setattr(macos.audio._capture, "require_permission", no_microphone)
+    out = tmp_path / "out.m4a"
+    for call in (
+        lambda: macos.audio.record(out, bad),
+        lambda: macos.audio.input_level(bad),
+        lambda: macos.audio.record_until_silence(out, silence=bad),
+        lambda: macos.audio.trim(__file__, out, bad),
+        lambda: macos.audio.trim(__file__, out, 0, bad),
+        lambda: macos.audio.fade(__file__, out, fade_in=bad),
+        lambda: macos.audio.fade(__file__, out, fade_out=bad),
+        lambda: macos.audio.speed(__file__, out, bad),
+        lambda: macos.audio.gain(__file__, out, bad),
+        lambda: macos.audio.gain(__file__, out, -bad),
+    ):
+        with pytest.raises(ValueError):
+            call()
+    with pytest.raises(ValueError):
+        macos.audio.record_until_silence(out, max_seconds=float("nan"))
+
+
+def test_speed_stretches_the_exact_length_to_the_sample():
+    # 1.0001 s at the sound's own timescale: rounding to 1/600 s would have cut the last samples off.
+    length = macos.audio._media.CMTime(44104, 44100, 1, 0)
+    target = macos.audio._stretched(length, 2, 44100, sound=44104 / 44100)
+    assert (target.value, target.timescale, target.flags) == (22052, 44100, 1)
+    # A coarse timescale gets a finer one: at least one tick per sample.
+    target = macos.audio._stretched(macos.audio._media.CMTime(600, 600, 1, 0), 3, 44100, sound=1.0)
+    assert target.timescale >= 44100 and target.value / target.timescale == pytest.approx(1 / 3, abs=1 / 44100)
+
+
+def test_speed_refuses_a_factor_the_length_cant_take():
+    length = macos.audio._media.CMTime(44100, 44100, 1, 0)
+    with pytest.raises(ValueError, match="factor .* too small"):
+        macos.audio._stretched(length, 1e-300, 44100, sound=1.0)
+    with pytest.raises(ValueError, match="factor .* too small"):
+        macos.audio._stretched(length, 5e-324, 44100, sound=1.0)
+    with pytest.raises(ValueError, match="factor .* too large"):
+        macos.audio._stretched(length, 1e300, 44100, sound=1.0)
+
+
+def test_speed_refuses_a_factor_that_leaves_only_the_silence():
+    # 1 s of sound and the 1 s of silence after it: at 1e5 the two still come to a tick, the sound
+    # alone to under half a frame, and nothing of it would be written.
+    padded = macos.audio._media.CMTime(88200, 44100, 1, 0)
+    with pytest.raises(ValueError, match="factor .* too large"):
+        macos.audio._stretched(padded, 1e5, 44100, sound=1.0)
+    assert macos.audio._stretched(padded, 4e4, 44100, sound=1.0).value == 2  # a frame of it is left
+
+
+def test_a_huge_gain_clips_rather_than_overflows(fake_pcm):
+    macos.audio.gain("in.wav", "out.wav", 10000)
+    assert fake_pcm["samples"] == [32767, -32768] * 5
+    macos.audio.gain("in.wav", "out.wav", -10000)
+    assert fake_pcm["samples"] == [0] * 10
+
+
+class _FakeReader:
+    """An AVAssetReader and its output, through _objc.send: ``buffers`` frames counts, then nothing."""
+
+    def __init__(self, buffers, status):
+        self.buffers = list(buffers)
+        self.status = status
+        self.sent = []
+
+    def send(self, target, selector, *args, **options):
+        self.sent.append(selector)
+        if selector == "copyNextSampleBuffer":
+            return self.buffers.pop(0) if self.buffers else None
+        if selector == "status":
+            return self.status
+        return 1  # an object, or YES
+
+    def data_length(self, block):
+        return block * 2 * 2  # stereo 16-bit frames: the "block" is the buffer's frame count
+
+
+@pytest.fixture
+def fake_reader(monkeypatch):
+    import types
+    from contextlib import nullcontext
+
+    from macos import audio
+
+    def make(buffers, status):
+        reader = _FakeReader(buffers, status)
+        objc = types.SimpleNamespace(
+            send=reader.send,
+            cls=lambda name: name,
+            nsnumber=lambda value: value,
+            nsdictionary_of=lambda value: value,
+            nsarray_of=lambda value: value,
+            nsstring=lambda value: value,
+            autorelease_pool=nullcontext,
+            id=None,
+            BOOL=None,
+            NSInteger=None,
+        )
+        media = types.SimpleNamespace(
+            CMSampleBufferGetDataBuffer=lambda buffer: buffer,
+            CMBlockBufferGetDataLength=reader.data_length,
+            CMBlockBufferCopyDataBytes=lambda block, offset, size, address: 0,
+        )
+        monkeypatch.setattr(audio, "_objc", objc)
+        monkeypatch.setattr(audio, "framework", lambda name: None)
+        monkeypatch.setattr(audio, "_core_media", lambda: media)
+        monkeypatch.setattr(audio._media, "tracks", lambda target, kind: [])
+        monkeypatch.setattr(audio._cf, "owned", lambda buffer: nullcontext())
+        return reader
+
+    return make
+
+
+def test_read_samples_comes_out_as_long_as_asked(fake_reader):
+    from macos import audio
+
+    written = []
+    # The reader ends 2 frames short of the 10 asked for (10 frames a second for 1 s): those come as silence.
+    reader = fake_reader([3, 5], audio._READ)
+    audio._read_samples(1, written.append, rate=10, channels=2, length=1.0, time_pitch="Spectral")
+    assert [len(piece) for piece in written] == [6, 10, 4] and list(written[-1]) == [0, 0, 0, 0]
+    assert "cancelReading" not in reader.sent
+    assert "setTimeRange:" not in reader.sent  # it would end the stretch before its last frames
+
+    # More to read than asked for: only what was asked, and the reader stops there.
+    written.clear()
+    reader = fake_reader([6, 6, 6], audio._READING)
+    audio._read_samples(1, written.append, rate=10, channels=2, length=1.0, time_pitch="Spectral")
+    assert [len(piece) for piece in written] == [12, 8] and "cancelReading" in reader.sent
+
+
 def test_a_name_property_too_short_to_hold_a_string_reads_as_empty(monkeypatch):
     from macos import audio
 
@@ -464,3 +620,51 @@ def test_an_exception_in_the_classifier_callback_ends_the_analysis_with_that_err
         assert "cancelAnalysis" in sent
     finally:
         audio._heard.pop(7, None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_an_unreadable_source_is_a_permission_error_before_afconvert_runs(tmp_path, monkeypatch):
+    from macos import audio
+
+    source = tmp_path / "song.wav"
+    source.write_bytes(b"RIFF")
+    source.chmod(0)
+    monkeypatch.setattr(audio, "_run", lambda *args, **kwargs: pytest.fail("afconvert ran"))
+    try:
+        with pytest.raises(PermissionError):
+            audio.convert(source, tmp_path / "song.m4a")
+    finally:
+        source.chmod(0o644)
+
+
+def test_speed_keeps_every_track_in_the_mix(monkeypatch, tmp_path):
+    """speed() re-encodes: a second language left off would be dropped from the mix."""
+    from contextlib import contextmanager, nullcontext
+    from types import SimpleNamespace
+
+    from macos import audio
+
+    source = tmp_path / "song.m4a"
+    source.write_bytes(b"m4a")
+
+    @contextmanager
+    def encoding(*args, **kwargs):
+        yield lambda samples: None
+
+    asked = []
+
+    class Done(Exception):
+        pass
+
+    def editable(media, **options):
+        asked.append(options)
+        raise Done
+
+    monkeypatch.setattr(audio, "info", lambda path: SimpleNamespace(channels=2, sample_rate=44100))
+    monkeypatch.setattr(audio, "_encoding_to", encoding)
+    monkeypatch.setattr(audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(audio._media, "asset", lambda path: 1)
+    monkeypatch.setattr(audio._media, "editable", editable)
+    with pytest.raises(Done):
+        audio.speed(source, tmp_path / "fast.m4a", 1.5)
+    assert asked == [{"keep_state": False}]

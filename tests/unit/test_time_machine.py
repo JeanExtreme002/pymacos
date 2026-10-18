@@ -17,6 +17,13 @@ def test_time_machine_status(fake_run):
     assert macos.time_machine.is_backing_up() is False and macos.time_machine.progress() is None
 
 
+def test_time_machine_progress_in_exponent_form(fake_run):
+    # Early in a backup, the NSNumber description of a small fraction comes in exponent form.
+    fake_run.stdout = 'Backup session status:\n{\n    Percent = "6.104660799596002e-05";\n    Running = 1;\n}\n'
+    assert macos.time_machine.is_backing_up() is True
+    assert macos.time_machine.progress() == pytest.approx(6.104660799596002e-05)
+
+
 def test_time_machine_destinations_and_last_backup(fake_run):
     fake_run.stdout = "====================================================\nName          : Backup Disk\nKind          : Local\n"
     assert macos.time_machine.destinations() == ["Backup Disk"]
@@ -76,3 +83,26 @@ def test_time_machine_last_backup_on_a_disk_whose_name_has_a_newline(fake_run):
 def test_time_machine_last_backup_none_when_there_is_none(fake_run):
     fake_run.returncode, fake_run.stderr = 1, "No machine directory found for host.\n"
     assert macos.time_machine.last_backup() is None
+
+
+@pytest.mark.parametrize("function", ["exclude", "include", "is_excluded"])
+def test_time_machine_exclusions_refuse_an_empty_path(fake_run, function):
+    # Path("") is the current folder: exclude("") would leave it, often the home folder, out of the backups.
+    with pytest.raises(ValueError, match="no path given"):
+        getattr(macos.time_machine, function)("")
+    assert fake_run.calls == []
+
+
+@pytest.mark.parametrize("function", ["exclude", "include", "is_excluded"])
+def test_time_machine_exclusions_without_full_disk_access(fake_run, tmp_path, function):
+    fake_run.returncode = 80
+    fake_run.stderr = "tmutil: isexcluded requires Full Disk Access privileges.\n"
+    with pytest.raises(macos.PermissionDeniedError, match="Full Disk Access"):
+        getattr(macos.time_machine, function)(tmp_path)
+
+
+def test_time_machine_exclusions_keep_other_errors(fake_run, tmp_path):
+    # System Integrity Protection says "Operation not permitted" too: no Full Disk Access would help.
+    fake_run.returncode, fake_run.stderr = 1, "/System: Operation not permitted\n"
+    with pytest.raises(macos.CommandError):
+        macos.time_machine.exclude(tmp_path)

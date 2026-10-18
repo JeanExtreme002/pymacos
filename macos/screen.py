@@ -17,6 +17,8 @@ module checks the permission first and raises
 """
 
 import ctypes
+import math
+import operator
 import os
 import tempfile
 import time
@@ -28,7 +30,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import _capture as _av, _cf, _files, _objc, defaults
 from ._system import framework, private_framework, restart_process, run as _run, run_to_the_end, UnfinishedInterrupt
-from .errors import CommandTimeoutError, MacOSError, NotSupportedError, PermissionDeniedError
+from .errors import MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = [
     "screenshot",
@@ -82,7 +84,9 @@ __all__ = [
 ]
 
 _CAPTURE_TIMEOUT = 60.0  # seconds: a screenshot takes a fraction of one, but screencapture has hung on some Macs
-_FORMATS = {".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".heic": "heic", ".tiff": "tiff", ".gif": "gif", ".pdf": "pdf"}
+_FORMATS = {
+    ".png": "png", ".jpg": "jpg", ".jpeg": "jpg", ".heic": "heic", ".tif": "tiff", ".tiff": "tiff", ".gif": "gif", ".pdf": "pdf"
+}
 
 
 @lru_cache(maxsize=None)
@@ -127,13 +131,13 @@ def screenshot(
     Capture the screen to an image file and return its path.
 
     - ``path``: where to save it. The format follows the extension (``.png``,
-      ``.jpg``, ``.heic``, ``.tiff``, ``.gif``, ``.pdf``). When omitted, a
+      ``.jpg``, ``.heic``, ``.tiff`` or ``.tif``, ``.gif``, ``.pdf``). When omitted, a
       temporary ``.png`` is created; deleting it is up to you.
     - ``region``: ``(x, y, width, height)`` in points, from the top-left corner
       of the main display.
     - ``display``: capture this display, by its position (``1`` is the main
       one), instead of the main display: not a :class:`~macos.screen.Display`
-      or its id.
+      or its id (a :class:`~macos.screen.Display` raises ``TypeError``).
     - ``cursor``: include the mouse pointer.
     - ``check_permission``: raise if the Screen Recording permission is
       missing. Pass ``False`` to accept a capture without other apps' windows.
@@ -147,8 +151,26 @@ def screenshot(
         x, y, width, height = region
         options.append("-R{},{},{},{}".format(x, y, width, height))
     if display is not None:
-        options.append("-D{}".format(display))
+        options.append("-D{}".format(_position(display)))
     return _capture(path, options, check_permission)
+
+
+def _position(display: object) -> int:
+    """``display`` as the position screencapture takes, from 1; raises for a :class:`Display`, its id can't stand for it."""
+    if isinstance(display, Display):
+        raise TypeError(
+            "display is a position in macos.screen.displays() (1 is the main one), not a Display: "
+            "pass macos.screen.displays().index(d) + 1"
+        )
+    if isinstance(display, bool):
+        raise TypeError("display is a position from 1, not {!r}".format(display))
+    try:
+        position = operator.index(display)  # type: ignore[arg-type]
+    except TypeError:
+        raise TypeError("display is a position from 1, not {!r}".format(display)) from None
+    if position < 1:
+        raise ValueError("there's no display {}: displays count from 1".format(position))
+    return position
 
 
 def _capture(path: Union[str, "os.PathLike[str]", None], options: List[str], check_permission: bool = True) -> Path:
@@ -218,8 +240,8 @@ def _area(region: Optional[Tuple[int, int, int, int]], display: Optional[int]) -
     """The part of the screen a capture covers, in points."""
     if region is not None:
         return tuple(float(value) for value in region)  # type: ignore[return-value]
+    index = (1 if display is None else _position(display)) - 1
     found = displays()
-    index = (1 if display is None else display) - 1
     if not 0 <= index < len(found):
         raise ValueError("there's no display {}: there are {}".format(display, len(found)))
     screen = found[index]
@@ -245,13 +267,15 @@ def find_text(
 
     ``region`` (``(x, y, width, height)`` in points) or ``display`` (``1`` is
     the main one) limit where to look; by default, the main display.
-    ``languages`` works as in :func:`macos.vision.lines`. Needs the Screen
+    ``languages`` works as in :func:`macos.vision.lines`: a list such as
+    ``["en-US"]`` (a str raises ``TypeError``). Needs the Screen
     Recording permission. See also :func:`macos.mouse.click_text`.
     """
     from . import vision
 
     if not text.strip():
         raise ValueError("text must not be empty")
+    vision._check_languages(languages)  # before the screenshot, and its permission check
     left, top, width, height = _area(region, display)
     shot = screenshot(region=region, display=None if region is not None else display)
     try:
@@ -286,8 +310,13 @@ def wait_for_text(
 
         macos.screen.wait_for_text("Export complete", timeout=120)
     """
-    if interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    from . import vision
+
+    vision._check_languages(languages)
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("interval must be a positive finite number, not {}".format(interval))
+    if timeout is not None and math.isnan(timeout):  # never past its deadline: it would look forever
+        raise ValueError("timeout must be a number of seconds or None, not {}".format(timeout))
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         found = find_text(text, region=region, display=display, languages=languages)
@@ -303,12 +332,14 @@ def color_at(x: float, y: float) -> str:
     """
     The color of the screen at ``(x, y)`` (points from the main display's top-left corner), as ``'#rrggbb'``.
 
-    Handy to check a status light or wait for a button to turn green.
-    Needs the Screen Recording permission.
+    A fractional point reads the point it falls inside. Handy to check a
+    status light or wait for a button to turn green. Needs the Screen
+    Recording permission.
     """
     from . import image
 
-    shot = screenshot(region=(int(x), int(y), 1, 1))
+    # Floored, not truncated: -0.5 is in the point left of 0, on a display left of the main one.
+    shot = screenshot(region=(math.floor(x), math.floor(y), 1, 1))
     try:
         return image.dominant_colors(shot, count=1)[0]
     finally:
@@ -361,7 +392,7 @@ def set_screenshot_format(format: str) -> None:
 
 def screenshot_thumbnail() -> bool:
     """Whether a screenshot first shows as a thumbnail in the corner, to edit or drag, before it's saved."""
-    return bool(defaults.read(_CAPTURE_SETTINGS, "show-thumbnail", default=True))
+    return defaults._as_bool(defaults.read(_CAPTURE_SETTINGS, "show-thumbnail", default=True), True)
 
 
 def set_screenshot_thumbnail(on: bool = True) -> None:
@@ -408,7 +439,7 @@ def set_screenshot_target(target: str) -> None:
 
 def screenshot_shadow() -> bool:
     """Whether screenshots of a window (⌘⇧4, then Space) keep its shadow."""
-    return not defaults.read(_CAPTURE_SETTINGS, "disable-shadow", default=False)
+    return not defaults._as_bool(defaults.read(_CAPTURE_SETTINGS, "disable-shadow", default=False), False)
 
 
 def set_screenshot_shadow(on: bool = True) -> None:
@@ -817,13 +848,20 @@ def is_asleep(display_id: Union[int, Display, None] = None) -> bool:
     """
     Whether a display is asleep (turned off to save energy), the main one by default.
 
-    ``display_id`` works as in :func:`wallpaper`.
+    ``display_id`` works as in :func:`wallpaper`: one that isn't connected
+    raises ``ValueError``.
     """
     graphics = _display_api()
     if display_id is None:
         target = graphics.CGMainDisplayID()
     else:
         target = display_id.id if isinstance(display_id, Display) else display_id
+        # CGDisplayIsAsleep says true for an id it doesn't know: an unplugged display would sleep forever.
+        # The online list, not the active one, which leaves out the displays that sleep.
+        if isinstance(target, bool) or not isinstance(target, int):
+            raise TypeError("display_id is a Display or its id, not {!r}".format(display_id))
+        if target not in _online():
+            raise ValueError("no connected display has the id {} (see macos.screen.displays())".format(target))
     return bool(graphics.CGDisplayIsAsleep(target))
 
 
@@ -847,13 +885,17 @@ def record(
     ``display`` work as in :func:`macos.screenshot`. ``audio=True`` also records the default
     microphone (macOS asks for the Microphone permission the first time), and
     ``clicks=True`` shows the mouse clicks. Needs the Screen Recording
-    permission, like screenshots::
+    permission, like screenshots. Raises
+    :class:`~macos.errors.CommandTimeoutError` when ``screencapture`` doesn't
+    finish within a minute past the recording; the recording isn't saved::
 
         macos.screen.record("demo.mov", 10, region=(0, 0, 1280, 800))
         macos.video.convert("demo.mov", "demo.mp4", quality="medium")
     """
-    if seconds <= 0:
-        raise ValueError("seconds must be positive, not {}".format(seconds))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("seconds must be a positive finite number, not {}".format(seconds))
+    if display is not None:
+        display = _position(display)
     target = Path(path).expanduser().resolve()
     if target.suffix.lower() != ".mov":
         raise ValueError("screen recordings are .mov videos, not {!r}".format(target.suffix))
@@ -881,9 +923,8 @@ def record(
     with _files.replacing(target) as staged:
         try:
             # A minute past the recording: screencapture has hung on some Macs, VMs among them.
+            # Its CommandTimeoutError goes on as it is, a TimeoutError like screenshot()'s: the old file stays.
             run_to_the_end([*args, str(staged)], timeout=max(1, round(seconds)) + 60, grace=_FINISH_GRACE)
-        except CommandTimeoutError:
-            raise MacOSError("screencapture didn't finish recording; the recording wasn't saved") from None
         except UnfinishedInterrupt:
             raise  # killed while it ended the movie: the file is incomplete, so the old one stays
         except KeyboardInterrupt as error:
@@ -910,8 +951,8 @@ def screensaver_delay() -> Optional[float]:
 
 def set_screensaver_delay(minutes: Optional[float]) -> None:
     """Start the screen saver after ``minutes`` of inactivity, or never (``None``), like System Settings › Lock Screen."""
-    if minutes is not None and minutes <= 0:
-        raise ValueError("minutes must be positive, or None for never, not {}".format(minutes))
+    if minutes is not None and (not math.isfinite(minutes) or minutes <= 0):
+        raise ValueError("minutes must be a positive finite number, or None for never, not {}".format(minutes))
     # At least a second: 0 is how macOS says "never".
     defaults.write("com.apple.screensaver", "idleTime", max(1, int(round(minutes * 60))) if minutes else 0, current_host=True)
 
@@ -1164,8 +1205,10 @@ def set_display_mode(
         macos.screen.set_display_mode(2560, 1440, refresh_rate=144, display=external)
 
     It must be one of :func:`display_modes`, and ``display`` works as there.
-    With ``refresh_rate``, the closest to it; without, the highest. Without
-    ``hidpi``, the sharp Retina mode when there's one.
+    With ``refresh_rate``, the closest to it (compare the returned
+    :attr:`~DisplayMode.refresh_rate`: 144 on a 60 Hz panel gets 60); without,
+    the highest. Without ``hidpi``, the sharp Retina mode when there's one,
+    among the rates within 0.5 Hz of the closest.
     Kept after a restart, like System Settings › Displays. To go back, call
     it again with the :func:`display_mode` read before.
     """
@@ -1177,19 +1220,20 @@ def set_display_mode(
             mode = _mode(cg, ref)
             if (mode.width, mode.height) != (width, height) or not cg.CGDisplayModeIsUsableForDesktopGUI(ref):
                 continue
-            if refresh_rate is not None and abs(mode.refresh_rate - refresh_rate) > 0.5:
-                continue
             if hidpi is not None and mode.hidpi != hidpi:
                 continue
             closeness = -abs(mode.refresh_rate - refresh_rate) if refresh_rate is not None else mode.refresh_rate
-            candidates.append((mode.hidpi, closeness, mode.pixel_width, ref, mode))
+            candidates.append((closeness, mode.hidpi, mode.pixel_width, ref, mode))
         if not candidates:
             raise ValueError(
-                "display {} has no {}×{} mode{}; see macos.screen.display_modes()".format(
-                    display_id, width, height, " at {:g} Hz".format(refresh_rate) if refresh_rate else ""
-                )
+                "display {} has no {}×{} mode; see macos.screen.display_modes()".format(display_id, width, height)
             )
-        *_, chosen, mode = max(candidates, key=lambda candidate: candidate[:3])
+        if refresh_rate is not None:
+            # The closest rate, and those within 0.5 Hz of it (144 for 143.86) rank as one: there, Retina first.
+            nearest = max(candidate[0] for candidate in candidates)
+            candidates = [candidate for candidate in candidates if candidate[0] >= nearest - 0.5]
+        # Halfway between two rates, the higher one.
+        *_, chosen, mode = max(candidates, key=lambda c: (c[1], c[0], c[4].refresh_rate, c[2]))
         _configure(lambda cg, config: cg.CGConfigureDisplayWithDisplayMode(config, display_id, chosen, None))
     return mode
 

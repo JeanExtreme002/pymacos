@@ -22,7 +22,7 @@ make test               # unit and live tests, but not the intrusive ones (below
 make test-all           # every test, the intrusive ones included: run it at the Mac
 make test-unit          # unit tests only (these also run on Linux): pytest tests/unit
 make test-live          # live tests only, not the intrusive ones; make test-live-all: with them
-pytest                  # unit and live tests, the intrusive ones only when their switch is set
+pytest                  # unit and live tests, the intrusive ones only when their switch is on
 pytest tests/unit/test_audio.py tests/live/test_audio.py   # one module
 ```
 
@@ -50,8 +50,13 @@ environment variable; `make test-all` and `make test-live-all` set them all:
 | `PYMACOS_SCHEDULE_TESTS=1` | adding, then removing, a launch agent (macOS announces it) |
 | `PYMACOS_SETTINGS_TESTS=1` | changing, then restoring, settings: the Dock, login items, a default app, the display mode, a keyboard remap |
 
-On GitHub's runners (`GITHUB_ACTIONS` set) the schedule and settings tests run
-unasked: the machine is thrown away afterwards. `CI` alone unlocks nothing.
+Every switch, these and `PYMACOS_REQUIRE_PERMISSIONS` below, is on when set
+to `1`, `true`, `yes` or `on`, in any case; `0`, `false`, `no`, `off` or
+leaving it unset keeps it off (anything else is off too, with a warning).
+On GitHub's runners (`GITHUB_ACTIONS=true`) the schedule and settings tests
+run unasked: the machine is thrown away afterwards. A self-hosted runner on
+your own Mac sets `GITHUB_ACTIONS=true` too, so it unlocks them as well.
+`CI` alone unlocks nothing.
 The tests that need a permission the machine lacks (Accessibility, Screen
 Recording, Input Monitoring) skip themselves: `pytest -rs` lists them, so you
 can tell a green run with gaps from a full one.
@@ -120,5 +125,6 @@ are the changelog: there's no `CHANGELOG.md` to keep in step with them.
    you rely on them) and *Fixed*, and end with a link to the docs.
 
 Publishing the release starts the `Publish to PyPI` workflow: it refuses a
-tag that doesn't match `__version__`, builds the package once, runs the whole
-suite (live tests included) against that build, and only then uploads it.
+tag that doesn't match `__version__` or isn't on `main`, builds the package
+once, runs the whole suite (live tests included) against that build, and only
+then uploads it.

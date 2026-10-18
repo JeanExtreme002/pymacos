@@ -16,6 +16,7 @@ first time. The camera's green light is on while it works.
 """
 
 import ctypes
+import math
 import os
 import tempfile
 import threading
@@ -26,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import _capture, _files, _objc
 from ._system import framework, UnfinishedInterrupt
-from .errors import MacOSError
+from .errors import MacOSError, WaitTimeoutError
 
 __all__ = ["Camera", "devices", "photo", "record", "has_permission", "request_permission"]
 
@@ -34,7 +35,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 _WARM_UP = 1.0  # seconds for the camera to settle its exposure before a photo
 _TIMEOUT = 15.0  # seconds to wait for a photo or the end of a recording
-_PHOTO_FORMATS = {".jpg", ".jpeg", ".png", ".heic", ".tiff"}
+_PHOTO_FORMATS = {".jpg", ".jpeg", ".png", ".heic", ".tiff", ".tif"}
 
 
 @dataclass(frozen=True)
@@ -243,11 +244,12 @@ def _delegate(kind: str) -> int:
 
 
 def _wait(delegate: int, what: str, timeout: float = _TIMEOUT) -> Dict[str, Any]:
-    # The callbacks come on the main queue: turn the run loop while waiting (on the main thread, which
-    # photo() and record() check first: another thread's run loop never gets them).
+    # AVFoundation calls back on a queue of its own, and _store takes the lock: this only polls. It turns
+    # the run loop while it does (photo() and record() keep to the main thread), so the work the capture
+    # session sends to the main queue goes on meanwhile.
     try:
         if not _objc.run_until(lambda: delegate in _results, timeout):
-            raise MacOSError("the camera didn't finish the {} within {:g} seconds".format(what, timeout))
+            raise WaitTimeoutError("the camera didn't finish the {} within {:g} seconds".format(what, timeout))
         with _lock:
             result = _results[delegate]
     finally:
@@ -274,14 +276,16 @@ def photo(path: Optional[PathLike] = None, *, camera: Union[str, Camera, None] =
     Take a photo with the webcam and return its path.
 
     ``path``'s extension sets the format (``.jpg``, ``.png``, ``.heic``,
-    ``.tiff``); without ``path``, a temporary ``.jpg`` is made, and deleting
+    ``.tiff`` or ``.tif``); without ``path``, a temporary ``.jpg`` is made, and deleting
     it is up to you. The camera takes the photo as a JPEG, which the other
     formats are converted from: a ``.png`` or ``.tiff`` is no sharper than
     the ``.jpg``, only bigger. ``camera`` is a :class:`Camera`, its id, or its
     name (or part of it); by default, the default camera.
 
     The camera turns on for about a second first, so the exposure settles.
-    Needs the Camera permission, which macOS asks for the first time::
+    A camera that doesn't deliver the photo in time raises
+    :class:`~macos.WaitTimeoutError` (a ``TimeoutError``). Needs the Camera
+    permission, which macOS asks for the first time::
 
         macos.camera.photo("~/Desktop/me.jpg")
     """
@@ -352,10 +356,13 @@ def record(
     the movie is finished first, then the ``KeyboardInterrupt`` goes on. When
     the camera then fails to finish it, the ``KeyboardInterrupt`` still goes
     on (one that says the recording is unfinished) and nothing is saved. If
-    the recording fails, a file already at ``path`` stays as it was.
+    the recording fails, a file already at ``path`` stays as it was. A camera
+    that doesn't start or finish the recording in time raises
+    :class:`~macos.WaitTimeoutError` (a ``TimeoutError``).
     """
-    if seconds <= 0:
-        raise ValueError("seconds must be positive, not {}".format(seconds))
+    # NaN passes "<= 0", and nan or inf would never reach the end: the camera would record for good.
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("seconds must be a positive number, not {}".format(seconds))
     target = Path(path).expanduser().absolute()
     if target.suffix.lower() != ".mov":
         raise ValueError("webcam videos are .mov files, not {!r}".format(target.suffix))
@@ -408,7 +415,7 @@ def _record(target: Path, seconds: float, camera: Union[str, Camera, None], audi
                 # second): count the seconds from then, or the video comes out
                 # short, and stopping before it began fails ("Cannot Record").
                 if not _objc.run_until(lambda: delegate in _started or delegate in _results, _TIMEOUT):
-                    raise MacOSError("the camera didn't start recording within {} seconds".format(_TIMEOUT))
+                    raise WaitTimeoutError("the camera didn't start recording within {} seconds".format(_TIMEOUT))
                 end = time.monotonic() + seconds
                 try:
                     _objc.run_until(lambda: time.monotonic() >= end or delegate in _results, seconds + 1)

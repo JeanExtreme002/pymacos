@@ -22,13 +22,14 @@ instead. The backlight and the layouts need no permission.
 
 import ctypes
 import json
+import math
 import re
 import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from . import _cf, _events, _files, _objc
 from ._system import framework, private_framework
@@ -164,6 +165,8 @@ def _text_input() -> ctypes.CDLL:
     carbon.TISGetInputSourceProperty.restype = pointer
     carbon.LMGetKbdType.argtypes = ()
     carbon.LMGetKbdType.restype = ctypes.c_uint8
+    carbon.KBGetLayoutType.argtypes = (ctypes.c_int16,)
+    carbon.KBGetLayoutType.restype = ctypes.c_uint32
     carbon.UCKeyTranslate.argtypes = (
         pointer,
         ctypes.c_uint16,
@@ -202,6 +205,13 @@ _US_COMPATIBLE = frozenset(
 
 # The same layouts by the number the preferences list enabled layouts with ("KeyboardLayout ID").
 _US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15})
+
+# What those layouts type elsewhere on a Japanese (JIS) keyboard, whose keys follow its own keycaps:
+# away from the main thread, the US table serves there for the other characters only.
+_JIS_MOVED = frozenset('=][\'\\~@^&*()_+{}|:"')
+# What only a JIS keyboard has a key for: the US table can't type it, but the layout in use can.
+_JIS_ONLY = frozenset("¥")
+_JIS = 0x4A495320  # KBGetLayoutType's kKeyboardJIS ('JIS ')
 
 # The layouts read on the main thread, by input source ID, for other threads: each with the
 # physical keyboard (ANSI, ISO, JIS) it was read for, since keys sit elsewhere on another one.
@@ -243,6 +253,17 @@ def _keyboard_type() -> int:
     return int(_text_input().LMGetKbdType())
 
 
+def _is_jis() -> bool:
+    """Whether the keyboard in use is a Japanese (JIS) one: read on any thread too."""
+    return int(_text_input().KBGetLayoutType(_keyboard_type())) == _JIS
+
+
+@lru_cache(maxsize=None)
+def _us_jis_layout() -> Dict[str, Tuple[int, bool]]:
+    """The US table without the characters a JIS keyboard types elsewhere."""
+    return {char: entry for char, entry in _us_layout().items() if char not in _JIS_MOVED}
+
+
 def _layout() -> Dict[str, Tuple[int, bool]]:
     """
     What each key of the current keyboard layout types: ``{"a": (0, False), "?": (44, True)}``.
@@ -266,7 +287,8 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
                 )
             return table
         if current in _US_COMPATIBLE:
-            return _us_layout()
+            # On JIS, [ = ' \ and others sit on other keys: _parse() refuses them rather than guess.
+            return _us_jis_layout() if _is_jis() else _us_layout()
         raise MainThreadError(
             "the keyboard layout in use ({}) can only be read on the main thread: call "
             "macos.keyboard.layout() once from the main thread first, so other threads know it".format(current or "unknown")
@@ -313,23 +335,35 @@ def _layout() -> Dict[str, Tuple[int, bool]]:
         _cf.release(source)
 
 
-def _parse(keys: str) -> Tuple[List[Tuple[int, int]], int, bool]:
+def _parse(
+    keys: str,
+    *,
+    empty: str = "press() needs a key, such as 'enter' or 'cmd+c'",
+    no_key: str = "no key types {key!r} on this keyboard layout; use type() for text",
+) -> Tuple[List[Tuple[int, int]], int, bool]:
     """
     Split ``"cmd+shift+4"`` into its modifiers ``[(flag, key code), ...]``, the key code and whether Shift is added.
+
+    ``empty`` is the message when there's no key at all, and ``no_key`` the one (formatted with ``key``,
+    the character, and ``keys``) when no key on the layout types the character: both name press() and
+    type() by default, so another caller (hotkeys) passes its own advice rather than reword ours.
     """
     text = keys.strip()
     if not text:
-        raise ValueError("press() needs a key, such as 'enter' or 'cmd+c'")
-    # A last "+" is the key itself: "+" or "cmd++".
+        raise ValueError(empty)
+    # A last "+" is the key itself: "+", "cmd++" or "cmd + +".
+    plus = re.match(r"(.*?)\+\s*\+$", text, re.S)
     if text == "+":
         parts = ["+"]
-    elif text.endswith("++"):
-        parts = text[:-2].split("+") + ["+"]
+    elif plus:
+        parts = (plus.group(1).split("+") if plus.group(1).strip() else []) + ["+"]
     else:
         parts = text.split("+")
     names, key = [part.strip() for part in parts[:-1]], parts[-1].strip() or parts[-1]
     modifiers = []
     for name in names:
+        if not name:
+            raise ValueError("{!r} has an empty part between its + signs; write it like 'cmd+shift+e'".format(keys))
         if name.lower() not in _MODIFIERS:
             raise ValueError("{!r} is not a modifier; use cmd, shift, option, ctrl or fn".format(name))
         modifiers.append(_MODIFIERS[name.lower()])
@@ -347,7 +381,14 @@ def _parse(keys: str) -> Tuple[List[Tuple[int, int]], int, bool]:
             if char in layout:
                 code, shifted = layout[char]
                 return modifiers, code, shifted
-        raise ValueError("no key types {!r} on this keyboard layout; use type() for text".format(key))
+        # Only the characters JIS moves or adds (the ¥ key): one no layout like US has (an "é") is a
+        # ValueError, as on any keyboard.
+        if layout is _us_jis_layout() and (key in _JIS_MOVED | _JIS_ONLY or key.lower() in _JIS_MOVED):
+            raise MainThreadError(
+                "a Japanese (JIS) keyboard types {!r} on another key than a US one: call "
+                "macos.keyboard.layout() once from the main thread first, so other threads know it".format(key)
+            )
+        raise ValueError(no_key.format(key=key, keys=keys))
     raise ValueError("unknown key {!r}; use a character or a name such as 'enter', 'tab', 'left' or 'f5'".format(key))
 
 
@@ -515,8 +556,8 @@ def type(text: str, *, interval: float = 0.0) -> None:
     can't keep up. The keys :func:`hold` holds down don't apply: the text
     comes out as written. Needs the Accessibility permission.
     """
-    if interval < 0:
-        raise ValueError("interval must not be negative, not {}".format(interval))
+    if not math.isfinite(interval) or interval < 0:  # a NaN would pass "< 0", then fail mid-text in time.sleep
+        raise ValueError("interval must be 0 or more seconds, not {}".format(interval))
     _events.require_permission()
     cg = _events.graphics()
     pieces: List[str] = []
@@ -639,6 +680,9 @@ def set_layout(name: str) -> str:
     one layout. Call it from the main thread.
     """
     _require_main_thread("macos.keyboard.set_layout()")
+    if not name.strip():
+        # Every layout's name has "" in it: the only one enabled would be picked as if asked for.
+        raise ValueError("set_layout() needs a layout name, such as 'ABC'; layouts() lists them")
     with _input_sources() as sources:
         exact = [entry for entry in sources if name in (entry[1], entry[2])]
         loose = [entry for entry in sources if name.casefold() in entry[1].casefold()]
@@ -825,30 +869,47 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
     Monitoring* permission (:func:`has_listen_permission` checks it, not
     :func:`has_permission`, which is Accessibility): without it, the call
     itself raises :class:`~macos.PermissionDeniedError`, before the loop
-    starts. Loop on the thread that called it: the keys are heard on that
-    thread's run loop.
+    starts, as it does for a ``timeout`` that isn't ``None`` or 0 or more
+    (:class:`ValueError`). Loop on the thread that called it: the keys are
+    heard on that thread's run loop; to stop it from another thread, call
+    ``close()`` on what it returned.
     macOS hides the keys typed in password fields. A modifier pressed on its own
     (Shift, Cmd, Option, Ctrl, Fn) isn't a key press to macOS, and isn't
     reported: it shows in the ``modifiers`` of the next key (``fn`` too, except
-    on the keys macOS flags with Fn by itself, F5 or an arrow). Off the main
+    on the keys macOS flags with Fn by itself, F5 or an arrow). Keys are named
+    by the layout in use when each is pressed: after a switch to AZERTY, Cmd+A
+    is still ``'cmd+a'``. Off the main
     thread, with a layout that isn't US-compatible and wasn't read there yet
     (see :func:`layout`), it warns (:class:`RuntimeWarning`) and names the keys
     by what they type instead: call :func:`layout` once from the main thread first.
     """
-    try:
-        unshifted = {code: char for char, (code, shifted) in _layout().items() if not shifted}
-    except MainThreadError as problem:
-        # Off the main thread, on a layout not read there yet (the US table serves for a US-compatible
-        # one): the keys are named by what they type, which isn't always how press() spells them.
-        unshifted = {}
-        warnings.warn(
-            "{}; until then, watch() names the keys by what they type (a letter with Option as the symbol it "
-            "makes, Ctrl+K as 'k')".format(problem),
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    except MacOSError:
-        unshifted = {}  # no layout to read (outside macOS, graphics() below says so): named by what they type
+    # The layout last read and its keys by code: read again at every key, as press() does, so a
+    # switch to AZERTY mid-watch names Cmd+A "cmd+a", not "cmd+q" (the table is only rebuilt then).
+    read: List[Any] = [None, {}]
+    warned: List[bool] = []
+
+    def key_names(stacklevel: int) -> Dict[int, str]:
+        try:
+            table = _layout()
+        except MainThreadError as problem:
+            # Off the main thread, on a layout not read there yet (the US table serves for a US-compatible
+            # one): the keys are named by what they type, which isn't always how press() spells them.
+            if not warned:  # once, not at every key
+                warned.append(True)
+                warnings.warn(
+                    "{}; until then, watch() names the keys by what they type (a letter with Option as the symbol "
+                    "it makes, Ctrl+K as 'k')".format(problem),
+                    RuntimeWarning,
+                    stacklevel=stacklevel,
+                )
+            return {}
+        except MacOSError:
+            return {}  # no layout to read (outside macOS, graphics() below says so): named by what they type
+        if table is not read[0]:
+            read[:] = [table, {code: char for char, (code, shifted) in table.items() if not shifted}]
+        return read[1]
+
+    key_names(3)  # the warning, if any, before the loop starts, pointing at the caller
     cg = _events.graphics()
 
     def convert(kind: int, event: int) -> KeyPress:
@@ -857,7 +918,7 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[KeyPress]:
         text = _typed(event)
         key = (
             _KEY_NAMES.get(code)
-            or unshifted.get(code)
+            or key_names(2).get(code)
             or text.lower()
             # A control character names the letter only with Ctrl held, and on a letter's key: keypad Enter
             # types one (\x03) with Ctrl or without, and isn't Ctrl+C.
@@ -894,6 +955,18 @@ def _global(key: str, default: object) -> object:
     return defaults.read(defaults.GLOBAL, key, default=default)
 
 
+def _flag(key: str, default: bool) -> bool:
+    """
+    A yes-or-no global preference, read as macOS does (see :func:`macos.defaults._as_bool`).
+
+    One written without ``-bool`` (``defaults write -g Key false``) is the text
+    ``'false'``, which Python's ``bool()`` takes for true.
+    """
+    from . import defaults
+
+    return defaults._as_bool(_global(key, default), default)
+
+
 def _set_global(key: str, value: object, apply: bool = True) -> None:
     from . import defaults
     from ._system import apply_input_settings
@@ -905,9 +978,14 @@ def _set_global(key: str, value: object, apply: bool = True) -> None:
 
 def key_repeat() -> Tuple[float, float]:
     """``(interval, delay)``: seconds between the repeats of a held key, and before the first one."""
-    interval = float(_global("KeyRepeat", 6)) * _KEY_REPEAT_UNIT  # type: ignore[arg-type]
-    delay = float(_global("InitialKeyRepeat", 25)) * _KEY_REPEAT_UNIT  # type: ignore[arg-type]
-    return round(interval, 3), round(delay, 3)
+    from . import defaults
+
+    def seconds(key: str, default: int) -> float:
+        # A hand-edited value (text, zero...) reads as System Settings' default rather than raising.
+        steps = defaults._as_float(_global(key, default), default)
+        return round((steps if steps > 0 else default) * _KEY_REPEAT_UNIT, 3)
+
+    return seconds("KeyRepeat", 6), seconds("InitialKeyRepeat", 25)
 
 
 def set_key_repeat(interval: Optional[float] = None, *, delay: Optional[float] = None) -> None:
@@ -924,7 +1002,7 @@ def set_key_repeat(interval: Optional[float] = None, *, delay: Optional[float] =
     if interval is None and delay is None:
         raise ValueError("give interval, delay, or both")
     for label, value in (("interval", interval), ("delay", delay)):
-        if value is not None and value <= 0:
+        if value is not None and (not math.isfinite(value) or value <= 0):
             raise ValueError("{} must be positive, not {}".format(label, value))
     if interval is not None:
         _set_global("KeyRepeat", max(1, round(interval / _KEY_REPEAT_UNIT)), apply=False)
@@ -934,7 +1012,7 @@ def set_key_repeat(interval: Optional[float] = None, *, delay: Optional[float] =
 
 def press_and_hold() -> bool:
     """Whether holding a key shows the accents menu (é, ê, è...) instead of repeating it."""
-    return bool(_global("ApplePressAndHoldEnabled", True))
+    return _flag("ApplePressAndHoldEnabled", True)
 
 
 def set_press_and_hold(on: bool = True) -> None:
@@ -948,7 +1026,7 @@ def set_press_and_hold(on: bool = True) -> None:
 
 def standard_function_keys() -> bool:
     """Whether F1, F2... act as function keys without holding Fn (instead of brightness, volume...)."""
-    return bool(_global("com.apple.keyboard.fnState", False))
+    return _flag("com.apple.keyboard.fnState", False)
 
 
 def set_standard_function_keys(on: bool = True) -> None:
@@ -958,7 +1036,7 @@ def set_standard_function_keys(on: bool = True) -> None:
 
 def autocorrect() -> bool:
     """Whether macOS corrects spelling as you type."""
-    return bool(_global("NSAutomaticSpellingCorrectionEnabled", True))
+    return _flag("NSAutomaticSpellingCorrectionEnabled", True)
 
 
 def set_autocorrect(on: bool = True) -> None:
@@ -969,7 +1047,7 @@ def set_autocorrect(on: bool = True) -> None:
 
 def smart_quotes() -> bool:
     """Whether typed quotes become curly ones (“ ”), which break code pasted anywhere."""
-    return bool(_global("NSAutomaticQuoteSubstitutionEnabled", True))
+    return _flag("NSAutomaticQuoteSubstitutionEnabled", True)
 
 
 def set_smart_quotes(on: bool = True) -> None:
@@ -979,7 +1057,7 @@ def set_smart_quotes(on: bool = True) -> None:
 
 def smart_dashes() -> bool:
     """Whether a typed ``--`` becomes a dash (—)."""
-    return bool(_global("NSAutomaticDashSubstitutionEnabled", True))
+    return _flag("NSAutomaticDashSubstitutionEnabled", True)
 
 
 def set_smart_dashes(on: bool = True) -> None:
@@ -989,7 +1067,7 @@ def set_smart_dashes(on: bool = True) -> None:
 
 def auto_capitalization() -> bool:
     """Whether the first letter of a sentence is capitalized as you type."""
-    return bool(_global("NSAutomaticCapitalizationEnabled", True))
+    return _flag("NSAutomaticCapitalizationEnabled", True)
 
 
 def set_auto_capitalization(on: bool = True) -> None:
@@ -999,7 +1077,7 @@ def set_auto_capitalization(on: bool = True) -> None:
 
 def double_space_period() -> bool:
     """Whether typing two spaces adds a period and a space, as on the iPhone."""
-    return bool(_global("NSAutomaticPeriodSubstitutionEnabled", True))
+    return _flag("NSAutomaticPeriodSubstitutionEnabled", True)
 
 
 def set_double_space_period(on: bool = True) -> None:
@@ -1010,9 +1088,16 @@ def set_double_space_period(on: bool = True) -> None:
 _KEYBOARD_NAVIGATION = 2  # AppleKeyboardUIMode's bit for "Keyboard navigation"
 
 
+def _keyboard_ui_mode() -> int:
+    from . import defaults
+
+    # A hand-edited value ("2.5", text) reads as a number, or as none: the setter writes a clean one over it.
+    return defaults._as_int(_global("AppleKeyboardUIMode", 0), 0)
+
+
 def full_keyboard_access() -> bool:
     """Whether Tab moves between every control (buttons, checkboxes, menus...), not only text fields and lists."""
-    return bool(int(_global("AppleKeyboardUIMode", 0)) & _KEYBOARD_NAVIGATION)  # type: ignore[call-overload]
+    return bool(_keyboard_ui_mode() & _KEYBOARD_NAVIGATION)
 
 
 def set_full_keyboard_access(on: bool = True) -> None:
@@ -1022,7 +1107,7 @@ def set_full_keyboard_access(on: bool = True) -> None:
     Apps pick it up when they're reopened.
     """
     # A bit mask: only its navigation bit changes, the others stay as they are.
-    mode = int(_global("AppleKeyboardUIMode", 0))  # type: ignore[call-overload]
+    mode = _keyboard_ui_mode()
     _set_global("AppleKeyboardUIMode", mode | _KEYBOARD_NAVIGATION if on else mode & ~_KEYBOARD_NAVIGATION, apply=False)
 
 
@@ -1078,13 +1163,16 @@ _HID_ALIASES = {
 
 
 def _hid_code(key: str) -> int:
-    name = key.lower()
+    name = key.strip().lower()
     name = _HID_ALIASES.get(name, name)
+    if re.fullmatch(r"0x[0-9a-f]+", name):
+        return int(name, 16)  # a key remappings() has no name for, as it prints it
     if name not in _HID_CODES:
         raise ValueError(
-            "can't remap {!r}: use a letter, a digit, f1 to f20, a modifier (cmd, right_option...) "
-            "or one of caps_lock, escape, enter, tab, space, delete, forward_delete, the arrows, "
-            "home, end, page_up, page_down, help, fn".format(key)
+            "can't remap {!r}: use a letter, a digit, f1 to f20, a modifier (cmd, right_option...), "
+            "one of caps_lock, escape, enter, tab, space, delete, forward_delete, the arrows, "
+            "home, end, page_up, page_down, help, fn, or a number such as '0x700000064' as "
+            "remappings() prints it".format(key)
         )
     return _HID_CODES[name]
 
@@ -1123,6 +1211,9 @@ def remappings() -> Dict[str, str]:
     """
     The keys remapped, as ``{"caps_lock": "escape"}``; ``{}`` when none is.
 
+    A key with no name here shows as its HID usage, such as ``'0x700000064'``
+    (the key left of Z on an ISO keyboard), which :func:`remap` takes too.
+
     Raises :class:`~macos.MacOSError` when hidutil answers in a form it can't read,
     rather than taking that for no remapping.
     """
@@ -1139,10 +1230,13 @@ def remap(key: str, to: Optional[str]) -> None:
         macos.keyboard.remap("right_option", "ctrl")
         macos.keyboard.remap("caps_lock", None)          # back to Caps Lock
 
-    Keys are named as for :func:`press`, plus the right-hand modifiers:
-    letters, digits, ``f1`` to ``f20``, modifiers (``cmd``, ``right_cmd``,
-    ``option``, ``right_option``, ``ctrl``,
-    ``shift``, ``fn``...) and ``caps_lock``, ``escape``, ``enter``, ``tab``...
+    Keys are letters, digits, ``f1`` to ``f20``, modifiers (``cmd``,
+    ``right_cmd``, ``option``, ``right_option``, ``ctrl``, ``shift``,
+    ``fn``...) and ``caps_lock``, ``escape``, ``enter``, ``tab``... named as
+    for :func:`press`, but not punctuation (``-``, ``[``...): a remapping
+    names a physical key, which types another character on each layout. Any
+    other key is written as its HID usage, as :func:`remappings` prints it
+    (``remap("0x700000064", None)``).
     Applies at once, without a permission, until the Mac restarts: to keep
     it, run it at login with :func:`macos.schedule.add`. The other keys'
     remappings are kept: when they can't be read, :class:`~macos.MacOSError` is
@@ -1196,7 +1290,7 @@ def set_fn_key_action(action: Optional[str]) -> None:
 
 def inline_predictions() -> bool:
     """Whether macOS suggests the end of words and sentences in gray as you type (macOS 14 and later)."""
-    return bool(_global("NSAutomaticInlinePredictionEnabled", True))
+    return _flag("NSAutomaticInlinePredictionEnabled", True)
 
 
 def set_inline_predictions(on: bool = True) -> None:
@@ -1246,11 +1340,12 @@ _MENU_SEPARATOR = " > "
 def _encode_shortcut(keys: str) -> str:
     """``"cmd+shift+e"`` as NSUserKeyEquivalents writes it: ``"@$e"``."""
     text = keys.strip().lower()
-    # The "+" key itself is "+" or a last "++" ("cmd++"), as press() reads it: "cmd+shift+" has no key.
+    # The "+" key itself is "+" or a last "++" ("cmd++", "cmd + +"), as press() reads it: "cmd+shift+" has no key.
+    plus = re.match(r"(.*?)\+\s*\+$", text, re.S)
     if text == "+":
         key, rest = "+", ""
-    elif text.endswith("++"):
-        key, rest = "+", text[:-2]
+    elif plus:
+        key, rest = "+", plus.group(1)
     else:
         rest, _, key = text.rpartition("+")
     names = [part.strip() for part in rest.split("+") if part.strip()]
@@ -1378,13 +1473,26 @@ SYSTEM_SHORTCUTS = tuple(_SYSTEM_SHORTCUTS)
 def _hotkeys() -> Dict[str, Any]:
     from . import defaults
 
-    return dict(defaults.read("com.apple.symbolichotkeys", "AppleSymbolicHotKeys", default={}) or {})
+    found = defaults.read("com.apple.symbolichotkeys", "AppleSymbolicHotKeys", default={})
+    return dict(found) if isinstance(found, Mapping) else {}
+
+
+def _hotkey(found: Dict[str, Any], number: int) -> Dict[str, Any]:
+    """Shortcut ``number``'s entry in AppleSymbolicHotKeys, ``{}`` when it's missing or hand-edited into something else."""
+    entry = found.get(str(number))
+    return dict(entry) if isinstance(entry, Mapping) else {}
 
 
 def system_shortcuts() -> Dict[str, bool]:
     """Which of macOS's shortcuts are on: ``{"spotlight": True, "screenshot": True, ...}``."""
+    from . import defaults
+
     found = _hotkeys()
-    return {name: bool(found.get(str(number), {}).get("enabled", True)) for name, (number, _) in _SYSTEM_SHORTCUTS.items()}
+    # As macOS reads it: an "enabled" of 'NO' is off, and one missing (or no entry at all) is on.
+    return {
+        name: defaults._as_bool(_hotkey(found, number).get("enabled", True), True)
+        for name, (number, _) in _SYSTEM_SHORTCUTS.items()
+    }
 
 
 def set_system_shortcut(name: str, on: bool) -> None:
@@ -1405,7 +1513,7 @@ def set_system_shortcut(name: str, on: bool) -> None:
         raise ValueError("name must be one of {}, not {!r}".format(", ".join(SYSTEM_SHORTCUTS), name))
     number, keys = _SYSTEM_SHORTCUTS[name]
     found = _hotkeys()
-    entry = dict(found.get(str(number), {}))
+    entry = _hotkey(found, number)
     # Without its keys, a shortcut turned back on may not work: keep them, or write the defaults.
     entry.setdefault("value", {"parameters": list(keys), "type": "standard"})
     entry["enabled"] = bool(on)
@@ -1433,7 +1541,7 @@ def set_backlight_timeout(seconds: Optional[float]) -> None:
     minutes; other durations work too. Raises
     :class:`~macos.errors.NotSupportedError` on a Mac without a backlit keyboard.
     """
-    if seconds is not None and seconds <= 0:
+    if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("seconds must be positive, or None for never, not {}".format(seconds))
     with _objc.autorelease_pool():
         client, keyboard = _backlight()

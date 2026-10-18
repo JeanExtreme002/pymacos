@@ -108,7 +108,14 @@ def interface() -> Optional[str]:
 
 
 def ip() -> Optional[str]:
-    """The Mac's IPv4 address on the local network (e.g. ``'192.168.0.8'``), or ``None`` when offline."""
+    """
+    The Mac's IPv4 address on the interface internet traffic goes through (e.g. ``'192.168.0.8'``), or ``None`` when offline.
+
+    That's the address on the local network, except while a VPN that carries
+    all traffic is connected: then it's the VPN tunnel's (such as
+    ``'10.8.0.2'``), which other devices on the Wi-Fi can't reach. The
+    Wi-Fi's or Ethernet's own address is in :func:`interfaces`.
+    """
     name = interface()
     if name is None:
         return None
@@ -204,6 +211,14 @@ def _speed(result: Dict[str, Any]) -> SpeedTest:
     )
 
 
+_SPEED_ERRORS = {  # NSURLErrorDomain's commonest, as networkQuality reports them
+    ("NSURLErrorDomain", -1001): "the test server stopped answering",
+    ("NSURLErrorDomain", -1003): "can't reach Apple's test server",
+    ("NSURLErrorDomain", -1004): "can't reach Apple's test server",
+    ("NSURLErrorDomain", -1009): "not connected to the internet",
+}
+
+
 def speed_test(*, sequential: bool = False, timeout: float = 180.0) -> SpeedTest:
     """
     Measure the internet connection's download and upload speed, and its latency, against Apple's servers.
@@ -221,14 +236,25 @@ def speed_test(*, sequential: bool = False, timeout: float = 180.0) -> SpeedTest
     (and takes about twice as long). Goes through ``networkQuality``, which
     comes with macOS; past ``timeout`` seconds (a server that stopped
     answering) it's stopped and :class:`~macos.errors.CommandTimeoutError`
-    raised.
+    raised. A test that can't run (offline, or Apple's servers out of reach
+    behind a firewall or a Wi-Fi login page) raises
+    :class:`~macos.errors.MacOSError` with ``networkQuality``'s error.
     """
     require_macos()
     output = _run(["networkQuality", "-c", *(["-s"] if sequential else [])], timeout=timeout)
     try:
-        return _speed(json.loads(output))
+        result = json.loads(output)
     except ValueError:
         raise MacOSError("networkQuality gave an answer that isn't JSON: {!r}".format(output[:200])) from None
+    if not isinstance(result, dict):
+        raise MacOSError("networkQuality gave an answer that isn't a result: {!r}".format(output[:200]))
+    if result.get("error_code") is not None:
+        # It exits 0 when the test can't run, and its JSON then holds only the error: not a 0 Mbps measure.
+        domain, code = result.get("error_domain"), result["error_code"]
+        error = " ".join(str(part) for part in (domain, code) if part not in (None, ""))
+        reason = _SPEED_ERRORS.get((str(domain), code)) if isinstance(code, int) else None
+        raise MacOSError("networkQuality could not run the test: {}".format(reason + " (" + error + ")" if reason else error))
+    return _speed(result)
 
 
 # --- Wi-Fi signal -------------------------------------------------------------------
@@ -461,7 +487,7 @@ def dns_servers() -> List[str]:
 
 @dataclass(frozen=True)
 class Proxies:
-    """The proxies in use; each is ``"host:port"``, or ``None`` when off."""
+    """The proxies in use; each is ``"host:port"`` (an IPv6 host in brackets: ``'[fd00::1]:3128'``), or ``None`` when off."""
 
     http: Optional[str]
     https: Optional[str]
@@ -490,8 +516,10 @@ def _proxies(found: Dict[str, Any]) -> Proxies:
     def proxy(prefix: str) -> Optional[str]:
         if not found.get(prefix + "Enable") or not found.get(prefix + "Proxy"):
             return None
-        port = found.get(prefix + "Port")
-        return "{}:{}".format(found[prefix + "Proxy"], port) if port else str(found[prefix + "Proxy"])
+        host, port = str(found[prefix + "Proxy"]), found.get(prefix + "Port")
+        if ":" in host and not host.startswith("["):
+            host = "[{}]".format(host)  # an IPv6 address: its colons would run into the port's
+        return "{}:{}".format(host, port) if port else host
 
     auto = found.get("ProxyAutoConfigURLString") if found.get("ProxyAutoConfigEnable") else None
     return Proxies(
@@ -577,8 +605,19 @@ def _vpn(name: str) -> VPN:
     raise MacOSError("no VPN named {!r} (System Settings › VPN: {})".format(name, known))
 
 
-def _wait_vpn(vpn: VPN, wanted: str, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
+def _settle_vpn(vpn: VPN, wanted: str, deadline: float, timeout: float) -> VPN:
+    """``vpn`` once it's done disconnecting: configd drops a start sent before then."""
+    while vpn.status == "disconnecting":
+        if time.monotonic() >= deadline:
+            raise WaitTimeoutError(
+                "the VPN {!r} isn't {} after {} seconds: it's still disconnecting".format(vpn.name, wanted, timeout)
+            )
+        time.sleep(0.25)
+        vpn = _vpn(vpn.id)
+    return vpn
+
+
+def _wait_vpn(vpn: VPN, wanted: str, deadline: float, timeout: float) -> None:
     moved = False
     while True:
         status = _vpn(vpn.id).status
@@ -602,25 +641,29 @@ def connect_vpn(name: str, *, wait: bool = True, timeout: float = 30.0) -> None:
     :class:`~macos.MacOSError` if it fails, unless ``wait=False``: a
     :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) when time runs out. It uses the
     password saved with it: a VPN that asks each time may show its prompt.
-    Nothing to do when it's already connected. A ``scutil`` that doesn't
+    Nothing to do when it's already connected; one still disconnecting is
+    waited out first (within ``timeout``, even with ``wait=False``), as
+    macOS ignores a connect sent before then. A ``scutil`` that doesn't
     answer within 30 seconds raises :class:`~macos.errors.CommandTimeoutError`.
     """
-    vpn = _vpn(name)
+    deadline = time.monotonic() + timeout
+    vpn = _settle_vpn(_vpn(name), "connected", deadline, timeout)
     if vpn.status == "connected":
         return
     _run(["scutil", "--nc", "start", vpn.id], timeout=_SCUTIL_TIMEOUT)  # it only asks: the wait is below
     if wait:
-        _wait_vpn(vpn, "connected", timeout)
+        _wait_vpn(vpn, "connected", deadline, timeout)
 
 
 def disconnect_vpn(name: str, *, wait: bool = True, timeout: float = 30.0) -> None:
     """Disconnect the VPN ``name``, waiting until it's done unless ``wait=False``. Nothing to do when it isn't connected."""
+    deadline = time.monotonic() + timeout
     vpn = _vpn(name)
     if vpn.status == "disconnected":
         return
-    _run(["scutil", "--nc", "stop", vpn.id], timeout=_SCUTIL_TIMEOUT)
+    _run(["scutil", "--nc", "stop", vpn.id], timeout=_SCUTIL_TIMEOUT)  # stops a connect under way too
     if wait:
-        _wait_vpn(vpn, "disconnected", timeout)
+        _wait_vpn(vpn, "disconnected", deadline, timeout)
 
 
 # --- Bandwidth --------------------------------------------------------------------

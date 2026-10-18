@@ -23,7 +23,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from ._system import require_macos, run as _run
 from .errors import CommandError, MacOSError, PermissionDeniedError
@@ -91,10 +91,12 @@ def progress() -> Optional[float]:
     status = _status()
     if not re.search(r"\bRunning\s*=\s*1\s*;", status):
         return None
-    found = re.search(r'\bPercent\s*=\s*"?(-?[0-9.]+)"?\s*;', status)
-    if not found or float(found.group(1)) < 0:
+    # An NSNumber's description: small fractions, early in a backup, come in exponent form ("6.1e-05").
+    found = re.search(r'\bPercent\s*=\s*"?(-?[0-9.]+(?:[eE][-+]?[0-9]+)?)"?\s*;', status)
+    if not found:
         return None
-    return min(1.0, float(found.group(1)))
+    percent = float(found.group(1))
+    return None if percent < 0 else min(1.0, percent)
 
 
 # What tmutil says when the app running Python lacks Full Disk Access: "tmutil:
@@ -102,11 +104,11 @@ def progress() -> Optional[float]:
 _NO_ACCESS = ("Full Disk Access", "Operation not permitted")
 
 
-def _check_access(text: str) -> None:
-    if any(sign in text for sign in _NO_ACCESS):
+def _check_access(text: str, signs: Tuple[str, ...] = _NO_ACCESS, what: str = "Time Machine's backups") -> None:
+    if any(sign in text for sign in signs):
         raise PermissionDeniedError(
-            "Time Machine's backups need Full Disk Access: allow the app running Python (your terminal or IDE) "
-            "in System Settings › Privacy & Security › Full Disk Access"
+            "{} need Full Disk Access: allow the app running Python (your terminal or IDE) "
+            "in System Settings › Privacy & Security › Full Disk Access".format(what)
         )
 
 
@@ -133,10 +135,26 @@ def last_backup() -> Optional[datetime]:
 
 def _existing(path: PathLike) -> str:
     require_macos()
+    if os.fspath(path) in ("", b""):  # Path("") is the current folder: often the home folder, or a project
+        raise ValueError("no path given")
     found = Path(path).expanduser().absolute()
     if not found.exists():
         raise FileNotFoundError(str(found))
     return str(found)
+
+
+def _exclusion(command: str, path: PathLike) -> str:
+    target = _existing(path)
+    try:
+        output = _run(["tmutil", command, target], timeout=_TIMEOUT)
+    except CommandError as error:
+        # "tmutil: isexcluded requires Full Disk Access privileges", for the folders macOS protects (Mail,
+        # Messages, ~/.Trash). Not "Operation not permitted": System Integrity Protection says that too.
+        _check_access(error.stderr, ("Full Disk Access",), "Exclusions in folders macOS protects")
+        raise
+    if not output.lstrip().startswith("["):  # "[Excluded]  path" or "[Included]  path"; errors may pass with 0
+        _check_access(output, ("Full Disk Access",), "Exclusions in folders macOS protects")
+    return output
 
 
 def exclude(path: PathLike) -> None:
@@ -149,8 +167,13 @@ def exclude(path: PathLike) -> None:
     is moved or renamed. It doesn't need an administrator password, but it
     isn't listed in System Settings' *Exclude from Backups* list either.
     Copies made before stay on the backup disk.
+
+    Raises :class:`ValueError` for an empty path (rather than leave the
+    current folder out), and :class:`~macos.errors.PermissionDeniedError` in
+    a folder macOS protects (Mail, Messages, the Trash) without Full Disk
+    Access for the app running Python.
     """
-    _run(["tmutil", "addexclusion", _existing(path)], timeout=_TIMEOUT)
+    _exclusion("addexclusion", path)
 
 
 def include(path: PathLike) -> None:
@@ -158,15 +181,21 @@ def include(path: PathLike) -> None:
     Back a file or folder up again, after :func:`exclude`.
 
     Nothing to do when it isn't excluded. Doesn't undo an exclusion made in
-    System Settings or by macOS itself: see :func:`is_excluded`.
+    System Settings or by macOS itself (caches, the temporary folder): see
+    :func:`is_excluded`. Raises like :func:`exclude`.
     """
-    _run(["tmutil", "removeexclusion", _existing(path)], timeout=_TIMEOUT)
+    _exclusion("removeexclusion", path)
 
 
 def is_excluded(path: PathLike) -> bool:
     """
-    Whether Time Machine leaves this file or folder out, for any reason:
-    :func:`exclude`, the list in System Settings, or macOS itself (caches and
-    temporary files). A file inside an excluded folder counts as excluded.
+    Whether Time Machine leaves this file or folder out, as ``tmutil`` sees
+    it: :func:`exclude`, the list in System Settings, or what macOS marks
+    itself, like ``~/Library/Caches`` and the per-user temporary folder
+    (``$TMPDIR``). A file inside an excluded folder counts as excluded.
+
+    Some system-wide places Time Machine always skips, such as ``/private/tmp``,
+    ``/private/var/vm`` and ``/Volumes``, still read as included. Raises like
+    :func:`exclude`.
     """
-    return _run(["tmutil", "isexcluded", _existing(path)], timeout=_TIMEOUT).lstrip().startswith("[Excluded]")
+    return _exclusion("isexcluded", path).lstrip().startswith("[Excluded]")

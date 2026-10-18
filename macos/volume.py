@@ -43,7 +43,8 @@ def set(level: int) -> None:
         raise TypeError("the volume must be an int from 0 to 100, not {!r}".format(level))
     if not 0 <= level <= 100:
         raise ValueError("the volume must be from 0 to 100, not {}".format(level))
-    _run(["osascript", "-e", "set volume output volume {}".format(level)], timeout=_TIMEOUT)
+    # int() so an int subclass's own __format__ can't put other text into the script.
+    _run(["osascript", "-e", "set volume output volume {:d}".format(int(level))], timeout=_TIMEOUT)
 
 
 def mute() -> None:

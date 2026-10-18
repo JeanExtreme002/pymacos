@@ -1,5 +1,6 @@
 """Tests of :mod:`macos.vision` against the real system. Skipped outside macOS."""
 
+import platform
 from pathlib import Path
 
 import pytest
@@ -27,8 +28,25 @@ def test_ocr_languages_and_errors(tmp_path):
     assert "en-US" in macos.vision.languages()
     with pytest.raises(FileNotFoundError):
         macos.vision.text(tmp_path / "missing.png")
-    with pytest.raises(macos.MacOSError):
-        macos.vision.text(b"not an image")
+    # Not an image: the same errors as scan_document's, not Vision's own message.
+    for call in (macos.vision.text, macos.vision.classify, macos.vision.scan_document):
+        with pytest.raises(ValueError, match="not an image macOS can read"):
+            call(b"not an image")
+        with pytest.raises(IsADirectoryError):
+            call(tmp_path)
+    with pytest.raises(TypeError):
+        macos.vision.text(b"not an image", languages="en-US")
+
+
+@pytest.mark.skipif(
+    int(platform.mac_ver()[0].split(".")[0] or 0) < 13,
+    reason="Vision detects the language on macOS 13 or later",
+)
+def test_ocr_detects_a_language_it_isnt_given(tmp_path):
+    note = tmp_path / "note.txt"
+    note.write_text("你好世界 欢迎光临北京\n", encoding="utf-8")
+
+    assert "你好世界" in macos.vision.text(macos.finder.thumbnail(note, size=800))
 
 
 def test_pdfs_are_refused_and_read_once_rendered(tmp_path):

@@ -16,9 +16,10 @@ drops them without any error, so :func:`notify` checks that setting and raises
 :class:`~macos.errors.PermissionDeniedError` instead.
 """
 
+import os
 from typing import List, Optional
 
-from . import defaults
+from . import defaults, sound as _sound
 from ._system import require_macos, run as _run
 from .errors import MacOSError, PermissionDeniedError
 
@@ -31,6 +32,9 @@ _SETTINGS = "com.apple.ncprefs"  # Notification Center's preferences: its "apps"
 # (e.g. the ncprefs.py project) and matches what toggling the switch changes.
 _ALLOW_NOTIFICATIONS = 1 << 25
 _POST_TIMEOUT = 30.0  # seconds for ``osascript`` to hand the notification over: it never waits for it to show
+# Longer text is clipped: Notification Center shows a few lines at most, and a
+# captured log of megabytes would overflow the arguments' limit (ARG_MAX).
+_MAX_TEXT = 4096
 
 
 def is_allowed() -> Optional[bool]:
@@ -53,11 +57,10 @@ def is_allowed() -> Optional[bool]:
         return None
     for app in apps:
         if isinstance(app, dict) and app.get("bundle-id") == _SCRIPT_EDITOR:
-            try:
-                allowed = bool(int(app.get("flags", 0)) & _ALLOW_NOTIFICATIONS)
-            except (TypeError, ValueError):
-                return None  # a format we don't know: best effort, as above
-            return allowed
+            flags = app.get("flags")
+            if not isinstance(flags, int) or isinstance(flags, bool):
+                return None  # missing, or a format we don't know: best effort, as above
+            return bool(flags & _ALLOW_NOTIFICATIONS)
     return None
 
 
@@ -66,6 +69,28 @@ def _refuse() -> None:
         "macOS would silently drop this notification: notifications are turned off for Script Editor, "
         "which posts them. Turn them on in System Settings › Notifications › Script Editor."
     )
+
+
+def _text(name: str, value: str) -> str:
+    """``value`` as it can travel as an argument, clipped to :data:`_MAX_TEXT`."""
+    if "\0" in value:
+        raise ValueError("notify(): {} contains a NUL character".format(name))
+    try:
+        os.fsencode(value)  # as subprocess encodes it: a file name's surrogate escapes pass, a lone surrogate doesn't
+    except UnicodeEncodeError:
+        raise ValueError("notify(): {} contains a lone surrogate, which isn't valid text".format(name)) from None
+    return value if len(value) <= _MAX_TEXT else value[: _MAX_TEXT - 1] + "\u2026"
+
+
+def _sound_name(name: str) -> str:
+    """The alert sound named ``name``, as :func:`macos.sound.names` spells it."""
+    known = _sound.names()
+    if not known:
+        return name  # no sound folder could be read: best effort, let macOS look it up
+    for candidate in known:
+        if candidate.casefold() == name.casefold():
+            return candidate
+    raise ValueError("no alert sound is named {!r}; see macos.sound.names()".format(name))
 
 
 def notify(
@@ -80,7 +105,13 @@ def notify(
     Post a notification.
 
     ``sound`` is the name of a system alert sound, such as ``"Glass"``,
-    ``"Ping"`` or ``"Basso"`` (see :func:`macos.sound.names`).
+    ``"Ping"`` or ``"Basso"``: one of :func:`macos.sound.names`, in any case,
+    or :class:`ValueError` is raised (macOS would post the notification
+    without a sound).
+
+    Text longer than 4096 characters is clipped, ending in "…". Text with a
+    NUL character or a lone surrogate, which can't be passed to ``osascript``,
+    raises :class:`ValueError`.
 
     Raises :class:`~macos.errors.PermissionDeniedError` when notifications are
     turned off for Script Editor, since macOS would silently drop them. Pass
@@ -91,6 +122,12 @@ def notify(
     same user can see in the process list while it runs: don't put a secret
     in a notification.
     """
+    # Checked before anything is posted: a typo in a sound name would
+    # otherwise be dropped without a word, and only the sound with it.
+    message = _text("message", message)
+    title = None if title is None else _text("title", title)
+    subtitle = None if subtitle is None else _text("subtitle", subtitle)
+    sound = None if sound is None else _sound_name(_text("sound", sound))
     # The text travels as script arguments (``argv``), never spliced into the
     # AppleScript source, so quotes or backslashes in it can't break or inject
     # into the script.

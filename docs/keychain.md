@@ -27,6 +27,10 @@ a service. It reads only the names, never the passwords:
 macos.keychain.accounts("my-app")   # ['alice', 'bob']
 ```
 
+An item stored with an empty account (or, from another app, with none) is
+listed as `""`, which {func}`~macos.keychain.get` and
+{func}`~macos.keychain.delete` address.
+
 ## Keeping secrets out of your code
 
 Store an API token once:
@@ -92,7 +96,16 @@ access control on the item.
 
 - Service and account names can't contain NUL characters (`"\0"`): the keychain
   would silently cut them there and address a different item, so `pymacos`
-  raises `ValueError`.
+  raises `ValueError`. So does a name with a lone surrogate (e.g. `"\udc80"`
+  from `os.fsdecode`), which isn't valid Unicode text. Names and passwords
+  that aren't `str` (`bytes`, `None`) raise `TypeError`.
+- If the user clicks *Deny*, or the keychain is locked and can't ask (over
+  SSH, in a headless session), {func}`~macos.keychain.get`,
+  {func}`~macos.keychain.set`, {func}`~macos.keychain.delete` and
+  {func}`~macos.keychain.accounts` raise
+  {class}`~macos.PermissionDeniedError` (also a `PermissionError`), **not**
+  {class}`~macos.KeychainError`. Both carry the `OSStatus` as `status`; catch
+  {class}`~macos.MacOSError` to handle both.
 - If the stored data isn't UTF-8 text (e.g. binary data written by another
   app), {func}`~macos.keychain.get` raises {class}`~macos.KeychainError`.
 

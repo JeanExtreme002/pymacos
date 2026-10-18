@@ -48,6 +48,32 @@ def _as_int(value: object, fallback: _T) -> Union[int, _T]:
     return fallback if number is None else int(number)
 
 
+def _as_bool(value: object, fallback: _T) -> Union[bool, _T]:
+    """
+    ``value`` as macOS reads a yes-or-no preference (``CFPreferencesGetAppBooleanValue``), or ``fallback``.
+
+    One written without ``-bool`` (``defaults write ... Key NO``) is the text ``'NO'``, which
+    Python's ``bool()`` takes for true: ``'yes'``/``'true'`` and ``'no'``/``'false'`` (any case)
+    and numbers, as text or not, count (a real number is true unless it's zero, numeric text by
+    its whole part; NaN and inf are ``fallback``); anything else (other text, a list) is
+    ``fallback``, as if the preference weren't set.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("yes", "true"):
+            return True
+        if word in ("no", "false"):
+            return False
+    if isinstance(value, (int, float)):
+        # A real number is true unless it's zero, as CF and NSNumber read it: 0.5 too. Only
+        # NaN and inf (which CF takes for true) stay the fallback, as for every number read here.
+        return fallback if isinstance(value, float) and not math.isfinite(value) else value != 0
+    number = _as_float(value, None) if isinstance(value, str) else None
+    return fallback if number is None else int(number) != 0  # CF reads text by its whole part: "0.5" is false
+
+
 def _as_float(value: object, fallback: _T) -> Union[float, _T]:
     """``value`` as a finite float, or ``fallback`` when a hand-edited preference holds something else."""
     try:
@@ -98,8 +124,11 @@ def _store(domain: str, key: str, value: Optional[int], current_host: bool = Fal
         )
 
 
-def _check(domain: str, key: Optional[str] = None, *, reading: bool = False) -> None:
-    if not domain or not domain.strip():
+def _check(domain: str, key: Any = _MISSING, *, reading: bool = False) -> None:
+    """Refuse a domain (and, when given, a key) that isn't a usable name, before CFPreferences sees it."""
+    if not isinstance(domain, str):
+        raise TypeError("domain must be a str, not {}".format(type(domain).__name__))
+    if not domain.strip():
         raise ValueError("domain must not be empty")
     if "/" in domain:
         # CFPreferences takes a domain with a slash for a file, as the defaults command does: an absolute
@@ -116,8 +145,15 @@ def _check(domain: str, key: Optional[str] = None, *, reading: bool = False) -> 
             DeprecationWarning,
             stacklevel=3,
         )
-    if key is not None and (not isinstance(key, str) or not key.strip()):
-        raise ValueError("key must not be empty")
+    if key is not _MISSING:
+        _check_key(key)
+        if not key.strip():
+            raise ValueError("key must not be empty")
+
+
+def _check_key(key: Any) -> None:
+    if not isinstance(key, str):
+        raise TypeError("key must be a str, not {}".format(type(key).__name__))
 
 
 def _domain(domain: str) -> int:
@@ -161,9 +197,13 @@ def read(domain: str, key: Optional[str] = None, *, default: Any = None, current
     global domain's value (``defaults read`` doesn't). Without ``key``,
     returns all the domain's own values, as a ``dict``.
     ``current_host=True`` reads the settings kept for this Mac only, like
-    ``defaults -currentHost``.
+    ``defaults -currentHost``: with no fallback, neither to the app's
+    settings for any Mac nor to the global domain.
+    A date comes back as a naive :class:`~datetime.datetime` in UTC.
     """
     _check(domain, reading=True)
+    if key is not None:
+        _check_key(key)
     if key is None:
         return {name: _value(domain, name, None, current_host) for name in _keys(domain, current_host)}
     return _value(domain, key, default, current_host)
@@ -200,6 +240,9 @@ def write(domain: str, key: str, value: Any, *, current_host: bool = False) -> N
 
     ``True`` is written as a boolean, ``3`` as an integer, lists as arrays and
     dicts as dictionaries: no ``-bool`` or ``-int`` flags to get right.
+    A naive :class:`~datetime.datetime` is taken as UTC (as :func:`read`
+    gives dates back); an aware one is converted to UTC.
+    ``None`` raises :class:`ValueError`, at any depth: a preference has no null.
     ``current_host=True`` writes it for this Mac only, like ``defaults -currentHost``.
     A domain with a slash in it (a file's path, to the ``defaults`` command)
     raises :class:`ValueError`: see :func:`read`.
@@ -256,7 +299,8 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
         macos.finder.restart()                           # Finder reads it again: the icons are back
 
     Each argument is a ``(domain, key)`` pair, or a whole domain (``"com.apple.dock"``); one with a slash
-    in it (a file's path) raises :class:`ValueError` before anything is read, as it would be written back.
+    in it (a file's path) raises :class:`ValueError` before anything is read, as it would be written back,
+    and so does an empty key (:class:`TypeError` for one that isn't a ``str``).
     Keys that weren't set are deleted again, not written with a value, so
     macOS goes back to its own default. It restores the preferences only:
     restart the Dock, Finder or app that read the changed ones, as the
@@ -270,13 +314,14 @@ def restored(*what: Union[str, Tuple[str, str]], current_host: bool = False) -> 
     missing = object()
     saved: List[Tuple[str, Optional[str], Any]] = []  # (domain, key or None for all, value)
     wanted: List[Tuple[str, str, bool]] = []  # (domain, key or "", whole domain): each item unpacked once
-    for item in what:  # every domain checked before any is read
+    for item in what:  # every domain and key checked before any is read
         if isinstance(item, str):
+            _check(item)
             wanted.append((item, "", True))
         else:
             domain, key = item
+            _check(domain, key)
             wanted.append((domain, key, False))
-        _check(wanted[-1][0])
     for domain, key, whole in wanted:
         if whole:
             # The domain's own layer, as keys() lists it and the restore writes it back:

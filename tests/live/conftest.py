@@ -1,6 +1,5 @@
 """Fixtures shared by the live tests, and the switch that makes a missing permission fail them."""
 
-import os
 import re
 import time
 import uuid
@@ -9,6 +8,8 @@ from pathlib import Path
 import pytest
 
 import macos
+
+from tests.helpers import switch
 
 # The reasons the live tests give when this Mac lacks a privacy permission ("no Accessibility
 # permission", "needs the Input Monitoring and Accessibility permissions"). The opt-in switches'
@@ -26,7 +27,7 @@ def pytest_runtest_makereport(item, call):
     """
     outcome = yield
     report = outcome.get_result()
-    if not (report.skipped and os.environ.get("PYMACOS_REQUIRE_PERMISSIONS")) or hasattr(report, "wasxfail"):
+    if not (report.skipped and switch("PYMACOS_REQUIRE_PERMISSIONS")) or hasattr(report, "wasxfail"):
         return
     reason = report.longrepr[2] if isinstance(report.longrepr, tuple) else str(report.longrepr)
     if _PERMISSION_SKIP.search(reason):

@@ -28,6 +28,7 @@ class _FakeSecurity:
         self.secret = secret
         self.update_status = update_status
         self.message = message
+        self.items = ["bob", None, "alice"]  # each item's account attribute, None when left out
         self.calls = []
 
     def SecItemCopyMatching(self, query, result):
@@ -71,8 +72,8 @@ def security(monkeypatch):
         data=lambda payload: 3,
         dictionary=lambda items: 4,
         to_bytes=lambda ref: fake.secret,
-        to_str=lambda ref: fake.message if ref == 7 else ref,
-        items=lambda ref: ["bob", None, "alice"],
+        to_str=lambda ref: fake.message if ref == 7 else (ref if isinstance(ref, str) else None),
+        items=lambda ref: fake.items,
     )
     monkeypatch.setattr(keychain, "_security", lambda: fake)
     monkeypatch.setattr(keychain, "_cf", cf)
@@ -85,8 +86,9 @@ def test_success_raises_nothing(security):
 
 @pytest.mark.parametrize("status", [keychain.errSecUserCanceled, keychain.errSecAuthFailed, keychain.errSecInteractionNotAllowed])
 def test_refusals_raise_permission_denied(security, status):
-    with pytest.raises(PermissionDeniedError, match=r"OSStatus {}".format(status)):
+    with pytest.raises(PermissionDeniedError, match=r"OSStatus {}".format(status)) as caught:
         keychain._check(status)
+    assert caught.value.status == status
 
 
 def test_other_statuses_raise_keychain_error_with_the_status(security):
@@ -143,8 +145,14 @@ def test_delete_says_whether_there_was_an_item(security):
     assert keychain.delete("svc", "alice") is False
 
 
-def test_accounts_are_sorted_and_skip_unnamed_items(security):
-    assert keychain.accounts("svc") == ["alice", "bob"]
+def test_accounts_are_sorted_and_list_an_unnamed_item_as_empty(security):
+    # The file-based keychain leaves an empty account out of the attributes.
+    assert keychain.accounts("svc") == ["", "alice", "bob"]
+
+
+def test_accounts_skip_an_account_that_is_not_text(security):
+    security.items = ["bob", 5]
+    assert keychain.accounts("svc") == ["bob"]
 
 
 def test_accounts_of_an_unknown_service_is_empty(security):
@@ -155,3 +163,31 @@ def test_accounts_of_an_unknown_service_is_empty(security):
 def test_accounts_rejects_nul_characters(security):
     with pytest.raises(ValueError, match="NUL"):
         keychain.accounts("svc\0x")
+
+
+@pytest.mark.parametrize("call", [
+    lambda name: keychain.get(name, "alice"),
+    lambda name: keychain.get("svc", name),
+    lambda name: keychain.set("svc", name, "s3cret"),
+    lambda name: keychain.delete(name, "alice"),
+    lambda name: keychain.accounts(name),
+])
+def test_names_with_a_lone_surrogate_are_refused_before_any_cfstring(security, monkeypatch, call):
+    made = []
+    monkeypatch.setattr(keychain._cf, "string", lambda text: made.append(text) or 2)
+    with pytest.raises(ValueError, match="lone surrogates"):
+        call("bad\udc80")
+    assert made == []
+    assert security.calls == []
+
+
+@pytest.mark.parametrize("call, label", [
+    (lambda: keychain.get(None, "alice"), "service"),
+    (lambda: keychain.get("svc", 7), "account"),
+    (lambda: keychain.accounts(b"svc"), "service"),
+    (lambda: keychain.set("svc", "alice", b"token"), "password"),
+])
+def test_names_and_passwords_must_be_str(security, call, label):
+    with pytest.raises(TypeError, match="keychain {} must be a str".format(label)):
+        call()
+    assert security.calls == []

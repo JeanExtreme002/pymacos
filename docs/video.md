@@ -2,7 +2,10 @@
 
 {mod}`macos.video` reads videos, grabs their frames and converts them, with
 AVFoundation, the framework behind QuickTime Player. Any format QuickTime opens
-works (MOV, MP4, M4V, HEVC, ProRes...), with no ffmpeg to install.
+works (MOV, MP4, M4V, HEVC, ProRes...), with no ffmpeg to install. A file
+the app isn't allowed to read (its permissions, or a folder such as Desktop
+without access) raises `PermissionError`, and one that isn't a video
+`ValueError`.
 
 ```python
 import macos
@@ -89,15 +92,34 @@ macos.video.reverse("jump.mov", "jump-backwards.mov")
   the frame.
 - {func}`~macos.video.concat` is made for clips of the same size, like parts
   of one recording.
-- {func}`~macos.video.speed` keeps the sound's pitch.
+- {func}`~macos.video.speed` keeps the sound's pitch. A factor that would
+  make the video last less than 1/600 of a second raises `ValueError`.
 - {func}`~macos.video.crop` measures the box on the upright picture, in
-  pixels from the top-left corner.
+  pixels from the top-left corner, and keeps the video's frame rate (up to
+  240 frames per second).
 - A video marked to play turned (a portrait phone video, or
   {func}`~macos.video.rotate`'s output) stays turned through every edit, and
   another turn adds to it: rotating by 90 twice is rotating by 180.
+- {func}`~macos.video.rotate`, {func}`~macos.video.mute`,
+  {func}`~macos.video.crop`, {func}`~macos.video.speed`,
+  {func}`~macos.video.add_audio` and {func}`~macos.video.add_language_track`
+  keep the video's metadata (when and where it was shot, the camera...);
+  {func}`~macos.video.concat` keeps the first clip's. All of it when the
+  output is the same kind of file as the source; from a `.mov` to an `.mp4`
+  or back, only what the output can hold: the date and place, mostly, but
+  not always the camera.
+- {func}`~macos.video.rotate` and {func}`~macos.video.add_language_track`
+  keep which sound plays: a second language stays off until the viewer picks
+  it. {func}`~macos.video.crop` and {func}`~macos.video.speed` re-encode,
+  which can't keep that: every sound comes out, each in its language, but
+  all on, so a player may play them together.
 - {func}`~macos.video.reverse` plays the sound backwards too. It reads every
   frame, so it's best for short clips; it reads them a few at a time (about
   256 MB of frames at once), so a long or 4K one takes time, not all the memory.
+  A video of more than 60 frames per second is reversed at 60.
+- Where a video's sound goes on after its picture, {func}`~macos.video.frames`,
+  {func}`~macos.video.to_gif` and {func}`~macos.video.reverse` show its last
+  frame for the rest, as a player does.
 
 The others re-encode at the highest quality. The output can be a `.mov`,
 `.mp4` or `.m4v`.
@@ -139,8 +161,12 @@ photos = sorted(Path("~/Pictures/Garden").expanduser().glob("*.jpg"))
 macos.video.from_images(photos, "garden.mp4", fps=12, width=1280)
 ```
 
-The video takes the first image's size, or `width`; images of other shapes
-are fitted in, on black. With {func}`macos.camera.photo` in a loop, it makes a
+The video takes the first image's size, or `width`, at least 2 × 2 pixels;
+images of other shapes are fitted in, on black. `fps` may be below 1 for a
+slideshow (`fps=0.1` shows each image for ten seconds), up to 1000; a single
+image shows for `1 / fps` seconds. An encoder that stops taking frames, or a
+video that doesn't finish writing, raises {class}`~macos.WaitTimeoutError`,
+as an export that runs out of time does. With {func}`macos.camera.photo` in a loop, it makes a
 webcam timelapse, and {func}`macos.image.contact_sheet` puts the frames of a
 video on one page.
 

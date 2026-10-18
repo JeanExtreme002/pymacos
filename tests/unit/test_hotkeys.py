@@ -2,6 +2,7 @@
 
 import threading
 import time
+import warnings
 
 import pytest
 
@@ -32,9 +33,44 @@ def test_hotkeys_argument_checks():
         hotkeys.register("hyper+k", lambda: None)
 
 
-@pytest.mark.parametrize("keys", ["shift", "cmd", "fn", "cmd+shift"])
+def test_shortcut_errors_speak_of_shortcuts_not_of_press(monkeypatch):
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"k": (40, False)})
+    for keys in ("", "  "):
+        with pytest.raises(ValueError, match="a shortcut needs a key") as raised:
+            hotkeys.register(keys, lambda: None)
+        assert "press()" not in str(raised.value)
+        with pytest.raises(ValueError, match="a shortcut needs a key"):
+            hotkeys.wait(keys, timeout=0.1)
+    with pytest.raises(ValueError, match="no key types on this keyboard layout") as raised:
+        hotkeys.register("cmd+\u00e9", lambda: None)
+    assert "type()" not in str(raised.value)
+    with pytest.raises(ValueError, match="not a modifier"):  # the others still come from the parser
+        hotkeys.register("hyper+k", lambda: None)
+
+
+def test_shortcut_errors_keep_their_wording_whatever_the_keyboard_module_says(monkeypatch):
+    # hotkeys hands the parser its own messages, rather than rewording keyboard's when they mention type().
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"k": (40, False)})
+    monkeypatch.setitem(macos.keyboard._parse.__kwdefaults__, "no_key", "no key types {key!r}; use write() for text")
+    monkeypatch.setitem(macos.keyboard._parse.__kwdefaults__, "empty", "write() needs a key")
+    with pytest.raises(ValueError, match="no key types on this keyboard layout: pick a key it has"):
+        hotkeys.register("cmd+\u00e9", lambda: None)
+    with pytest.raises(ValueError, match="a shortcut needs a key"):
+        hotkeys.register(" ", lambda: None)
+
+
+def test_a_callback_that_isnt_callable_is_refused_at_register(monkeypatch):
+    # Not at the first press, from inside run(), which it would end.
+    before = dict(hotkeys._registered)
+    for callback in (None, "save"):
+        with pytest.raises(TypeError, match="callback must be callable"):
+            hotkeys.register("ctrl+option+f19", callback)
+    assert hotkeys._registered == before
+
+
+@pytest.mark.parametrize("keys", ["shift", "cmd", "fn", "cmd+shift", "caps_lock", "cmd+caps_lock"])
 def test_a_modifier_on_its_own_is_not_a_shortcut(keys):
-    # The tap listens to key presses; a modifier alone is a flags change, which it would never see.
+    # The tap listens to key presses; a modifier alone, or Caps Lock, is a flags change, which it would never see.
     with pytest.raises(ValueError, match="modifier on its own"):
         hotkeys.register(keys, lambda: None)
     with pytest.raises(ValueError, match="modifier on its own"):
@@ -467,3 +503,96 @@ def test_a_tap_closed_from_another_thread_keeps_its_callback(fake_tap, monkeypat
     worker.join()
     assert fake_tap.closed[-2:] == [True, "port"]  # closed all the same
     assert _events._RETIRED == [tap] and tap.callback is not None
+
+
+@pytest.mark.filterwarnings("ignore:no shortcut is registered")
+def test_run_from_inside_a_callback_run_called_is_refused(monkeypatch):
+    # The oldest run(), held up in the callback, would be handed every shortcut: the inner one would call none.
+    f19 = hotkeys._combination("f19")
+    listened = []
+
+    def listen(on_press, wanted, timeout):
+        listened.append(wanted)
+        if len(listened) == 1:
+            on_press(f19)  # the outer run() is handed f19 and calls its callback
+
+    monkeypatch.setattr(hotkeys, "_listen", listen)
+    outcome = []
+
+    def mode():
+        outcome.append(_raised(lambda: hotkeys.run(timeout=1)))
+
+    hotkeys.register("f19", mode)
+    try:
+        hotkeys.run(timeout=1)
+    finally:
+        hotkeys.unregister("f19")
+    assert isinstance(outcome[0], RuntimeError) and "callback" in str(outcome[0])
+    assert listened == [None]  # the nested run() never listened
+    assert not getattr(hotkeys._calling, "on", False)  # out of the callback: run() may listen again
+
+    def broken():
+        raise ZeroDivisionError
+
+    hotkeys.register("f19", broken)
+    try:
+        with pytest.raises(ZeroDivisionError):
+            hotkeys._call(f19, running=True)
+    finally:
+        hotkeys.unregister("f19")
+    assert not getattr(hotkeys._calling, "on", False)  # cleared after an exception too
+
+
+def test_run_from_inside_a_callback_wait_called_listens(monkeypatch):
+    # With no run(), the wait() calls the callback: a run() started there is the oldest, and calls them itself.
+    f19, f18 = hotkeys._combination("f19"), hotkeys._combination("f18")
+    listened = []
+
+    def listen(on_press, wanted, timeout):
+        listened.append(wanted)
+        if len(listened) == 1:
+            on_press(f19)  # the wait() for f18 catches f19, registered, and calls its callback
+
+    monkeypatch.setattr(hotkeys, "_listen", listen)
+    hotkeys.register("f19", lambda: hotkeys.run(timeout=1))
+    try:
+        assert hotkeys.wait("f18", timeout=1) is False
+    finally:
+        hotkeys.unregister("f19")
+    assert listened == [f18, None]  # the run() in the callback listened
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, "5", True])
+def test_a_bad_timeout_is_refused_before_the_tap_is_made(monkeypatch, timeout):
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"k": (40, False)})
+
+    def tap(*args, **kwargs):
+        raise AssertionError("the tap was made")
+
+    monkeypatch.setattr(_events, "Tap", tap)
+    hotkeys.register("cmd+k", lambda: None)
+    try:
+        with pytest.raises(ValueError, match="timeout must be 0 or more"):
+            hotkeys.run(timeout=timeout)
+        with pytest.raises(ValueError, match="timeout must be 0 or more"):
+            hotkeys.wait("cmd+shift+k", timeout=timeout)
+    finally:
+        hotkeys.unregister("cmd+k")
+    assert hotkeys._listeners.active() == []
+    assert hotkeys._waited == {}
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, "5", True])
+@pytest.mark.filterwarnings("error")
+def test_a_bad_timeout_is_refused_before_the_no_shortcut_warning(monkeypatch, timeout):
+    def tap(*args, **kwargs):
+        raise AssertionError("the tap was made")
+
+    monkeypatch.setattr(_events, "Tap", tap)
+    assert not hotkeys._registered
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="timeout must be 0 or more"):
+            hotkeys.run(timeout=timeout)
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+    assert hotkeys._listeners.active() == []

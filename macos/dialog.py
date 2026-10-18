@@ -32,6 +32,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 _CANCEL = "cancel"
 _TIMEOUT = "timeout"
 _END = "\0"  # ends each chosen path: a file name can hold a newline, never a NUL
+_MAX_SECONDS = 2 ** 29 - 1  # AppleScript's largest integer; above it the number becomes a real
 
 
 def _show(body: List[str], args: Sequence[str]) -> List[str]:
@@ -57,20 +58,30 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
         command += ["-e", line]
     # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
     try:
-        return _run([*command, "--", *args], exact_newlines=True).rstrip("\n").split("\n")
+        output = _run([*command, "--", *args], exact_newlines=True)
     except CommandError as error:
         raise osascript_error(error, None) from None
+    # Drop only the newline osascript adds: an answer may end in its own, and
+    # an empty answer ("ok" & linefeed & "") must keep its empty line.
+    if output.endswith("\n"):
+        output = output[:-1]
+    return output.split("\n")
 
 
 def _giving_up(timeout: Optional[float]) -> str:
     if timeout is None:
         return ""
+    if not math.isfinite(timeout):
+        raise ValueError("timeout must be a finite number of seconds, not {} (leave it out for no limit)".format(timeout))
     if timeout <= 0:
         raise ValueError("timeout must be positive, not {}".format(timeout))
     # AppleScript only counts whole seconds, and rounds a fraction to the
     # nearest one: 0.5 would become 0, which means "never give up". Round up
     # instead, so the dialog never closes before the requested time.
-    return " giving up after {}".format(math.ceil(timeout))
+    seconds = math.ceil(timeout)
+    if seconds > _MAX_SECONDS:
+        raise ValueError("timeout can be at most {} seconds, not {}".format(_MAX_SECONDS, timeout))
+    return " giving up after {}".format(seconds)
 
 
 def _gave_up_check(timeout: Optional[float]) -> List[str]:
@@ -153,7 +164,12 @@ def choose(
     default: Optional[str] = None,
     title: Optional[str] = None,
 ) -> Optional[str]:
-    """Let the user pick one of ``options`` from a list, and return it (``None`` if cancelled)."""
+    """
+    Let the user pick one of ``options`` from a list, and return it (``None`` if cancelled).
+
+    Options that aren't strings are shown as ``str(option)``, and that string
+    is what comes back; ``default`` is matched the same way.
+    """
     if isinstance(options, (str, bytes)):
         raise TypeError("options must be a list of choices, not a single string: use [{!r}]".format(options))
     options = [str(option) for option in options]
@@ -161,6 +177,8 @@ def choose(
         raise ValueError("choose() needs at least one option")
     if any("\n" in option for option in options):
         raise ValueError("options can't contain newlines")
+    if default is not None:
+        default = str(default)
     if default is not None and default not in options:
         raise ValueError("default {!r} is not one of the options".format(default))
 
@@ -171,7 +189,7 @@ def choose(
         statement += " with title (item 3 of argv)"
     body = [statement, 'if r is false then return "{}"'.format(_CANCEL), 'return "ok" & linefeed & (item 1 of r)']
     result = _show(body, [prompt or "Choose an option:", default or "", title or "", *options])
-    return result[1] if result[0] == "ok" else None
+    return "\n".join(result[1:]) if result[0] == "ok" else None
 
 
 def _choose_file_body(

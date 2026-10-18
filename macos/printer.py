@@ -112,6 +112,7 @@ class Printer:
     model: Optional[str]
     location: Optional[str]
     is_default: bool
+    """Also ``True`` when the default is one of its saved sets of options (an ``lpoptions`` instance, ``Office/duplex``)."""
     state: Optional[str]
     """``'idle'``, ``'printing'`` or ``'stopped'``; ``None`` when the printer doesn't say (network printers often don't)."""
 
@@ -142,6 +143,8 @@ def printers() -> List[Printer]:
     count = cups.cupsGetDests(ctypes.byref(dests))
     found = []
     try:
+        # When the default is an instance, CUPS flags only the instance: its printer is the default.
+        defaults = {_text(dests[index].name) for index in range(count) if dests[index].instance and dests[index].is_default}
         for index in range(count):
             dest = dests[index]
             if dest.instance:
@@ -156,7 +159,7 @@ def printers() -> List[Printer]:
                     description=options.get("printer-info") or name,
                     model=options.get("printer-make-and-model") or None,
                     location=options.get("printer-location") or None,
-                    is_default=bool(dest.is_default),
+                    is_default=bool(dest.is_default) or name in defaults,
                     state=_PRINTER_STATES.get(options.get("printer-state", "")),
                 )
             )
@@ -166,7 +169,12 @@ def printers() -> List[Printer]:
 
 
 def default() -> Optional[Printer]:
-    """The printer files go to when none is named; ``None`` when there's none."""
+    """
+    The printer files go to when none is named; ``None`` when there's none.
+
+    When the default is an ``lpoptions`` instance (``Office/duplex``), it's
+    that instance's printer; jobs sent to it don't get the instance's options.
+    """
     return next((printer for printer in printers() if printer.is_default), None)
 
 
@@ -223,6 +231,8 @@ def print_file(
     file = Path(os.path.expanduser(os.fspath(path))).absolute()
     if not file.is_file():
         raise FileNotFoundError(str(file))
+    if isinstance(copies, bool) or not isinstance(copies, int):
+        raise TypeError("copies must be a whole number, not {!r}".format(copies))
     if copies < 1:
         raise ValueError("copies must be 1 or more, not {}".format(copies))
     name = _name(printer)
@@ -283,12 +293,21 @@ def jobs(printer: Union[None, str, Printer] = None, *, finished: bool = False) -
 
 
 def cancel(job: Union[int, PrintJob], printer: Union[None, str, Printer] = None) -> None:
-    """Take a print job (a :class:`PrintJob` or its ``id``) out of the queue, or stop it if it's printing."""
-    cups = _cups()
+    """
+    Take a print job (a :class:`PrintJob` or its ``id``) out of the queue, or stop it if it's printing.
+
+    An ``id`` is 1 or more: CUPS reads 0 as the job printing now and -1 as
+    every job on the printer, so those raise :class:`ValueError` here.
+    """
     if isinstance(job, PrintJob):
         job_id, name = job.id, job.printer
     else:
+        if isinstance(job, bool):
+            raise TypeError("a print job is a PrintJob or its id, not {!r}".format(job))
         job_id = int(job)
+        if job_id < 1:
+            raise ValueError("a print job id is 1 or more, not {}".format(job_id))
         name = _name(printer) if printer is not None else ""
+    cups = _cups()
     if not cups.cupsCancelJob(name.encode() if name else None, job_id):
         raise MacOSError("could not cancel print job {}: {}".format(job_id, _error(cups)))

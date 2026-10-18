@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Named
 
 from . import appearance, dock, finder, keyboard, mouse, screen, sound, system, trackpad, windows
 from ._system import add_note, batched_restarts, require_macos
-from .errors import MacOSError, NotSupportedError
+from .errors import NotSupportedError
 
 __all__ = ["export", "apply", "batch", "names"]
 
@@ -35,11 +35,18 @@ def _anything(value: Any) -> None:
     """No check of its own: the setter's is enough (the tests' fake settings)."""
 
 
+def _as_given(value: Any, current: Any) -> Any:
+    """No other way of writing the value: it's compared as it is."""
+    return value
+
+
 class _Setting(NamedTuple):
     read: Callable[[], Any]
     change: Callable[[Any], None]
     check: Callable[[Any], None] = _anything
     """Raises :class:`ValueError` for a value ``change`` would refuse, without changing anything."""
+    canon: Callable[[Any, Any], Any] = _as_given
+    """``canon(value, current)``: a value ``change`` takes, in the form ``read`` gives it, to compare the two."""
 
 
 # --- Checking values before anything changes ----------------------------------
@@ -47,8 +54,9 @@ class _Setting(NamedTuple):
 # apply() runs every check before the first change, so a typo in the tenth
 # setting of a file doesn't leave the first nine changed and the rest not.
 # Each check mirrors what its setter refuses (a range, a set of names, a
-# shape); a setter that still fails midway (a permission, a missing sound
-# file) is caught by apply()'s rollback instead.
+# shape, a folder or a sound this Mac has); a setter that still fails
+# midway (a permission, a file deleted since) is caught by apply()'s
+# rollback instead.
 
 
 def _flag(value: Any) -> None:
@@ -70,12 +78,12 @@ def _number(
     def check(value: Any) -> None:
         if value is None and optional:
             return
-        valid = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-        if not valid or (whole and not isinstance(value, int)):
+        # Only a float can be infinite or NaN; an int too big for a float is compared as it is.
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not valid or (isinstance(value, float) and not math.isfinite(value)) or (whole and not isinstance(value, int)):
             kind = "a whole number" if whole else "a number"
             raise ValueError("must be {}{}, not {!r}".format(kind, " or null" if optional else "", value))
-        number = float(value)
-        if (low is not None and number < low) or (high is not None and number > high) or (above is not None and number <= above):
+        if (low is not None and value < low) or (high is not None and value > high) or (above is not None and value <= above):
             if above is not None:
                 limits = "greater than {}".format(above)
             elif high is None:
@@ -216,6 +224,14 @@ def _screenshot_name(name: Any) -> None:
         raise ValueError("must be a file name, without / or :, not {!r}".format(name))
 
 
+def _folder(value: Any) -> None:
+    # The setters refuse a folder that doesn't exist: said here, before anything changes,
+    # rather than midway, as an export from another Mac may name one this Mac lacks.
+    _text()(value)
+    if not Path(value).expanduser().is_dir():
+        raise ValueError("no folder {!r} on this Mac; create it first".format(value))
+
+
 def _alert_sound(name: Any) -> None:
     _text(optional=True)(name)
     if name is not None and name not in sound.names():
@@ -256,13 +272,52 @@ def _night_shift_schedule() -> Any:
     return found
 
 
-def _portable(folder: Path) -> str:
+def _portable(folder: Optional[Path]) -> Optional[str]:
     """A folder under the home folder as ``~/...``, so it works on a Mac with another user name."""
+    if folder is None:
+        return None  # not a folder (Finder's Recents): export() leaves it out, apply() can't set it
     home = Path.home()
     try:
         return os.path.join("~", str(folder.relative_to(home))) if folder != home else "~"
     except ValueError:
         return str(folder)
+
+
+# --- The same value written another way ---------------------------------------
+#
+# A setter takes a value in more forms than its reader gives back: "JPEG" for
+# "jpg", "esc" for "escape", "~/Shots/" for "~/Shots". apply() compares the
+# two in the reader's form, so a setting already as wanted isn't rewritten.
+# Each follows what its setter does with the value.
+
+
+def _key_repeat_canon(value: Any, current: Any) -> Any:
+    # None: the part left as it is.
+    return [now if part is None else part for part, now in zip(value, current)]
+
+
+def _remappings_canon(value: Any, current: Any) -> Any:
+    return _remappings(value)
+
+
+def _hot_corners_canon(value: Any, current: Any) -> Any:
+    return {
+        corner: {"action": wanted.get("action"), "modifier": dock._corner_flags(wanted.get("modifier"))}
+        for corner, wanted in value.items()
+    }
+
+
+def _screenshot_format_canon(value: Any, current: Any) -> Any:
+    wanted = value.lower().lstrip(".")
+    return "jpg" if wanted == "jpeg" else wanted
+
+
+def _screenshot_folder_canon(value: Any, current: Any) -> Any:
+    return _portable(Path(value).expanduser().resolve())
+
+
+def _new_window_folder_canon(value: Any, current: Any) -> Any:
+    return _portable(Path(os.path.normpath(Path(value).expanduser().absolute())))
 
 
 def _set_night_shift_schedule(schedule: Any) -> None:
@@ -417,12 +472,12 @@ _CHECKS: Dict[str, Dict[str, Callable[[Any], None]]] = {
         "size": _number(16, 128),
         "position": _choice(("left", "bottom", "right")),
         "magnification": _number(16, 128, optional=True),
-        "minimize_effect": _choice(("genie", "scale")),
+        "minimize_effect": _choice(dock._EFFECTS),
         "hot_corners": _entries(dock._CORNERS, _hot_corner),
     },
     "finder": {
         "default_view": _choice(finder._VIEWS),
-        "new_window_folder": _text(),
+        "new_window_folder": _folder,
         "search_scope": _choice(finder._SCOPES),
         "drives_on_desktop": _options(
             finder.set_show_drives_on_desktop, internal=_flag, external=_flag, removable=_flag, servers=_flag
@@ -444,7 +499,7 @@ _CHECKS: Dict[str, Dict[str, Callable[[Any], None]]] = {
         "scroll_bars": _choice(appearance._SCROLL_BARS),
     },
     "screen": {
-        "screenshot_folder": _text(),
+        "screenshot_folder": _folder,
         "screenshot_format": _screenshot_format,
         "screenshot_name": _screenshot_name,
         "screenshot_target": _choice(screen._SCREENSHOT_TARGETS),
@@ -468,9 +523,18 @@ _CHECKS: Dict[str, Dict[str, Callable[[Any], None]]] = {
         "temperature_unit": _choice(("celsius", "fahrenheit")),
     },
 }
+# How to compare the value of a setting its setter takes in more forms than its reader gives.
+_CANONS: Dict[str, Dict[str, Callable[[Any, Any], Any]]] = {
+    "keyboard": {"key_repeat": _key_repeat_canon, "remappings": _remappings_canon},
+    "dock": {"hot_corners": _hot_corners_canon},
+    "finder": {"new_window_folder": _new_window_folder_canon},
+    "screen": {"screenshot_folder": _screenshot_folder_canon, "screenshot_format": _screenshot_format_canon},
+}
 for _section, _table in _SETTINGS.items():
     for _name, _setting in _table.items():
-        _SETTINGS[_section][_name] = _setting._replace(check=_CHECKS.get(_section, {}).get(_name, _flag))
+        _SETTINGS[_section][_name] = _setting._replace(
+            check=_CHECKS.get(_section, {}).get(_name, _flag), canon=_CANONS.get(_section, {}).get(_name, _as_given)
+        )
 del _section, _table, _name, _setting
 
 
@@ -506,21 +570,34 @@ def export() -> Dict[str, Dict[str, Any]]:
     Settings this Mac doesn't have (a keyboard backlight, Night Shift...) are
     left out, and so is one that couldn't be read (a permission macOS refused,
     a command that failed, a preference edited by hand into something it
-    can't make sense of), with a :class:`RuntimeWarning` saying which: the
-    rest is still exported.
+    can't make sense of) or whose value :func:`apply` would refuse (a speed
+    set by hand beyond the slider's range, an alert sound outside the sound
+    folders), with a :class:`RuntimeWarning` saying which: the rest is still
+    exported, and applies as it is.
     """
     require_macos()
     found: Dict[str, Dict[str, Any]] = {}
     for section, settings in _SETTINGS.items():
         for name, setting in settings.items():
             try:
-                found.setdefault(section, {})[name] = setting.read()
+                value = setting.read()
             except NotSupportedError:
                 continue  # this Mac lacks it
-            except (MacOSError, ValueError, TypeError) as problem:  # also a hand-edited preference it can't read
+            except Exception as problem:  # also a hand-edited preference of a shape its reader can't take
                 warnings.warn(
                     "{}.{} couldn't be read, and was left out: {}".format(section, name, problem), RuntimeWarning, stacklevel=2
                 )
+                continue
+            try:
+                setting.check(_normalized(value))
+            except ValueError as problem:
+                warnings.warn(
+                    "{}.{} is {!r}, which apply() can't set, and was left out: {}".format(section, name, value, problem),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            found.setdefault(section, {})[name] = value
     return found
 
 
@@ -567,6 +644,15 @@ def _already(section: str, name: str, current: Any, wanted: Any) -> bool:
     return True
 
 
+def _same(section: str, name: str, setting: _Setting, current: Any, wanted: Any) -> bool:
+    """Whether the setting is as ``wanted`` already, both normalized, compared in the reader's form."""
+    try:
+        current, wanted = setting.canon(current, current), setting.canon(wanted, current)
+    except Exception:
+        pass  # a value its reader gave in a form of its own (an unknown key...): compared as they are
+    return _already(section, name, current, wanted)
+
+
 def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
     """
     Change this Mac's settings to those of ``settings``, as :func:`export` gives them, and return those that changed.
@@ -579,10 +665,14 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
     already as wanted aren't touched, and the Dock and Finder restart once
     at the end. Unknown names and invalid values (a size out of range, an
     unknown hot corner action, a key that can't be remapped) raise
-    :class:`ValueError` before anything changes; if a change still fails
-    midway (a permission...), the settings already changed are put back
-    before the error is raised. Settings this Mac lacks (a keyboard
-    backlight, Night Shift...) are skipped. Returns ``["dock.autohide", ...]``.
+    :class:`ValueError` before anything changes, and so does a folder or an
+    alert sound this Mac doesn't have; if a change still fails midway (a
+    permission...), the settings already changed are put back before the
+    error is raised. A setting whose current value can't be read (a
+    preference edited by hand into something it can't make sense of) is
+    written anyway, as that's what repairs it; it can't be put back, and
+    the error says so. Settings this Mac lacks (a keyboard backlight, Night
+    Shift...) are skipped. Returns ``["dock.autohide", ...]``.
     """
     require_macos()
     if not isinstance(settings, Mapping):
@@ -615,32 +705,42 @@ def apply(settings: Mapping[str, Mapping[str, Any]]) -> List[str]:
         raise ValueError("invalid settings: {}".format("; ".join(bad)))
     changed: List[str] = []
     undo: List[Tuple[str, _Setting, Any]] = []  # (name, setting, its value before), to put back if a later change fails
+    blind: List[str] = []  # those changed whose value before couldn't be read, so can't be put back
     with batched_restarts():
         try:
             for section, values in settings.items():
                 for name, value in values.items():
                     setting = _SETTINGS[section][name]
+                    readable = True
                     try:
                         current = _normalized(setting.read())
                     except NotSupportedError:
                         continue  # this Mac lacks it (a keyboard backlight, Night Shift...): the others still apply
-                    if _already(section, name, current, _normalized(value)):
+                    except Exception:
+                        # A garbled preference: writing the value given is what repairs
+                        # it, and one setting that can't be read mustn't undo the others.
+                        readable = False
+                    if readable and _same(section, name, setting, current, _normalized(value)):
                         continue
                     # Noted before the change: one that fails half-way (two preferences, the
                     # second refused) is put back too.
-                    undo.append(("{}.{}".format(section, name), setting, current))
+                    if readable:
+                        undo.append(("{}.{}".format(section, name), setting, current))
                     try:
                         setting.change(value)
                     except NotSupportedError:
-                        undo.pop()  # nothing changed: this Mac lacks it (a keyboard backlight, Night Shift...)
+                        if readable:
+                            undo.pop()  # nothing changed: this Mac lacks it (a keyboard backlight, Night Shift...)
                         continue
+                    if not readable:
+                        blind.append("{}.{}".format(section, name))
                     changed.append("{}.{}".format(section, name))
         except BaseException as error:
             # What the checks can't foresee (a permission, a file gone): put
             # back the settings already changed, newest first, then raise.
             # The original error is the one raised; those that couldn't be put
             # back are named alongside it, so nobody is left guessing.
-            stuck = []
+            stuck = ["{} (its value before couldn't be read)".format(name) for name in reversed(blind)]
             for name, setting, before in reversed(undo):
                 try:
                     setting.change(before)

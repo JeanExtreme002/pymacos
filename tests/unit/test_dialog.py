@@ -89,9 +89,30 @@ def test_dialog_timeouts_round_up_to_whole_seconds(fake_run, timeout, seconds):
     assert "giving up after {}".format(seconds) in _script(fake_run.args)
 
 
-def test_dialog_rejects_bad_timeout():
-    with pytest.raises(ValueError):
-        macos.dialog.confirm("x", timeout=0)
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), 2 ** 29])
+@pytest.mark.parametrize("show", [macos.dialog.alert, macos.dialog.confirm, macos.dialog.prompt])
+def test_dialog_rejects_bad_timeout(fake_run, show, timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        show("x", timeout=timeout)
+    assert fake_run.calls == []
+
+
+def test_dialog_prompt_keeps_trailing_newlines(fake_run):
+    fake_run.stdout = "ok\nline 1\n\n"
+    assert macos.dialog.prompt("x", default="line 1\n") == "line 1\n"
+    fake_run.stdout = "ok\n\n"
+    assert macos.dialog.prompt("x") == ""
+
+
+def test_dialog_choose_an_empty_option(fake_run):
+    fake_run.stdout = "ok\n\n"
+    assert macos.dialog.choose(["", "Apple"], default="") == ""
+
+
+def test_dialog_choose_matches_a_non_string_default(fake_run):
+    fake_run.stdout = "ok\n2\n"
+    assert macos.dialog.choose([1, 2, 3], default=2) == "2"  # type: ignore[list-item, arg-type]
+    assert fake_run.args[-5:] == ["2", "", "1", "2", "3"]
 
 
 def test_dialog_chosen_paths_may_hold_newlines(fake_run):

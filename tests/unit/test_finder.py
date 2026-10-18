@@ -229,12 +229,22 @@ def test_finder_extract_unchecked_archive(fake_run, tmp_path):
     archive = tmp_path / "odd.zip"
     archive.write_bytes(b"not a zip zipfile reads, which ditto may")
 
-    macos.finder.extract(archive, tmp_path / "out")  # nothing to check by: unzipped as before
-    assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(tmp_path / "out")]
+    import warnings
+
+    out = tmp_path / "out"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        macos.finder.extract(archive, out)  # nothing to check by: unzipped as before
+        macos.finder.extract(archive, out, overwrite=False)  # empty: nothing it could write over
+    assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(out)]
+    (out / "a.txt").write_text("old")
     fake_run.calls.clear()
     with pytest.raises(ValueError, match="overwrite=True"):
-        macos.finder.extract(archive, tmp_path / "out", overwrite=False)
+        macos.finder.extract(archive, out, overwrite=False)
     assert fake_run.calls == []
+    with pytest.warns(DeprecationWarning, match="can't tell which files"):  # may write over a.txt: said so
+        macos.finder.extract(archive, out)
+    assert fake_run.args == ["ditto", "-x", "-k", str(archive), str(out)]
 
 
 def test_finder_compress_into_the_folder_it_zips_writes_in_place(fake_run, tmp_path):
@@ -362,6 +372,9 @@ def test_largest_gives_up_walking_after_the_timeout(tmp_path, monkeypatch):
     assert sorted(path.parent.name for path, size in found) == ["folder0", "folder1", "folder2"]
     with pytest.raises(ValueError, match="timeout"):
         finder.largest(tmp_path, timeout=0)
+    for endless in (float("nan"), float("inf")):  # NaN would pass every deadline check as not yet due
+        with pytest.raises(ValueError, match="timeout"):
+            finder.largest(tmp_path, timeout=endless)
 
 
 def test_largest_gives_spotlight_the_time_left(tmp_path, monkeypatch):
@@ -644,3 +657,365 @@ def test_set_desktop_view_leaves_the_sort_alone_unless_asked(monkeypatch):
     with pytest.raises(ValueError, match="say what to change"):
         finder.set_desktop_view(sort=False)
     assert repr(finder._UNCHANGED) == "<unchanged>" and len(restarts) == 4
+
+
+def _fake_settings(monkeypatch, store):
+    from macos import defaults
+
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, default=None: store.get(key, default))
+    monkeypatch.setattr(defaults, "write", lambda domain, key, value: store.__setitem__(key, value))
+    monkeypatch.setattr(finder, "restart", lambda: None)
+
+
+@pytest.mark.parametrize(
+    "stored, expected",
+    [
+        ("NO", False),  # what `defaults write com.apple.finder AppleShowAllFiles NO` stores: a string
+        ("false", False),
+        ("0", False),
+        (" 0 ", False),
+        ("0.5", False),  # CF reads a number by its whole part
+        ("YES", True),
+        ("TRUE", True),
+        ("1", True),
+        (0, False),
+        (1, True),
+        (0.0, False),
+        (True, True),
+        (False, False),
+    ],
+)
+def test_finder_settings_read_text_as_finder_does(monkeypatch, stored, expected):
+    _fake_settings(monkeypatch, {"AppleShowAllFiles": stored, "CreateDesktop": stored})
+    assert finder.show_hidden_files() is expected
+    assert finder.show_desktop_icons() is expected
+
+
+@pytest.mark.parametrize("stored", [[], {}, "maybe", "", float("nan"), b"\x01"])
+def test_finder_settings_that_cant_be_read_are_their_default(monkeypatch, stored):
+    _fake_settings(monkeypatch, {"AppleShowAllFiles": stored, "CreateDesktop": stored})
+    assert finder.show_hidden_files() is False
+    assert finder.show_desktop_icons() is True  # its default: the icons show
+    _fake_settings(monkeypatch, {})
+    assert finder.show_hidden_files() is False and finder.show_desktop_icons() is True  # not set at all
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        "a string",
+        ["a", "list"],
+        {"IconViewSettings": "a string"},
+        {"IconViewSettings": {"iconSize": "big", "gridSpacing": float("nan"), "textSize": [1], "arrangeBy": ["x"]}},
+        {"IconViewSettings": {"iconSize": float("inf"), "arrangeBy": {"a": 1}}},
+    ],
+)
+def test_desktop_view_survives_hand_edited_settings(monkeypatch, view):
+    store = {"DesktopViewSettings": view}
+    _fake_settings(monkeypatch, store)
+    assert finder.desktop_view() == {
+        "icon_size": 64,
+        "grid_spacing": 54,
+        "text_size": 12,
+        "sort": None,
+        "show_item_info": False,
+        "labels_on_bottom": True,
+    }
+    finder.set_desktop_view(icon_size=48)  # writes over what can't be read, rather than failing on it
+    assert store["DesktopViewSettings"]["IconViewSettings"]["iconSize"] == 48.0
+
+
+def test_desktop_view_keeps_what_it_can_read(monkeypatch):
+    store = {"DesktopViewSettings": {"GroupBy": "Kind", "IconViewSettings": {"iconSize": "48", "showItemInfo": "NO"}}}
+    _fake_settings(monkeypatch, store)
+    view = finder.desktop_view()
+    assert view["icon_size"] == 48 and view["show_item_info"] is False
+    finder.set_desktop_view(text_size=14)
+    assert store["DesktopViewSettings"]["GroupBy"] == "Kind"
+    assert store["DesktopViewSettings"]["IconViewSettings"] == {"iconSize": "48", "showItemInfo": "NO", "textSize": 14.0}
+
+
+def test_finder_selection_keeps_names_as_they_are(fake_run):
+    fake_run.stdout = b"/Users/alice/Projects/Icon\r\x1e/Users/alice/caf\xe9.txt\x1e\n"
+    assert macos.finder.selection() == [
+        Path("/Users/alice/Projects/Icon\r"),  # a folder's custom icon: not "Icon\n", which isn't there
+        Path(os.fsdecode(b"/Users/alice/caf\xe9.txt")),  # not UTF-8: kept, so it opens the same file
+    ]
+    assert "universal_newlines" not in fake_run.calls[-1] and "text" not in fake_run.calls[-1]
+    fake_run.stdout = b"/Users/alice/Line\n/\n"
+    assert macos.finder.current_folder() == Path("/Users/alice/Line\n")  # only osascript's own line end goes
+
+
+def test_finder_selection_says_when_automation_is_missing(fake_run):
+    fake_run.returncode, fake_run.stderr = 1, "execution error: Not authorized to send Apple events (-1743)"
+    with pytest.raises(macos.PermissionDeniedError, match="Automation"):
+        macos.finder.selection()
+
+
+def test_set_tags_takes_one_name_as_one_tag(monkeypatch, tmp_path):
+    import ctypes
+
+    set_to = []
+
+    class ObjC:
+        id = ctypes.c_void_p
+
+        def autorelease_pool(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def nsstring(self, name):
+            set_to.append(name)
+            return 1
+
+        def cls(self, name):
+            return 1
+
+        def file_url(self, path):
+            return 1
+
+        def send(self, *args, **kwargs):
+            return True
+
+    monkeypatch.setattr(finder, "_objc", ObjC())
+    monkeypatch.setattr(finder, "_tag_names_key", lambda: 1)
+    finder.set_tags(tmp_path, "Work")
+    assert set_to == ["Work"]  # not "W", "o", "r", "k"
+    set_to.clear()
+    finder.set_tags(tmp_path, ["Red", "", "Red", "Work"])
+    assert set_to == ["Red", "Work"]  # no empty tag, no duplicate
+    with pytest.raises(TypeError, match="names"):
+        finder.set_tags(tmp_path, b"Work")
+    with pytest.raises(TypeError, match="names"):
+        finder.set_tags(tmp_path, ["Work", 5])
+
+
+@pytest.mark.parametrize(
+    "target, path, expected",
+    [
+        ("PfHm", "file:///Users/alice/Old/", Path.home()),
+        ("PfLo", "file:///Users/alice/My%20Projects/", Path("/Users/alice/My Projects")),
+        ("PfVo", "file:///Volumes/Backup/", Path("/Volumes/Backup")),
+        ("PfID", "file:///Users/alice/Library/Mobile%20Documents/com~apple~CloudDocs/",
+         Path("/Users/alice/Library/Mobile Documents/com~apple~CloudDocs")),
+        ("PfAF", "file:///Users/alice/Old/", None),  # Recents: the folder picked before is left behind
+        ("PfCm", None, None),  # Computer
+        ("PfXx", "file:///Users/alice/Old/", None),  # a place this doesn't know
+        ("PfLo", 5, Path.home()),  # hand-edited into something that isn't a URL
+        ("PfLo", "file:////", Path("/")),  # the root as older versions wrote it
+        ("PfLo", "file:///", Path("/")),
+    ],
+)
+def test_new_window_folder(monkeypatch, target, path, expected):
+    store = {"NewWindowTarget": target}
+    if path is not None:
+        store["NewWindowTargetPath"] = path
+    _fake_settings(monkeypatch, store)
+    assert finder.new_window_folder() == expected
+
+
+def test_new_window_folder_round_trips_the_root(monkeypatch, tmp_path):
+    store = {}
+    _fake_settings(monkeypatch, store)
+    finder.set_new_window_folder("/")
+    assert store["NewWindowTargetPath"] == "file:///" and finder.new_window_folder() == Path("/")
+    finder.set_new_window_folder(tmp_path)
+    assert store["NewWindowTargetPath"] == finder._file_url(tmp_path) and finder.new_window_folder() == tmp_path
+    assert finder._file_url("/tmp") == "file:///tmp/"
+
+
+def test_largest_asks_spotlight_for_a_folder_spelled_with_dots(tmp_path, monkeypatch):
+    (tmp_path / "sub").mkdir()
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 2048)
+    asked = []
+
+    def search(query, folder=None, timeout=None):
+        asked.append(folder)
+        return [str(big)]
+
+    monkeypatch.setattr(finder, "require_macos", lambda: None)
+    monkeypatch.setattr(finder.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(macos.spotlight, "search", search)
+    assert finder.largest(tmp_path / "sub" / "..", at_least=1024) == [(big, 2048)]
+    assert asked == [tmp_path]  # Spotlight, for the folder itself: not a walk through all of it
+
+
+def test_largest_follows_a_link_before_dots_as_the_system_does(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "sub").mkdir(parents=True)
+    big = elsewhere / "big.bin"
+    big.write_bytes(b"x" * 2048)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "link").symlink_to(elsewhere / "sub")
+    asked = []
+
+    def search(query, folder=None, timeout=None):
+        asked.append(folder)
+        return [str(big)]
+
+    monkeypatch.setattr(finder, "require_macos", lambda: None)
+    monkeypatch.setattr(finder.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(macos.spotlight, "search", search)
+    assert finder.largest(home / "link" / "..", at_least=1024) == [(big, 2048)]
+    # "link/.." is the link's target's parent, as the system reads it: not home, as the spelling would say.
+    assert asked == [Path(os.path.realpath(elsewhere))]
+    assert finder._without_dots(home / "link") == home / "link"  # nothing to spell out: left as given
+
+
+def test_largest_knows_the_library_however_it_is_spelled(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "Library" / "Caches").mkdir(parents=True)
+    monkeypatch.setattr(finder.Path, "home", classmethod(lambda cls: home))
+    assert finder._unindexed(home / "Library") and finder._unindexed(home / "Library" / "Caches")
+    assert finder._unindexed(home / ".config") and not finder._unindexed(home)
+    library = home / "library"
+    if library.exists():  # a disk that ignores case, as a Mac's does: "library" is the Library
+        assert finder._unindexed(library) and finder._unindexed(library / "Caches")
+
+
+class _Stream:
+    """A fake FSEvents stream: each run of the run loop delivers the next batch of (path, flags)."""
+
+    def __init__(self, monkeypatch, batches):
+        import contextlib
+
+        self.batches = list(batches)
+        self.flags = None
+        self.stopped = False
+        stream = self
+
+        class Services:
+            def FSEventStreamCreate(self, allocator, callback, info, paths, since, latency, flags):
+                stream.callback, stream.flags = callback, flags
+                return 7
+
+            def FSEventStreamStart(self, handle):
+                return True
+
+            def FSEventStreamStop(self, handle):
+                stream.stopped = True
+
+            def FSEventStreamScheduleWithRunLoop(self, *args):
+                pass
+
+            FSEventStreamInvalidate = FSEventStreamRelease = FSEventStreamScheduleWithRunLoop
+
+        class RunLoop:
+            def CFRunLoopGetCurrent(self):
+                return 1
+
+            def CFRunLoopRunInMode(self, mode, seconds, once):
+                if stream.batches:
+                    stream.send(stream.batches.pop(0))
+
+        monkeypatch.setattr(finder, "_core_services", Services)
+        monkeypatch.setattr(finder._cf, "lib", RunLoop)
+        monkeypatch.setattr(finder._cf, "from_python", lambda value: 1)
+        monkeypatch.setattr(finder._cf, "owned", contextlib.nullcontext)
+        monkeypatch.setattr(finder._cf, "default_mode", lambda: 0)
+
+    def send(self, batch):
+        import ctypes
+
+        names = (ctypes.c_char_p * len(batch))(*[str(path).encode() for path, _ in batch])
+        flags = (ctypes.c_uint32 * len(batch))(*[flag for _, flag in batch])
+        ids = (ctypes.c_uint64 * len(batch))(*[0] * len(batch))
+        self.callback(7, None, len(batch), ctypes.cast(names, ctypes.c_void_p), flags, ids)
+
+
+def test_watch_ends_when_the_folder_goes(tmp_path, monkeypatch):
+    import shutil
+
+    folder = Path(os.path.realpath(str(tmp_path))) / "inbox"
+    folder.mkdir()
+    (folder / "a.txt").write_text("x")
+    stream = _Stream(monkeypatch, [[(folder / "a.txt", 0x100)], [(folder, 0x20)], [(folder / "b.txt", 0x100)]])
+    events = macos.finder.watch(folder)  # no timeout: it would wait forever for a folder that's gone
+    assert next(events) == finder.Event(folder / "a.txt", "created", False)
+    assert stream.flags & finder._WATCH_ROOT  # FSEvents says when the folder itself goes
+    shutil.rmtree(str(folder))
+    assert list(events) == [finder.Event(folder, "deleted", True)] and stream.stopped
+
+
+def test_watch_rescans_a_folder_made_again(tmp_path, monkeypatch):
+    folder = Path(os.path.realpath(str(tmp_path)))
+    _Stream(monkeypatch, [[(folder, 0x20)]])  # still there: replaced, or put back
+    assert list(macos.finder.watch(folder, pattern="*.pdf", timeout=0.3)) == [finder.Event(folder, "rescan", True)]
+
+
+def test_wait_for_change_returns_when_the_folder_goes(tmp_path, monkeypatch):
+    folder = Path(os.path.realpath(str(tmp_path))) / "inbox"
+    folder.mkdir()
+    folder.rmdir()  # gone by the time FSEvents says so
+    monkeypatch.setattr(finder, "_as_on_disk", lambda path: folder)
+    monkeypatch.setattr(finder.Path, "is_dir", lambda self: True)
+    _Stream(monkeypatch, [[(folder, 0x20)]])
+    assert macos.finder.wait_for_change(folder, pattern="*.pdf") == finder.Event(folder, "deleted", True)
+
+
+def test_watch_must_go_on_in_the_thread_that_started_it(tmp_path, monkeypatch):
+    import threading
+
+    folder = Path(os.path.realpath(str(tmp_path)))
+    stream = _Stream(monkeypatch, [[(folder / "a.txt", 0x100)]])
+    (folder / "a.txt").write_text("x")
+    events = macos.finder.watch(folder)
+    assert next(events).path == folder / "a.txt"
+    raised = []
+
+    def elsewhere():
+        try:
+            next(events)
+        except RuntimeError as error:
+            raised.append(error)
+
+    worker = threading.Thread(target=elsewhere)
+    worker.start()
+    worker.join(5)
+    assert raised and "thread that started it" in str(raised[0]) and stream.stopped
+
+
+def test_watch_refuses_a_nan_timeout(tmp_path):
+    # NaN is never past a deadline: the watch would never end. Raised at the first next(), as a missing folder is.
+    with pytest.raises(ValueError, match="timeout"):
+        next(finder.watch(tmp_path, timeout=float("nan")))
+    with pytest.raises(ValueError, match="timeout"):
+        finder.wait_for_change(tmp_path, timeout=float("nan"))
+
+
+def test_paths_are_looked_up_without_hiding_why(tmp_path, monkeypatch):
+    with pytest.raises(FileNotFoundError):
+        finder.reveal("")  # not the current folder, as Path("") would be
+    with pytest.raises(FileNotFoundError):
+        finder.tags(tmp_path / "missing.pdf")
+    with pytest.raises(FileNotFoundError):
+        finder.tags(tmp_path / "missing" / "report.pdf")
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x")
+    with pytest.raises(FileNotFoundError):
+        finder.tags(plain / "below")  # a file is no folder: missing, not NotADirectoryError
+
+    def refused(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(finder.os, "lstat", refused)
+    with pytest.raises(PermissionError):  # a folder it may not look in: not "missing"
+        finder.tags(tmp_path / "locked" / "report.pdf")
+
+
+def test_desktop_view_reads_any_mapping(monkeypatch):
+    from types import MappingProxyType
+
+    icons = MappingProxyType({"iconSize": 48.0, "showItemInfo": "false", "labelOnBottom": "0"})
+    store = {"DesktopViewSettings": MappingProxyType({"GroupBy": "Kind", "IconViewSettings": icons})}
+    _fake_settings(monkeypatch, store)
+    view = finder.desktop_view()
+    assert view["icon_size"] == 48 and view["show_item_info"] is False and view["labels_on_bottom"] is False
+    finder.set_desktop_view(text_size=14)  # kept, not written over as if garbled
+    assert store["DesktopViewSettings"] == {
+        "GroupBy": "Kind",
+        "IconViewSettings": {"iconSize": 48.0, "showItemInfo": "false", "labelOnBottom": "0", "textSize": 14.0},
+    }

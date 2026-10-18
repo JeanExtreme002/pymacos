@@ -111,3 +111,96 @@ class _Prefilled(list):
 
     def __delitem__(self, index):
         pass
+
+
+def test_timeouts_are_checked():
+    for timeout in (float("nan"), float("inf"), 0, -1):
+        with pytest.raises(ValueError, match="timeout must be a positive number"):
+            maps.geocode("Paris", timeout=timeout)
+        with pytest.raises(ValueError, match="timeout must be a positive number"):
+            maps.reverse_geocode(48.8584, 2.2945, timeout=timeout)
+
+
+def test_coordinates_are_written_in_plain_decimals(fake_run):
+    maps.open((0.00001, -0.00005))
+    assert fake_run.args[-1] == "maps://?ll=0.00001%2C-0.00005&q=0.00001%2C-0.00005"
+    maps.directions((-0.0, 2.0), start=(1e-09, 180))
+    assert fake_run.args[-1] == "maps://?daddr=0%2C2&dirflg=d&saddr=0%2C180"
+    for point in ((91, 0), (0, -181), (float("nan"), 0)):
+        with pytest.raises(ValueError, match="latitude must be"):
+            maps.open(point)
+
+
+class _Geocoder:
+    """``_objc``'s calls ``_ask`` makes, with ``run_until`` turning a run loop that delivers ``late`` answers."""
+
+    def __init__(self, monkeypatch, wait):
+        self.sent = []
+        self.late = []  # answers macOS sends on the next turn of the run loop
+        made = []
+        monkeypatch.setattr(maps._objc, "block", lambda function, *types: made.append(function) or 1)
+        monkeypatch.setattr(maps, "_handler", maps._handler.__wrapped__)
+        monkeypatch.setattr(maps, "_answers", [])
+        monkeypatch.setattr(maps, "_abandoned", [0])
+        monkeypatch.setattr(maps._files, "require_main_thread", lambda what: None)
+        monkeypatch.setattr(maps._objc, "cls", lambda name: 1)
+        monkeypatch.setattr(maps._objc, "nsarray", lambda placemarks: [])
+        monkeypatch.setattr(maps._objc, "send", self.send)
+        monkeypatch.setattr(maps._objc, "run_until", lambda done, timeout: wait(self, done, timeout))
+        maps._handler()
+        self.done = made[0]
+
+    def send(self, receiver, selector, *args, **kwargs):
+        self.sent.append(selector)
+        if selector == "cancelGeocode":
+            self.late.append(maps._CANCELED)  # macOS answers a canceled request at once
+        return maps._CANCELED if selector == "code" else 1
+
+    def deliver(self):
+        while self.late:
+            error = self.late.pop(0)
+            self.done(1, error or None)
+
+
+def test_a_timeout_waits_only_for_the_canceled_answer(monkeypatch):
+    waits = []
+
+    def wait(geocoder, done, timeout):
+        waits.append(timeout)
+        geocoder.deliver()
+        return done()
+
+    geocoder = _Geocoder(monkeypatch, wait)
+    with pytest.raises(macos.WaitTimeoutError, match="within 0.5 seconds"):
+        maps._ask("geocodeAddressString:completionHandler:", 1, 0.5)
+    assert "cancelGeocode" in geocoder.sent
+    assert waits == [0.5, maps._DRAIN] and maps._abandoned == [0]  # the drain ended on the canceled answer
+
+
+def test_an_interrupted_requests_answer_doesnt_pass_for_the_next(monkeypatch):
+    calls = []
+
+    def wait(geocoder, done, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        geocoder.deliver()
+        return done()
+
+    geocoder = _Geocoder(monkeypatch, wait)
+    with pytest.raises(KeyboardInterrupt):
+        maps._ask("geocodeAddressString:completionHandler:", 1, 15)
+    assert "cancelGeocode" in geocoder.sent and maps._abandoned == [1]
+    # The first request had answered already when it was canceled: a real answer, not "canceled".
+    geocoder.late[:] = [0]
+    found = []
+
+    def wait_then_answer(geocoder, done, timeout):
+        geocoder.deliver()  # the first request's answer, before the second is sent: dropped
+        if maps._abandoned == [0] and timeout == 15:
+            maps._answers.append((found, None))  # the second request's own answer
+        return done()
+
+    monkeypatch.setattr(maps._objc, "run_until", lambda done, timeout: wait_then_answer(geocoder, done, timeout))
+    assert maps._ask("geocodeAddressString:completionHandler:", 1, 15) is found
+    assert maps._abandoned == [0]

@@ -91,6 +91,7 @@ def test_shortcut_names_and_folders_that_look_like_options_stay_values(commands,
     macos.shortcuts.run("--help")
     assert commands.calls[-1] == ["shortcuts", "run", "--", "--help"]
 
+    commands.answers["shortcuts list --folder-name=-x"] = (0, "One\n", "")
     macos.shortcuts.list(folder="-x")
     assert commands.calls[-1] == ["shortcuts", "list", "--folder-name=-x"]
 
@@ -134,7 +135,7 @@ def test_listing_shortcuts_never_hangs(fake_run):
 def test_a_failed_run_keeps_its_error_when_listing_times_out(fake_run, monkeypatch):
     from macos import shortcuts
 
-    def run(args, timeout=None):
+    def run(args, timeout=None, **kwargs):
         if args[:2] == ["shortcuts", "list"]:
             raise macos.CommandTimeoutError(args, shortcuts._LIST_TIMEOUT)
         raise macos.CommandError(args, 1, "the shortcut failed")
@@ -142,3 +143,55 @@ def test_a_failed_run_keeps_its_error_when_listing_times_out(fake_run, monkeypat
     monkeypatch.setattr(shortcuts, "_run", run)
     with pytest.raises(macos.CommandError, match="the shortcut failed"):
         macos.shortcuts.run("Broken")  # the run's own error, not the listing's timeout
+
+
+def test_shortcut_text_output_keeps_its_line_endings(commands):
+    commands.answers["run"] = (0, b"a,b\r\nc,d\r\xff\n", b"")
+
+    assert macos.shortcuts.run("Fetch CSV") == "a,b\r\nc,d\r\ufffd"  # only the command's own newline goes
+
+    # The docstring names the endings as text, not as control characters.
+    assert r"``\r\n``" in macos.shortcuts.run.__doc__
+    assert "\r" not in macos.shortcuts.run.__doc__
+
+
+def test_shortcut_list_of_a_missing_folder_raises(commands):
+    commands.answers["shortcuts list --folders"] = (0, "Work (1234-ABCD)\nHome (5678-EFGH)\n", "")
+
+    with pytest.raises(LookupError):
+        macos.shortcuts.list(folder="Wrok")
+    assert commands.calls[-1] == ["shortcuts", "list", "--folders", "--show-identifiers"]
+
+    # An empty folder is no error, by name (in any case) or identifier.
+    assert macos.shortcuts.list(folder="Work") == []
+    assert macos.shortcuts.list(folder="work") == []
+    assert macos.shortcuts.list(folder="5678-EFGH") == []
+
+
+def test_shortcut_list_none_folder_and_full_folders_ask_nothing_more(commands):
+    assert macos.shortcuts.list(folder="none") == []  # the shortcuts in no folder
+    assert commands.calls == [["shortcuts", "list", "--folder-name=none"]]
+
+    commands.answers["shortcuts list --folder-name=Work"] = (0, "One\n", "")
+    assert macos.shortcuts.list(folder="Work") == ["One"]
+    assert commands.calls[-1] == ["shortcuts", "list", "--folder-name=Work"]
+
+
+def test_shortcut_list_keeps_an_empty_answer_when_the_folders_cant_be_listed(commands):
+    commands.answers["shortcuts list --folders"] = (1, "", "listing broke")
+
+    assert macos.shortcuts.list(folder="Work") == []
+
+
+@pytest.mark.parametrize("value", [b"hello", bytearray(b"hello"), 42, [7], [b"a.png"]])
+def test_shortcut_input_of_another_type_is_a_clear_type_error(commands, value):
+    with pytest.raises(TypeError, match="input"):
+        macos.shortcuts.run("X", input=value)
+    assert commands.calls == []
+
+
+def test_shortcut_input_paths_may_come_from_any_iterable(commands, tmp_path):
+    (tmp_path / "a.png").touch()
+
+    macos.shortcuts.run("Resize", input=(path for path in [tmp_path / "a.png"]))
+    assert commands.calls[-1] == ["shortcuts", "run", "--input-path", str(tmp_path / "a.png"), "--", "Resize"]

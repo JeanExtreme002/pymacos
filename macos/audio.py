@@ -221,17 +221,25 @@ def default_input() -> Optional[Device]:
 def _find(target: Union[str, Device], candidates: List[Device], kind: str) -> Device:
     if isinstance(target, Device):
         target = target.uid
-    exact = [device for device in candidates if target in (device.uid, device.name)]
-    if exact:
+    if not isinstance(target, str):
+        raise TypeError("device must be a Device or a str, not {}".format(type(target).__name__))
+    # The uid first: it's unique, where two identical USB mics share their name.
+    for device in candidates:
+        if device.uid == target:
+            return device
+    exact = [device for device in candidates if device.name == target]
+    if len(exact) == 1:
         return exact[0]
     wanted = target.casefold()
-    loose = [device for device in candidates if wanted in device.name.casefold()]
+    loose = exact or [device for device in candidates if wanted in device.name.casefold()]
     if len(loose) == 1:
         return loose[0]
-    names = ", ".join(repr(device.name) for device in candidates)
     if not loose:
+        names = ", ".join(repr(device.name) for device in candidates)
         raise ValueError("no {} device matches {!r}; available: {}".format(kind, target, names))
-    raise ValueError("{!r} matches several {} devices ({}); use the full name".format(target, kind, names))
+    # Only the devices that match, each with its uid: the one way to tell apart devices of the same name.
+    matches = ", ".join("{!r} (uid {!r})".format(device.name, device.uid) for device in loose)
+    raise ValueError("{!r} matches several {} devices: {}; use the full name or the uid".format(target, kind, matches))
 
 
 def _set_default(selector: str, device: Device) -> None:
@@ -249,7 +257,9 @@ def set_output(device: Union[str, Device]) -> Device:
     Play sound through ``device`` and return it.
 
     ``device`` is a :class:`Device`, its full name, its uid, or part of its
-    name when that matches only one device (``"AirPods"``).
+    name when that matches only one device (``"AirPods"``). A name several
+    devices share (two identical USB microphones) raises ``ValueError``,
+    listing their uids: pass the uid or the :class:`Device` then.
     """
     chosen = _find(device, outputs(), "output")
     _set_default("dOut", chosen)
@@ -424,7 +434,7 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
     Ctrl-C stops the recording early and keeps what was recorded until then.
     If the recording fails, a file already at ``path`` stays as it was.
     """
-    if seconds <= 0:
+    if not _positive(seconds):
         raise ValueError("seconds must be positive, not {}".format(seconds))
     if channels not in (1, 2):
         raise ValueError("channels must be 1 or 2, not {}".format(channels))
@@ -462,6 +472,11 @@ def record(path: Union[str, "os.PathLike[str]"], seconds: float, *, channels: in
     return target
 
 
+def _positive(value: float) -> bool:
+    """Whether ``value`` is a number of seconds to wait or keep: above 0, and neither infinite nor NaN."""
+    return math.isfinite(value) and value > 0
+
+
 def _recorded_seconds(recorder: int) -> float:
     """How long a recorder still recording has recorded: 0 when it has no sound yet, only the file's header."""
     return float(_objc.send(recorder, "currentTime", restype=ctypes.c_double) or 0)
@@ -480,7 +495,7 @@ def input_level(seconds: float = 0.3) -> float:
 
     Needs the Microphone permission, like :func:`record`. Nothing is kept.
     """
-    if seconds <= 0:
+    if not _positive(seconds):
         raise ValueError("seconds must be positive, not {}".format(seconds))
     _capture.require_permission(_capture.AUDIO)
     handle, name = tempfile.mkstemp(suffix=".caf")
@@ -550,7 +565,9 @@ class _StreamDescription(ctypes.Structure):
     ]
 
 
-_existing = _files.existing
+def _existing(path: PathLike) -> Path:
+    """``path`` checked before afconvert reads it, which would say only "Couldn't open input file (-54)"."""
+    return _media.source(path, "sound")
 
 
 @lru_cache(maxsize=None)
@@ -771,7 +788,7 @@ def trim(
 
         macos.audio.trim("interview.m4a", "answer.m4a", start=95, duration=30)
     """
-    if start < 0 or (duration is not None and duration <= 0):
+    if not (math.isfinite(start) and start >= 0) or (duration is not None and not _positive(duration)):
         raise ValueError("start must not be negative and duration must be positive")
     _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
     with _decoded(_existing(source)) as samples:
@@ -836,7 +853,7 @@ def fade(
 
         macos.audio.fade("song.m4a", "song-faded.m4a", fade_in=2, fade_out=5)
     """
-    if fade_in < 0 or fade_out < 0:
+    if not all(math.isfinite(length) and length >= 0 for length in (fade_in, fade_out)):
         raise ValueError("fade_in and fade_out must not be negative")
     _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
     with _decoded(_existing(source)) as samples:
@@ -879,9 +896,13 @@ def gain(
     +6 dB is about twice as loud, -6 dB half. Loud parts pushed past the
     maximum are clipped. ``quality`` and ``lossless`` work as in :func:`convert`.
     """
+    if not math.isfinite(decibels):
+        raise ValueError("decibels must be a finite number, not {}".format(decibels))
     _encoding(Path(output).expanduser().absolute(), quality, lossless)  # check the output before the work
     # 65536 possible samples: work each one out once, then look them up, which runs in C, chunk by chunk.
-    table = _gain_table(10 ** (decibels / 20))
+    # Past +200 dB (ten billion times louder) every sample but silence clips just the same, and the
+    # factor of a few thousand decibels would overflow a float.
+    table = _gain_table(10 ** (min(decibels, 200.0) / 20))
     with _decoded(_existing(source)) as samples:
         with _encoding_to(output, samples.channels, samples.rate, quality, lossless) as write:
             for _ in range(0, samples.frames, _CHUNK_FRAMES):
@@ -929,26 +950,56 @@ def speed(
 
         macos.audio.speed("lecture.m4a", "lecture-fast.m4a", 1.5)
     """
-    if factor <= 0:
+    if not _positive(factor):
         raise ValueError("factor must be positive, not {}".format(factor))
     target = Path(output).expanduser().absolute()
     _encoding(target, quality, lossless)  # check the output before the work
     original = _existing(source)
     details = info(original)
     channels = 1 if details.channels == 1 else 2
-    with _encoding_to(target, channels, details.sample_rate, quality, lossless) as write, _objc.autorelease_pool():
-        edited = _media.editable(_media.asset(original))
+    with tempfile.TemporaryDirectory() as folder, _encoding_to(
+        target, channels, details.sample_rate, quality, lossless
+    ) as write, _objc.autorelease_pool():
+        edited = _media.editable(_media.asset(original), keep_state=False)  # re-encoded: every track in the mix
         length = _media.duration(edited)
+        # A second of silence after the sound, in each of its tracks, stretched along with it: the
+        # time-pitch algorithm holds back the last stretch before the end of what it stretches, which
+        # cut up to a tenth of a second off a clip under about 3 s. It's the silence that's held back now.
+        quiet = Path(folder) / "quiet.wav"
+        with wave.open(str(quiet), "wb") as writer:
+            writer.setnchannels(channels)
+            writer.setsampwidth(2)
+            writer.setframerate(details.sample_rate)
+            writer.writeframes(bytes(2 * channels * details.sample_rate))
+        silence = _media.asset(quiet, "sound")
+        quiet_track = _media.tracks(silence, "soun")[0]
+        end = _objc.send(edited, "duration", restype=_media.CMTime)  # the exact end, not one rounded to 1/600 s
+        for track in _media.tracks(edited, "soun"):
+            error = ctypes.c_void_p()
+            if not _objc.send(
+                track,
+                "insertTimeRange:ofTrack:atTime:error:",
+                _objc.send(quiet_track, "timeRange", restype=_media.CMTimeRange),
+                quiet_track,
+                end,
+                ctypes.byref(error),
+                argtypes=(_media.CMTimeRange, _objc.id, _media.CMTime, ctypes.c_void_p),
+                restype=_objc.BOOL,
+            ):
+                raise MacOSError("could not edit the sound: {}".format(_objc.error_message(error)))
+        # The composition's own duration, not one rounded to 1/600 s: that would cut the last samples.
+        padded = _objc.send(edited, "duration", restype=_media.CMTime)
         _objc.send(
             edited,
             "scaleTimeRange:toDuration:",
-            _media.time_range(0, length),
-            _media.time(length / factor),
+            _media.CMTimeRange(_media.time(0), padded),
+            _stretched(padded, factor, details.sample_rate, sound=length),
             argtypes=(_media.CMTimeRange, _media.CMTime),
             restype=None,
         )
         # Read back as plain samples, stretched on the way, straight into the file to encode: nothing is
-        # compressed until the output, once, in its own format. The exact length, too: no codec pads it.
+        # compressed until the output, once, in its own format. The exact length, too: no codec pads it,
+        # and the silence after the sound isn't read.
         _read_samples(
             edited,
             write,
@@ -958,6 +1009,23 @@ def speed(
             time_pitch="Spectral" if keep_pitch else "Varispeed",
         )
     return target
+
+
+def _stretched(length: "_media.CMTime", factor: float, rate: int, *, sound: float) -> "_media.CMTime":
+    """
+    ``length`` played ``factor`` times faster, to the sample at ``rate``: the speed() target duration.
+
+    ``sound`` is how long the sound itself lasts, in seconds, without the silence after it.
+    """
+    # At least one tick per sample: a coarser timescale would round the end off, or past it.
+    scale = max(1, -(-rate // length.timescale)) if length.timescale > 0 else 1
+    ticks = length.value * scale / factor
+    if not math.isfinite(ticks) or ticks >= 2**63:
+        raise ValueError("factor {} is too small: the sound would last too long".format(factor))
+    # The frames written are the sound's own, not the silence's: none of them left is an empty file.
+    if round(ticks) <= 0 or round(sound / factor * rate) <= 0:
+        raise ValueError("factor {} is too large: nothing of the sound would be left".format(factor))
+    return _media.CMTime(round(ticks), length.timescale * scale, length.flags, length.epoch)
 
 
 _READING, _READ, _READ_FAILED = 1, 2, 3  # AVAssetReaderStatus
@@ -977,6 +1045,7 @@ def _read_samples(
 
     Its first ``length`` seconds, a buffer at a time, with ``time_pitch``
     (``"Spectral"``, ``"Varispeed"``) for the parts it plays faster or slower.
+    Exactly that long: frames the reader holds back at the end come as silence.
     """
     framework("AVFoundation")
     error = ctypes.c_void_p()
@@ -1011,7 +1080,8 @@ def _read_samples(
         raise MacOSError("could not read the sound as samples")
     _objc.send(output, "setAudioTimePitchAlgorithm:", _objc.nsstring(time_pitch), argtypes=(_objc.id,), restype=None)
     _objc.send(reader, "addOutput:", output, argtypes=(_objc.id,), restype=None)
-    _objc.send(reader, "setTimeRange:", _media.time_range(0, length), argtypes=(_media.CMTimeRange,), restype=None)
+    # No time range: the reader would end the time-pitch algorithm there, before it gives the last stretch
+    # out. Reading stops after ``length`` seconds below instead.
     if not _objc.send(reader, "startReading", restype=_objc.BOOL):
         failure = _objc.send(reader, "error")
         message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
@@ -1035,10 +1105,15 @@ def _read_samples(
                     raise MacOSError("could not read the sound's samples")
         write(samples)
         remaining -= frames
-    if _objc.send(reader, "status", restype=_objc.NSInteger) == _READ_FAILED:
+    status = _objc.send(reader, "status", restype=_objc.NSInteger)
+    if status == _READ_FAILED:
         failure = _objc.send(reader, "error")
         message = _objc.pystring(_objc.send(failure, "localizedDescription")) if failure else None
         raise MacOSError("could not read the sound: {}".format(message or "unknown error"))
+    if status == _READING:
+        _objc.send(reader, "cancelReading", restype=None)  # what's left isn't wanted
+    elif remaining > 0:
+        write(array.array("h", [0]) * (remaining * channels))  # ended a little early: the length, as asked
 
 
 # Sound classification, through SoundAnalysis.
@@ -1186,7 +1261,8 @@ def record_until_silence(
     ``path`` and ``channels`` work as in :func:`record`. Needs the
     Microphone permission.
     """
-    if max_seconds <= 0 or silence <= 0:
+    # max_seconds may be math.inf: no limit, only the silence ends it.
+    if not (max_seconds > 0 and _positive(silence)):
         raise ValueError("max_seconds and silence must be positive")
     if not 0 < threshold < 1:
         raise ValueError("threshold must be between 0 and 1, not {}".format(threshold))
