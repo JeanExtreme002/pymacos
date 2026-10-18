@@ -62,7 +62,7 @@ that isn't installed). A URL starting with `-` raises `ValueError`: the `open`
 command would take it as one of its options. So does a URL with no scheme
 (`"example.com"` or `"localhost:3000"`, not `"https://example.com"`), which `open`
 would take for a file in the current directory. A file path has no scheme either:
-for a local page, pass `pathlib.Path(path).as_uri()` (a `file://` URL).
+for a local page, pass `pathlib.Path(path).absolute().as_uri()` (a `file://` URL).
 
 ## Running JavaScript
 

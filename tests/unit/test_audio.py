@@ -635,3 +635,36 @@ def test_an_unreadable_source_is_a_permission_error_before_afconvert_runs(tmp_pa
             audio.convert(source, tmp_path / "song.m4a")
     finally:
         source.chmod(0o644)
+
+
+def test_speed_keeps_every_track_in_the_mix(monkeypatch, tmp_path):
+    """speed() re-encodes: a second language left off would be dropped from the mix."""
+    from contextlib import contextmanager, nullcontext
+    from types import SimpleNamespace
+
+    from macos import audio
+
+    source = tmp_path / "song.m4a"
+    source.write_bytes(b"m4a")
+
+    @contextmanager
+    def encoding(*args, **kwargs):
+        yield lambda samples: None
+
+    asked = []
+
+    class Done(Exception):
+        pass
+
+    def editable(media, **options):
+        asked.append(options)
+        raise Done
+
+    monkeypatch.setattr(audio, "info", lambda path: SimpleNamespace(channels=2, sample_rate=44100))
+    monkeypatch.setattr(audio, "_encoding_to", encoding)
+    monkeypatch.setattr(audio._objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(audio._media, "asset", lambda path: 1)
+    monkeypatch.setattr(audio._media, "editable", editable)
+    with pytest.raises(Done):
+        audio.speed(source, tmp_path / "fast.m4a", 1.5)
+    assert asked == [{"keep_state": False}]

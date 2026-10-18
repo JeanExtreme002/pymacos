@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.video`. They run on any platform."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,17 @@ def avconvert(monkeypatch):
         return ""
 
     monkeypatch.setattr(macos.video, "_run", run)
+    monkeypatch.setattr(macos.video, "_check_playable", lambda path: None)  # AVFoundation's: a test of its own
     return calls
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="asks AVFoundation")
+def test_video_convert_refuses_a_file_that_isnt_a_video_before_avconvert(monkeypatch, tmp_path):
+    monkeypatch.setattr(macos.video, "_run", lambda *args, **kwargs: pytest.fail("avconvert ran"))
+    text = tmp_path / "notes.mov"
+    text.write_text("not a video")
+    with pytest.raises(ValueError, match="not a video"):
+        macos.video.convert(text, tmp_path / "out.mp4")
 
 
 def test_video_convert_command(avconvert, tmp_path):
@@ -69,6 +80,7 @@ def test_a_conversion_that_fails_leaves_the_old_output_alone(monkeypatch, tmp_pa
         raise macos.CommandError(args, 1, "no good")
 
     monkeypatch.setattr(macos.video, "_run", refuse)
+    monkeypatch.setattr(macos.video, "_check_playable", lambda path: None)
     target = tmp_path / "out.mp4"
     target.write_bytes(b"yesterday")
     with pytest.raises(macos.CommandError):
@@ -539,7 +551,8 @@ def test_edits_keep_the_sources_metadata(fake_edit, monkeypatch, tmp_path):
     monkeypatch.setattr(video._media, "composition", lambda: 4)
     monkeypatch.setattr(video._media, "add_track", lambda media, kind: 5)
     monkeypatch.setattr(video._media, "insert", lambda *args: None)
-    monkeypatch.setattr(video._media, "copy_track", lambda *args: 6)
+    copied = []
+    monkeypatch.setattr(video._media, "copy_track", lambda *args, **options: copied.append(options) or 6)
     send = video._objc.send
     monkeypatch.setattr(
         video._objc,
@@ -558,6 +571,7 @@ def test_edits_keep_the_sources_metadata(fake_edit, monkeypatch, tmp_path):
     monkeypatch.setattr(video._objc, "nsstring", lambda text: 8)
     monkeypatch.setattr("macos.audio.info", lambda path: SimpleNamespace(codec="aac"))
     video.add_audio("clip.mov", "sound.m4a", out)
+    assert copied[-1] == {"keep_state": False}  # re-encoded with the mix: a second language left off would be lost
     video.add_language_track("clip.mov", "sound.m4a", out, "en")
     # Each clip its own asset: concat must keep the first one's, not any other's.
     monkeypatch.setattr(video._media, "asset", lambda path: {"clip.mov": 1, "other.mov": 7}[str(path)])

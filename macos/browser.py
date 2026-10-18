@@ -345,7 +345,7 @@ def open(url: str, app: Optional[str] = None) -> None:
     when macOS has none. To open a URL in whatever handles it, see :func:`macos.open`.
     A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option;
     so does one with no scheme (``"example.com"`` or ``"localhost:3000"``, not ``"https://example.com"``),
-    a file path among them: pass ``pathlib.Path(path).as_uri()`` for a local page. A browser
+    a file path among them: pass ``pathlib.Path(path).absolute().as_uri()`` for a local page. A browser
     given with ``app`` that isn't installed raises :class:`~macos.errors.AppNotFoundError`.
     """
     if url.startswith("-"):

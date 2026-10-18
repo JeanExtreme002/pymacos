@@ -99,7 +99,8 @@ def _load() -> None:
     framework("AppKit")
 
 
-_existing = _files.existing
+def _existing(path: PathLike) -> Path:
+    return _media.source(path, "video")
 
 
 def _asset(path: Path) -> int:
@@ -327,12 +328,19 @@ def convert(
         preset = "PresetHEVCHighestQuality" if hevc and quality == "high" else _QUALITY[quality]
         if hevc and quality != "high":
             raise ValueError("hevc=True only has the 'high' quality; pass height= to make it smaller")
+    _check_playable(original)
     args = ["avconvert", "--source", str(original), "--preset", preset]
     if start is not None:
         args += ["--start", str(start)]
     if duration is not None:
         args += ["--duration", str(duration)]
     return _avconvert(original, target, args)
+
+
+def _check_playable(path: Path) -> None:
+    """``ValueError`` for a file that isn't a video, before avconvert, which would say only that it failed."""
+    with _objc.autorelease_pool():
+        _asset(path)
 
 
 def _avconvert(source: Path, target: Path, args: List[str]) -> Path:
@@ -819,7 +827,8 @@ def add_audio(
         _copy_picture(picture, mixed, length)
         if not replace:
             for track in _media.tracks(picture, "soun"):
-                _media.copy_track(mixed, track, "soun", length)
+                # Re-encoded with the mix: every track on, or one that's off (a second language) is left out.
+                _media.copy_track(mixed, track, "soun", length, keep_state=False)
         added_tracks = _media.tracks(sound, "soun")
         if not added_tracks:
             raise ValueError("{} has no sound".format(audio))
@@ -1069,7 +1078,7 @@ def from_images(
     if width is not None and width < 2:
         raise ValueError("width must be at least 2, not {}".format(width))
     target = _target(output)
-    sources = [_existing(image) for image in images]
+    sources = [_files.existing(image) for image in images]
     from . import image as image_module
 
     first = image_module.info(sources[0])

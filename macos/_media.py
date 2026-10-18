@@ -10,7 +10,7 @@ import math
 import os
 from pathlib import Path
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
 
 from . import _files, _objc
 from ._system import framework
@@ -60,8 +60,26 @@ def load() -> None:
     framework("CoreMedia")
 
 
+def source(path: Union[str, "os.PathLike[str]"], kind: str = "video or sound") -> Path:
+    """
+    ``path`` made absolute, checked before any tool or framework reads it: ``FileNotFoundError`` when nothing's
+    there, ``PermissionError`` when it can't be read, ``ValueError`` when it isn't a file (a folder, a FIFO).
+
+    ``avconvert`` and ``afconvert`` would only say they couldn't open it, and AVFoundation waits on a
+    FIFO for a writer that never comes.
+    """
+    found = _files.existing(path)
+    if not found.is_file():
+        raise ValueError("{} is not a {} macOS can play".format(found, kind))
+    open(str(found), "rb").close()  # PermissionError: the file's mode, or no Files and Folders access
+    return found
+
+
 def asset(path: Path, kind: str = "video or sound") -> int:
     """An autoreleased ``AVURLAsset`` for a media file, ``kind`` naming it in the error. Call inside an autorelease pool."""
+    if os.path.exists(path) and not os.path.isfile(path):
+        # A FIFO: AVFoundation would wait for a writer before answering isPlayable. A folder isn't media either.
+        raise ValueError("{} is not a {} macOS can play".format(path, kind))
     load()
     found = _objc.send(
         _objc.cls("AVURLAsset"), "URLAssetWithURL:options:", _objc.file_url(path), None, argtypes=(_objc.id, _objc.id)
@@ -69,8 +87,7 @@ def asset(path: Path, kind: str = "video or sound") -> int:
     if not found or not _objc.send(found, "isPlayable", restype=_objc.BOOL):
         # A file that can't be read isn't playable either: Python's own PermissionError says so, as image and
         # pdf do, not that its format is wrong. open(), not os.access(): the folders privacy protects
-        # (Desktop, Documents...) pass the permission bits. Only a file: a folder isn't media, as below, and
-        # a FIFO's open would wait for a writer.
+        # (Desktop, Documents...) pass the permission bits.
         if os.path.isfile(path):
             open(path, "rb").close()
         raise ValueError("{} is not a {} macOS can play".format(path, kind))
@@ -120,13 +137,13 @@ def insert(track: int, source_track: int, start: float, length: float, at: float
         raise MacOSError("could not edit the track: {}".format(_objc.error_message(error)))
 
 
-def copy_track(target: int, track: int, kind: str, until: float) -> int:
+def copy_track(target: int, track: int, kind: str, until: float, keep_state: bool = True) -> int:
     """
     Add a copy of ``track`` to the composition ``target``, cut at ``until`` seconds, and return the copy.
 
     The track keeps its place on the timeline: a sound that starts late
     still does, and one that ends early isn't stretched to ``until``. It
-    keeps how it plays, too: see :func:`keep_settings`.
+    keeps how it plays, too: see :func:`keep_settings`, which ``keep_state`` is passed to.
     """
     span = _core_media().CMTimeRangeGetIntersection(_objc.send(track, "timeRange", restype=CMTimeRange), time_range(0, until))
     copy = add_track(target, kind)
@@ -144,7 +161,7 @@ def copy_track(target: int, track: int, kind: str, until: float) -> int:
         )
         if not ok:
             raise MacOSError("could not edit the track: {}".format(_objc.error_message(error)))
-    keep_settings(copy, track)
+    keep_settings(copy, track, keep_state)
     return copy
 
 
@@ -154,9 +171,9 @@ def keep_settings(copy: int, track: int, state: bool = True) -> None:
 
     A new track is on, in no language and no group: a film's second
     language (or its commentary) would otherwise play over the first.
-    ``state=False`` copies the language only, for an export that re-encodes:
-    it leaves a track that's off out of the file, and puts every track in
-    no group.
+    ``state=False`` copies the language only, leaving every track on and in
+    no group: for an export that re-encodes, which would leave a track
+    that's off out of the file.
     """
     if state:
         _objc.send(
@@ -211,7 +228,7 @@ def editable(media: int, keep_state: bool = True) -> int:
     Every track keeps its language, and the whole length is kept, to the
     sample. Each keeps its alternate group and on/off state too, unless
     ``keep_state`` is false: pass that for an export that re-encodes, which
-    drops a track that's off (a second language) and every group anyway.
+    would drop a track that's off (a second language).
     """
     # The asset's own duration, not one rounded to the 1/600 s TIMESCALE: that would cut the last samples.
     length = _objc.send(media, "duration", restype=CMTime)

@@ -209,6 +209,8 @@ _US_COMPATIBLE_NUMBERS = frozenset({0, 252, -2, 15})
 # What those layouts type elsewhere on a Japanese (JIS) keyboard, whose keys follow its own keycaps:
 # away from the main thread, the US table serves there for the other characters only.
 _JIS_MOVED = frozenset('=][\'\\~@^&*()_+{}|:"')
+# What only a JIS keyboard has a key for: the US table can't type it, but the layout in use can.
+_JIS_ONLY = frozenset("¥")
 _JIS = 0x4A495320  # KBGetLayoutType's kKeyboardJIS ('JIS ')
 
 # The layouts read on the main thread, by input source ID, for other threads: each with the
@@ -379,8 +381,9 @@ def _parse(
             if char in layout:
                 code, shifted = layout[char]
                 return modifiers, code, shifted
-        # Only the characters JIS moves: one no layout like US has (an "é") is a ValueError, as on any keyboard.
-        if layout is _us_jis_layout() and (key in _JIS_MOVED or key.lower() in _JIS_MOVED):
+        # Only the characters JIS moves or adds (the ¥ key): one no layout like US has (an "é") is a
+        # ValueError, as on any keyboard.
+        if layout is _us_jis_layout() and (key in _JIS_MOVED | _JIS_ONLY or key.lower() in _JIS_MOVED):
             raise MainThreadError(
                 "a Japanese (JIS) keyboard types {!r} on another key than a US one: call "
                 "macos.keyboard.layout() once from the main thread first, so other threads know it".format(key)

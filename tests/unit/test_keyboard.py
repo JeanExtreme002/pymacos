@@ -664,7 +664,7 @@ def test_a_worker_on_a_jis_keyboard_refuses_the_characters_it_types_elsewhere(mo
 
     assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 0, False)
     assert _off_the_main_thread(lambda: macos.keyboard._parse("/")) == ([], 44, False)
-    for keys in ("[", "ctrl+=", "shift+'", "@"):
+    for keys in ("[", "ctrl+=", "shift+'", "@", "¥"):  # ¥: a key only JIS has
         error = _off_the_main_thread(lambda: macos.keyboard._parse(keys))
         assert isinstance(error, macos.MainThreadError) and "JIS" in str(error), keys
 

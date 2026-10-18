@@ -566,13 +566,8 @@ class _StreamDescription(ctypes.Structure):
 
 
 def _existing(path: PathLike) -> Path:
-    """``path`` made absolute; ``FileNotFoundError`` when nothing's there, ``PermissionError`` when it can't be read.
-
-    Checked here, not left to ``afconvert``, which says only "Couldn't open input file (-54)".
-    """
-    found = _files.existing(path)
-    _objc._readable(str(found))
-    return found
+    """``path`` checked before afconvert reads it, which would say only "Couldn't open input file (-54)"."""
+    return _media.source(path, "sound")
 
 
 @lru_cache(maxsize=None)

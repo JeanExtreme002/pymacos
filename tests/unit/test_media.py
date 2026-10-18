@@ -196,10 +196,10 @@ def test_editing_for_a_re_encode_leaves_every_track_on(objc):
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
 def test_a_fifo_is_not_media_and_doesnt_wait_for_a_writer(objc, tmp_path):
-    """open() on a FIFO waits for a writer: the readability check would hang for good."""
+    """AVFoundation's isPlayable, and open(), wait on a FIFO for a writer: it must be refused before either."""
     import threading
 
-    objc.answers.update({"URLAssetWithURL:options:": 1, "isPlayable": False})
+    objc.answers["URLAssetWithURL:options:"] = lambda *args: pytest.fail("AVFoundation was asked about a FIFO")
     fifo = tmp_path / "pipe"
     os.mkfifo(str(fifo))
     raised = []
@@ -218,3 +218,22 @@ def test_a_fifo_is_not_media_and_doesnt_wait_for_a_writer(objc, tmp_path):
         reader.join(5)
         pytest.fail("asset() waited on the FIFO for a writer")
     assert raised and "not a video or sound" in str(raised[0])
+    with pytest.raises(ValueError, match="not a sound"):
+        _media.source(fifo, "sound")  # what audio and video check their sources with, before afconvert or avconvert
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_source_checks_a_file_before_a_tool_reads_it(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _media.source(tmp_path / "missing.mov")
+    with pytest.raises(ValueError, match="not a video"):
+        _media.source(tmp_path, "video")  # a folder isn't media
+    locked = tmp_path / "clip.mov"
+    locked.write_bytes(b"moov")
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            _media.source(locked, "video")
+    finally:
+        locked.chmod(0o600)
+    assert _media.source(locked, "video") == locked
