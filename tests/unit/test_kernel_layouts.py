@@ -32,6 +32,7 @@ int main(void) {
   SHOW("local_port", offsetof(struct in_sockinfo, insi_lport));
   SHOW("remote_address", offsetof(struct in_sockinfo, insi_faddr));
   SHOW("local_address", offsetof(struct in_sockinfo, insi_laddr));
+  SHOW("ip_versions", offsetof(struct in_sockinfo, insi_vflag));
   SHOW("tcp_state", offsetof(struct tcp_sockinfo, tcpsi_state));
   SHOW("socket_fdinfo_size", sizeof(struct socket_fdinfo));
   SHOW("file_path", offsetof(struct vnode_fdinfowithpath, pvip) + offsetof(struct vnode_info_path, vip_path));
@@ -76,6 +77,7 @@ def test_the_offsets_read_from_kernel_structures_match_the_sdk(tmp_path):
     assert found["local_port"] == system._LOCAL_PORT - system._PROTO
     assert found["remote_address"] == system._REMOTE_ADDRESS - system._PROTO
     assert found["local_address"] == system._LOCAL_ADDRESS - system._PROTO
+    assert found["ip_versions"] == system._IP_VERSIONS - system._PROTO == 24
     assert found["tcp_state"] == system._TCP_STATE - system._PROTO
     assert found["socket_fdinfo_size"] <= system._SOCKET_INFO_SIZE  # read whole, whatever the protocol's part
     assert found["vnode_info"] == system._VNODE_INFO

@@ -16,8 +16,10 @@ macos.schedule.add("copy", "copy.py", at_mount=True)                  # a disk i
 ```
 
 A job keeps running after your script ends and after a restart, as long as
-you're logged in. When the Mac was asleep at the scheduled time, the job runs
-when it wakes up.
+you're logged in. When the Mac was asleep at an `at` time, the job runs when
+it wakes up (several missed runs count as one). `every` counts only the time
+the Mac is awake: a run due while it sleeps, or while the last run is still
+going, is skipped. For something that must run daily or hourly, use `at`.
 
 ## Adding a job
 
@@ -39,7 +41,9 @@ macos.schedule.add("scrape", "scrape.py", every=900, args=["--quiet"], python="~
 ```
 
 The script runs with the same Python that added it (or `python=`, such as a
-virtual environment's), in its own folder, with `args` as its arguments.
+virtual environment's: a path, or a command on `PATH` such as `"python3.12"`;
+a file that isn't executable raises `ValueError`), in its own folder, with
+`args` as its arguments.
 Adding a name again replaces that job. If launchd refuses the new one, `add`
 deletes its plist, puts the old job back (still paused if it was) and raises
 the error. Names that differ only in case share a file on the Mac's disk, so
@@ -111,11 +115,16 @@ macos.schedule.remove("backup")
 ```
 
 Each {class}`~macos.schedule.Job` tells whether it's `running`, and how the
-last run ended (`last_exit_status`, 0 for success). The script's output and
+last run ended: `last_exit_status` is the script's exit code (0 for success,
+1 for `sys.exit(1)`), or minus the signal that stopped it (`-15` for a run
+pausing or removing the job stopped, `-9` for one killed). The script's output and
 errors go to `job.log`, in `~/Library/Logs/pymacos`.
 {func}`~macos.schedule.pause` keeps a job without running it, even after a
 restart, and `job.paused` tells; {func}`~macos.schedule.resume` puts it back on
-its schedule. Pausing or removing a job also stops a run in progress. When
+its schedule. `run_now` doesn't run a paused job: it raises `CommandError`,
+saying to resume it first. Pausing or removing a job also stops a run in
+progress; resuming one that isn't paused leaves it, and its run, alone (or
+loads it again, if a failed `resume` left it unloaded). When
 launchd refuses to pause a job, it's left as it was and the error raised (if
 it was stopped but not paused, the error says so); a job `resume` couldn't
 load again goes back to paused, or, if it wasn't paused, stays unloaded until

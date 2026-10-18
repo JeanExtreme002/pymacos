@@ -80,7 +80,9 @@ macos.appearance.set_scroll_bars("always")
 
 {func}`~macos.appearance.set_font_smoothing` draws text thinner (`False`), which
 some find sharper on external displays that aren't Retina; apps pick it up
-when they're reopened.
+when they're reopened. It also removes a value set for this Mac only
+(`defaults -currentHost write -g AppleFontSmoothing`), which would otherwise
+win over it.
 
 None of them needs a permission.
 

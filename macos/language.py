@@ -17,7 +17,7 @@ no permission.
 import ctypes
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from . import _files, _objc
 from ._objc import NSInteger, NSUInteger
@@ -77,9 +77,11 @@ def sentiment(text: str) -> Optional[float]:
     """
     Score how positive ``text`` sounds, from -1.0 (very negative) to 1.0 (very positive).
 
-    Returns ``None`` for empty text. The score is a rough signal, best for
-    comparing texts such as reviews or messages: a neutral sentence won't
-    always come out at exactly 0.
+    Returns ``None`` when there's nothing to score: empty text, text with no
+    words in it (``"!!!"``, ``"12345"``, emoji only), or a language the
+    sentiment model doesn't cover (Chinese, Japanese and Russian among others).
+    The score is a rough signal, best for comparing texts such as reviews or
+    messages: a neutral sentence won't always come out at exactly 0.
     """
     library = _load()
     # The tagger scores one paragraph at a time: treat the text as one.
@@ -107,7 +109,15 @@ def sentiment(text: str) -> Optional[float]:
             argtypes=(NSUInteger, NSInteger, _objc.id, ctypes.c_void_p),
         )
         score = _objc.pystring(tag)
-    return float(score) if score else None
+    return _score(score)
+
+
+def _score(tag: Optional[str]) -> Optional[float]:
+    """The sentiment tag as a number, or ``None`` when the tagger had nothing to score (it tags that ``'Other'``)."""
+    try:
+        return float(tag) if tag else None
+    except ValueError:
+        return None
 
 
 _COSINE = 0  # NLDistanceTypeCosine
@@ -165,8 +175,12 @@ def similarity(first: str, second: str, *, language: Optional[str] = None) -> fl
     Mac doesn't have. The scores are for comparing: ``similarity(q, a)`` against
     ``similarity(q, b)`` says which of ``a`` and ``b`` is closer to ``q``,
     while a value alone means little. Opposites (``'happy'``/``'sad'``) often
-    score as related, since they appear in similar contexts.
+    score as related, since they appear in similar contexts. Raises
+    :class:`ValueError` when either text is empty or blank: there's nothing
+    to compare.
     """
+    if not first.strip() or not second.strip():
+        raise ValueError("nothing to compare: a text is empty")
     _load()
     code = _language_of(first + " " + second, language)
     with _objc.autorelease_pool():
@@ -199,14 +213,17 @@ def embedding(text: str, *, language: Optional[str] = None) -> List[float]:
 
     Store vectors to search many texts by meaning (compare them with cosine
     similarity). All texts must use the same ``language`` to be comparable;
-    it's detected when omitted.
+    it's detected when omitted. Raises :class:`ValueError` for empty or blank
+    text, or for a text the model has no vector for.
     """
+    if not text.strip():
+        raise ValueError("text is empty")
     _load()
     code = _language_of(text, language)
     with _objc.autorelease_pool():
         vector = _objc.send(_model("sentence", code), "vectorForString:", _objc.nsstring(text), argtypes=(_objc.id,))
         if not vector:
-            raise ValueError("no embedding for this text")
+            raise ValueError("no {!r} sentence embedding for this text".format(code))
         return [float(_objc.send(value, "doubleValue", restype=ctypes.c_double)) for value in _objc.nsarray(vector)]
 
 
@@ -275,7 +292,7 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
         raise NotSupportedError("name recognition is not available on this Mac")
     # NSString indexes count UTF-16 units; map them back to Python indexes.
     units = text.encode("utf-16-le")
-    offsets = {}
+    offsets: Dict[int, int] = {}
     position = 0
     for index, char in enumerate(text):
         offsets[position] = index
@@ -307,18 +324,28 @@ def entities(text: str, *, language: Optional[str] = None) -> List[Entity]:
                 words.append((found.location, found.location + found.length, kind))
             index = max(found.location + found.length, index + 1)
 
-    # Join neighbouring words of the same kind ("São" + "Paulo").
+    return [
+        Entity(text=text[offsets[start] : offsets[end]], kind=kind, start=offsets[start])
+        for start, end, kind in _merge(text, offsets, words)
+    ]
+
+
+def _merge(text: str, offsets: Dict[int, int], words: List[Tuple[int, int, str]]) -> List[Tuple[int, int, str]]:
+    """
+    Join neighbouring words of the same kind ("São" + "Paulo") into one name.
+
+    Only when spaces alone sit between them: a newline or a tab ends a name,
+    so a list of names, one per line, stays a list.
+    """
     merged: List[Tuple[int, int, str]] = []
     for start, end, kind in words:
         if merged and merged[-1][2] == kind:
             gap = text[offsets.get(merged[-1][1], 0) : offsets.get(start, 0)]
-            if gap.strip() == "":
+            if gap.strip(" \u00a0") == "":
                 merged[-1] = (merged[-1][0], end, kind)
                 continue
         merged.append((start, end, kind))
-    return [
-        Entity(text=text[offsets[start] : offsets[end]], kind=kind, start=offsets[start]) for start, end, kind in merged
-    ]
+    return merged
 
 
 def keywords(text: str, *, language: Optional[str] = None, verbs: bool = False, lemmas: bool = False) -> List[str]:

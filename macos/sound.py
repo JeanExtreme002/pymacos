@@ -19,7 +19,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Set, Union
+from typing import Iterator, List, Optional, Set, Union
 
 from . import _objc, defaults
 from ._objc import BOOL
@@ -37,7 +37,9 @@ __all__ = [
     "set_ui_sounds",
 ]
 
-_SOUND_FOLDERS = (Path("/System/Library/Sounds"), Path("/Library/Sounds"), Path("~/Library/Sounds").expanduser())
+# In the order NSSound's soundNamed: searches them: a user's sound wins over a system one of the same name.
+_SOUND_FOLDERS = (Path("~/Library/Sounds").expanduser(), Path("/Library/Sounds"), Path("/System/Library/Sounds"))
+_SOUND_SUFFIXES = (".aiff", ".aif", ".caf", ".wav")
 
 
 @lru_cache(maxsize=None)
@@ -48,32 +50,59 @@ def _appkit() -> ctypes.CDLL:
     return appkit
 
 
+def _alert_sound_files() -> Iterator[Path]:
+    """Every alert sound file, a folder at a time in :data:`_SOUND_FOLDERS`' order (a folder that can't be read: none)."""
+    for folder in _SOUND_FOLDERS:
+        try:
+            paths = sorted(folder.iterdir()) if folder.is_dir() else []
+        except OSError:
+            continue
+        for path in paths:
+            if path.suffix.lower() in _SOUND_SUFFIXES:
+                yield path
+
+
+def _find_alert_sound(name: str) -> Optional[Path]:
+    """The file of the alert sound ``name`` (one of :func:`names`), the one :func:`play` would play; ``None`` if none."""
+    return next((path for path in _alert_sound_files() if path.stem == name), None)
+
+
 def names() -> List[str]:
     """Return the names of the alert sounds that :func:`play` accepts, as in System Settings › Sound."""
     require_macos()
-    found: Set[str] = set()
-    for folder in _SOUND_FOLDERS:
-        if folder.is_dir():
-            found.update(path.stem for path in folder.iterdir() if path.suffix.lower() in (".aiff", ".aif", ".caf", ".wav"))
+    found: Set[str] = {path.stem for path in _alert_sound_files()}
     return sorted(found)
+
+
+def _load_file(path: Path) -> int:
+    """A retained ``NSSound`` (+1) for the audio file ``path``."""
+    player = _objc.send(_objc.cls("NSSound"), "alloc")
+    player = _objc.send(
+        player, "initWithContentsOfFile:byReference:", _objc.nsstring(str(path)), False, argtypes=(_objc.id, BOOL)
+    )
+    if not player:
+        raise ValueError("{} is not an audio file macOS can play".format(path))
+    return player
 
 
 def _load(sound: Union[str, "os.PathLike[str]"]) -> int:
     """A retained ``NSSound`` (+1) for a sound name or an audio file."""
     _appkit()
     text = os.fspath(sound)
-    looks_like_path = os.sep in text or Path(text).suffix != ""
-    if looks_like_path:
+    # A path object always means a file; so does text with a folder in it, or a ~.
+    if not isinstance(sound, str) or os.sep in text or text.startswith("~"):
         path = Path(text).expanduser().absolute()
         if not path.exists():
             raise FileNotFoundError(str(path))
-        player = _objc.send(_objc.cls("NSSound"), "alloc")
-        player = _objc.send(
-            player, "initWithContentsOfFile:byReference:", _objc.nsstring(str(path)), False, argtypes=(_objc.id, BOOL)
-        )
-        if not player:
-            raise ValueError("{} is not an audio file macOS can play".format(path))
-        return player
+        return _load_file(path)
+    if Path(text).suffix != "":
+        # "done.mp3" is a file here, but "My.Sound" may be an alert sound with a dot in its name
+        # (names() lists it so), which soundNamed: would take for an extension: its file, then.
+        path = Path(text).absolute()
+        found = path if path.exists() else _find_alert_sound(text)
+        if found is None:
+            raise FileNotFoundError(str(path))
+        return _load_file(found)
     player = _objc.send(_objc.cls("NSSound"), "soundNamed:", _objc.nsstring(text), argtypes=(_objc.id,))
     if not player:
         raise ValueError("no alert sound is named {!r}; see macos.sound.names()".format(text))
@@ -88,7 +117,13 @@ def play(sound: Union[str, "os.PathLike[str]"], *, volume: float = 1.0, wait: bo
     Play an alert sound by name (``"Glass"``, ``"Ping"``...) or an audio file.
 
     ``volume`` goes from 0.0 to 1.0, relative to the system volume. By default
-    this returns when the sound ends; ``wait=False`` returns right away.
+    this returns when the sound ends; ``wait=False`` returns right away. The
+    sound plays in this process, though: if the script ends first, the sound
+    stops with it, so keep the default for a script's last sound.
+
+    A :class:`~pathlib.Path` always means a file; so does text with a folder
+    in it (``"./chime"``) or an extension (``"done.mp3"``), unless no such
+    file exists and an alert sound has a dot in its name (``"My.Sound"``).
     """
     if not 0.0 <= volume <= 1.0:
         raise ValueError("volume must be from 0.0 to 1.0, not {}".format(volume))
@@ -133,7 +168,7 @@ def beep() -> None:
 def alert_sound() -> Optional[str]:
     """The name of the alert sound, as in :func:`names`; ``None`` for macOS's own."""
     path = defaults.read(defaults.GLOBAL, "com.apple.sound.beep.sound")
-    return Path(path).stem if path else None
+    return Path(path).stem if isinstance(path, str) and path else None  # a hand-edited value: macOS's own
 
 
 def set_alert_sound(name: Optional[str]) -> None:
@@ -146,11 +181,10 @@ def set_alert_sound(name: Optional[str]) -> None:
         defaults.delete(defaults.GLOBAL, "com.apple.sound.beep.sound")
         return
     require_macos()
-    for folder in _SOUND_FOLDERS:
-        for path in sorted(folder.iterdir()) if folder.is_dir() else ():
-            if path.stem == name and path.suffix.lower() in (".aiff", ".aif", ".caf", ".wav"):
-                defaults.write(defaults.GLOBAL, "com.apple.sound.beep.sound", str(path))
-                return
+    path = _find_alert_sound(name)
+    if path is not None:
+        defaults.write(defaults.GLOBAL, "com.apple.sound.beep.sound", str(path))
+        return
     raise ValueError("no alert sound is named {!r}; see macos.sound.names()".format(name))
 
 
@@ -168,7 +202,8 @@ def set_alert_volume(volume: float) -> None:
 
 def ui_sounds() -> bool:
     """Whether the interface plays sound effects, such as emptying the Trash or taking a screenshot."""
-    return bool(defaults.read("com.apple.systemsound", "com.apple.sound.uiaudio.enabled", default=1))
+    value = defaults.read("com.apple.systemsound", "com.apple.sound.uiaudio.enabled", default=1)
+    return defaults._as_bool(value, True)  # "0" and "NO" too; a hand-edited value: on, macOS's own
 
 
 def set_ui_sounds(on: bool = True) -> None:

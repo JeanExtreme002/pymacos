@@ -15,9 +15,20 @@ jobs:
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      with:
+        fetch-depth: 0  # the whole history, to tell whether the tag is on main
     - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
       with:
         python-version: '3.12'
+    # Releases are made from main: a tag on a branch never merged would use up
+    # its version on PyPI, for good, with code main never had.
+    - name: Check the tag is on main
+      run: |
+        git fetch --no-tags origin main
+        if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+          echo "::error::Release tag $GITHUB_REF_NAME ($GITHUB_SHA) is not on main"
+          exit 1
+        fi
     # A PyPI version can never be uploaded twice, so refuse to publish when the
     # release tag and the package version disagree (e.g. tag v1.1.0 while
     # macos/__init__.py still says 1.0.0).

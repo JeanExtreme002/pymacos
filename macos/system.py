@@ -16,6 +16,7 @@ commands that ship with macOS.
 
 import ctypes
 import json
+import math
 import os
 import platform
 import re
@@ -32,6 +33,7 @@ from ._libc import pids as _pids
 from ._system import (
     LAUNCHCTL_TIMEOUT,
     PROFILER_TIMEOUT,
+    executable,
     framework,
     launchd_disabled,
     launchd_user_domain,
@@ -276,14 +278,25 @@ def _cpu_ticks() -> Tuple[int, int, int, int]:
     return ticks[0], ticks[1], ticks[2], ticks[3]
 
 
+def _check_seconds(name: str, value: float) -> None:
+    """Raise ValueError unless ``value`` is a positive, finite number of seconds: NaN passes ``<= 0``, and inf never ends."""
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("{} must be a positive number of seconds, not {}".format(name, value))
+
+
+def _check_not_nan(name: str, value: Optional[float]) -> None:
+    """Raise ValueError for a NaN ``value``: compared with a clock, it is never reached, and the wait would never end."""
+    if value is not None and math.isnan(value):
+        raise ValueError("{} must be a number of seconds, not {}".format(name, value))
+
+
 def cpu_usage(interval: float = 0.5) -> float:
     """
     How busy the processor is, from 0.0 (idle) to 1.0 (every core busy), over the next ``interval`` seconds.
 
     Like the CPU graph in Activity Monitor, all cores together.
     """
-    if interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    _check_seconds("interval", interval)
     before = _cpu_ticks()
     time.sleep(interval)
     after = _cpu_ticks()
@@ -316,6 +329,20 @@ class MemoryUsage:
         return self.used / self.total if self.total else 0.0
 
 
+def _kernel_page() -> int:
+    """
+    The kernel's page size, in bytes: what host_statistics64 counts in.
+
+    Not hw.pagesize, which is this process's: under Rosetta an Intel Python is told 4 KiB,
+    while Apple silicon's kernel counts 16 KiB pages, and every figure would come out 4 times too small.
+    """
+    try:
+        page = int(ctypes.c_size_t.in_dll(_libc.lib(), "vm_kernel_page_size").value)
+    except ValueError:  # not exported by this libSystem
+        page = 0
+    return page or int.from_bytes(_sysctl("hw.pagesize"), "little") or 4096
+
+
 def memory_usage() -> MemoryUsage:
     """How the memory is used right now: see :class:`MemoryUsage`."""
     require_macos()
@@ -324,7 +351,7 @@ def memory_usage() -> MemoryUsage:
     mach = _libc.lib()
     if mach.host_statistics64(mach.mach_host_self(), _VM_INFO64, ctypes.byref(stats), ctypes.byref(count)) != 0:
         raise MacOSError("could not read the memory statistics")
-    page = int.from_bytes(_sysctl("hw.pagesize"), "little") or 4096
+    page = _kernel_page()
     app = max(0, stats.internal_page_count - stats.purgeable_count)
     wired, compressed = stats.wire_count, stats.compressor_page_count
     return MemoryUsage(
@@ -350,6 +377,8 @@ def wait_for_idle(seconds: Union[float, timedelta], *, timeout: Optional[float] 
     wanted = seconds.total_seconds() if isinstance(seconds, timedelta) else float(seconds)
     if wanted < 0:
         raise ValueError("seconds must not be negative, not {}".format(seconds))
+    _check_not_nan("seconds", wanted)
+    _check_not_nan("timeout", timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         idle = idle_time().total_seconds()
@@ -380,8 +409,8 @@ def wait_for_activity(*, timeout: Optional[float] = None, interval: float = 0.2)
 
     Checks every ``interval`` seconds.
     """
-    if interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    _check_seconds("interval", interval)
+    _check_not_nan("timeout", timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     start, idle_at_start = time.monotonic(), idle_time().total_seconds()
     while True:
@@ -525,6 +554,11 @@ def eject(volume: Union[str, "os.PathLike[str]", Volume]) -> None:
         # Only the volumes Finder shows can be ejected: that leaves out the
         # startup disk's hidden system volumes (/System/Volumes/Data...).
         by_path = [found for found in mounted if found.path == as_path]
+        if not by_path and os.path.isdir(as_path):
+            from .finder import _as_on_disk
+
+            on_disk = _as_on_disk(as_path)  # "/volumes/backup" is "/Volumes/Backup" on a disk that ignores case
+            by_path = [found for found in mounted if found.path == on_disk]
         by_name = [found for found in mounted if found.name == text]
         if not by_path and len(by_name) > 1:
             paths = ", ".join(str(found.path) for found in by_name)
@@ -580,6 +614,7 @@ def mount_image(path: Union[str, "os.PathLike[str]"], *, timeout: float = 300.0)
     import plistlib
     from xml.parsers.expat import ExpatError
 
+    _check_seconds("timeout", timeout)
     image = Path(path).expanduser().resolve()
     if not image.is_file():
         raise FileNotFoundError(str(image))
@@ -678,6 +713,7 @@ def available_updates(*, timeout: float = 300.0) -> List[Update]:
     :class:`~macos.errors.CommandTimeoutError`. To install one, run
     ``softwareupdate --install "<label>"`` (with ``sudo`` for most).
     """
+    _check_seconds("timeout", timeout)
     return _updates(_run(["softwareupdate", "--list"], timeout=timeout))
 
 
@@ -817,12 +853,15 @@ def microphone_in_use() -> bool:
     return any(audio._uint(device.id, "gone") for device in audio.inputs())
 
 
+# A hand-edited preference may hold anything: "NO" written without -bool is text, which bool() takes for true.
+_as_bool, _as_int = defaults._as_bool, defaults._as_int
+
 _DESKTOP_SERVICES = "com.apple.desktopservices"
 
 
 def ds_store_on_network() -> bool:
     """Whether Finder writes ``.DS_Store`` files into network shares it opens."""
-    return not defaults.read(_DESKTOP_SERVICES, "DSDontWriteNetworkStores", default=False)
+    return not _as_bool(defaults.read(_DESKTOP_SERVICES, "DSDontWriteNetworkStores", default=False), False)
 
 
 def set_ds_store_on_network(on: bool = True) -> None:
@@ -836,7 +875,7 @@ def set_ds_store_on_network(on: bool = True) -> None:
 
 def ds_store_on_usb() -> bool:
     """Whether Finder writes ``.DS_Store`` files onto USB drives and other external disks."""
-    return not defaults.read(_DESKTOP_SERVICES, "DSDontWriteUSBStores", default=False)
+    return not _as_bool(defaults.read(_DESKTOP_SERVICES, "DSDontWriteUSBStores", default=False), False)
 
 
 def set_ds_store_on_usb(on: bool = True) -> None:
@@ -846,7 +885,7 @@ def set_ds_store_on_usb(on: bool = True) -> None:
 
 def keep_windows_on_quit() -> bool:
     """Whether apps reopen the windows they had when they quit (unchecks "Close windows when quitting an app")."""
-    return bool(defaults.read(defaults.GLOBAL, "NSQuitAlwaysKeepsWindows", default=False))
+    return _as_bool(defaults.read(defaults.GLOBAL, "NSQuitAlwaysKeepsWindows", default=False), False)
 
 
 def set_keep_windows_on_quit(on: bool = True) -> None:
@@ -865,7 +904,8 @@ def _restart_control_center() -> None:
 
 def battery_percentage_shown() -> bool:
     """Whether the battery icon in the menu bar shows the percentage."""
-    return bool(defaults.read("com.apple.controlcenter", "BatteryShowPercentage", default=False, current_host=True))
+    shown = defaults.read("com.apple.controlcenter", "BatteryShowPercentage", default=False, current_host=True)
+    return _as_bool(shown, False)
 
 
 def set_show_battery_percentage(on: bool = True) -> None:
@@ -876,7 +916,7 @@ def set_show_battery_percentage(on: bool = True) -> None:
 
 def save_to_icloud_by_default() -> bool:
     """Whether new documents are saved to iCloud Drive unless another place is chosen."""
-    return bool(defaults.read(defaults.GLOBAL, "NSDocumentSaveNewDocumentsToCloud", default=True))
+    return _as_bool(defaults.read(defaults.GLOBAL, "NSDocumentSaveNewDocumentsToCloud", default=True), True)
 
 
 def set_save_to_icloud_by_default(on: bool = True) -> None:
@@ -886,7 +926,7 @@ def set_save_to_icloud_by_default(on: bool = True) -> None:
 
 def expanded_save_dialog() -> bool:
     """Whether the Save dialog opens expanded, with the sidebar and the folders."""
-    return bool(defaults.read(defaults.GLOBAL, "NSNavPanelExpandedStateForSaveMode", default=False))
+    return _as_bool(defaults.read(defaults.GLOBAL, "NSNavPanelExpandedStateForSaveMode", default=False), False)
 
 
 def set_expanded_save_dialog(on: bool = True) -> None:
@@ -906,9 +946,6 @@ _CLOCK_OPTIONS = {
 _CLOCK_DATES = ("auto", "always", "never")  # ShowDate's 0, 1 and 2
 
 
-_as_int = defaults._as_int  # a hand-edited preference may hold anything
-
-
 def clock_format() -> Dict[str, object]:
     """
     How the menu bar's clock shows the time.
@@ -917,7 +954,8 @@ def clock_format() -> Dict[str, object]:
     ``date`` is ``"auto"`` (when there's room), ``"always"`` or ``"never"``.
     """
     found: Dict[str, object] = {
-        name: bool(defaults.read(_CLOCK, key, default=default)) for name, (key, default) in _CLOCK_OPTIONS.items()
+        name: _as_bool(defaults.read(_CLOCK, key, default=default), default)
+        for name, (key, default) in _CLOCK_OPTIONS.items()
     }
     date = _as_int(defaults.read(_CLOCK, "ShowDate", default=0), 0)
     found["date"] = _CLOCK_DATES[date] if 0 <= date < len(_CLOCK_DATES) else "auto"
@@ -971,7 +1009,8 @@ def measurement_units() -> str:
     metric = defaults.read(defaults.GLOBAL, "AppleMetricUnits")
     if metric is None:
         return _locale_measurement()
-    return "metric" if metric else "us"
+    # Text that isn't a yes or no (a hand edit) counts as unset: the region decides.
+    return "metric" if _as_bool(metric, _locale_measurement() == "metric") else "us"
 
 
 def set_measurement_units(units: str) -> None:
@@ -1003,7 +1042,7 @@ def set_temperature_unit(unit: str) -> None:
 
 def open_photos_on_device_connect() -> bool:
     """Whether Photos opens by itself when an iPhone, an iPad or a camera is connected."""
-    return not defaults.read("com.apple.ImageCapture", "disableHotPlug", default=False, current_host=True)
+    return not _as_bool(defaults.read("com.apple.ImageCapture", "disableHotPlug", default=False, current_host=True), False)
 
 
 def set_open_photos_on_device_connect(on: bool = True) -> None:
@@ -1065,7 +1104,7 @@ MENU_BAR_ITEMS = tuple(_MENU_BAR_ITEMS)
 def menu_bar_items() -> Dict[str, bool]:
     """Which of Control Center's icons the menu bar shows: ``{"wifi": True, "bluetooth": False, ...}``."""
     return {
-        name: bool(defaults.read("com.apple.controlcenter", "NSStatusItem Visible " + item, default=False))
+        name: _as_bool(defaults.read("com.apple.controlcenter", "NSStatusItem Visible " + item, default=False), False)
         for name, item in _MENU_BAR_ITEMS.items()
     }
 
@@ -1114,9 +1153,19 @@ class SecurityStatus:
 _SECURITY_TIMEOUT = 30.0  # seconds for fdesetup, spctl, csrutil and socketfilterfw: they answer at once
 
 
-def _state(args: List[str], on: str, off: str) -> Optional[bool]:
+def _state(args: List[str], on: str, off: str, *, off_status: Optional[int] = None) -> Optional[bool]:
+    """
+    ``True`` when the command says ``on``, ``False`` when it says ``off``, ``None`` otherwise or when it fails.
+
+    ``off_status``: the exit status the command says ``off`` with (spctl exits 1 with Gatekeeper
+    off), whose standard output the failure would otherwise lose.
+    """
     try:
         output = _run(args, timeout=_SECURITY_TIMEOUT).lower()
+    except CommandError as error:
+        if off_status is None or error.returncode != off_status:
+            return None
+        return False if off in _failed_output(args) else None
     except (MacOSError, OSError):
         return None
     if on in output:
@@ -1124,6 +1173,19 @@ def _state(args: List[str], on: str, off: str) -> Optional[bool]:
     if off in output:
         return False
     return None
+
+
+def _failed_output(args: List[str]) -> str:
+    """The standard output, in lower case, of a command that exits with an error; ``""`` when it can't be run."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            args, executable=executable(args[0]), capture_output=True, text=True, timeout=_SECURITY_TIMEOUT
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (result.stdout or "").lower() if result.returncode != 0 else ""
 
 
 def security_status() -> SecurityStatus:
@@ -1151,7 +1213,7 @@ def security_status() -> SecurityStatus:
     return SecurityStatus(
         filevault=_state(["fdesetup", "status"], "filevault is on", "filevault is off"),
         firewall=firewall,
-        gatekeeper=_state(["spctl", "--status"], "assessments enabled", "assessments disabled"),
+        gatekeeper=_state(["spctl", "--status"], "assessments enabled", "assessments disabled", off_status=1),
         sip=_state(["csrutil", "status"], "status: enabled", "status: disabled"),
     )
 
@@ -1235,7 +1297,22 @@ class _TaskInfo(ctypes.Structure):
 
 def _libproc() -> Tuple[ctypes.CDLL, float]:
     """libproc (part of libSystem), and how many nanoseconds a tick of its CPU times lasts."""
-    return _libc.lib(), _libc.tick()
+    return _libc.lib(), _kernel_tick()
+
+
+@lru_cache(maxsize=None)
+def _kernel_tick() -> float:
+    """
+    How many nanoseconds a tick of libproc's CPU times lasts: the kernel's timebase, from hw.tbfrequency.
+
+    Not :func:`macos._libc.tick`'s mach_timebase_info, which Rosetta answers 1/1 for an Intel
+    Python (its own clock is rescaled), while libproc still counts the kernel's 24 MHz ticks.
+    """
+    try:
+        frequency = int.from_bytes(_sysctl("hw.tbfrequency"), "little")
+    except MacOSError:
+        frequency = 0
+    return 1e9 / frequency if frequency else _libc.tick()
 
 
 @dataclass(frozen=True)
@@ -1356,7 +1433,9 @@ def processes(*, cpu: bool = False) -> List[Process]:
     Other users' processes, the system's included, come without their
     memory, processor time and start, which macOS keeps from this user; an
     administrator's script run with ``sudo`` sees them all. No permission
-    is needed.
+    is needed. When macOS won't list the processes at all, as in some
+    sandboxes, :class:`~macos.errors.MacOSError` is raised rather than an
+    empty list.
     """
     def read_all() -> List[Process]:
         users: Dict[int, Optional[str]] = {}
@@ -1371,10 +1450,18 @@ def processes(*, cpu: bool = False) -> List[Process]:
     return _with_cpu(found, lambda: {process.pid: process for process in read_all()}, started)
 
 
+_PID_MAX = 2**31 - 1  # pid_t's largest: libproc takes an int, and a larger pid would wrap onto another process's
+
+
+def _check_pid(pid: int, least: int, message: str) -> None:
+    """Raise :class:`ValueError` (``message``, formatted with the pid) unless ``pid`` is from ``least`` to pid_t's largest."""
+    if not least <= pid <= _PID_MAX:
+        raise ValueError(message.format(pid))
+
+
 def process(pid: int, *, cpu: bool = False) -> Optional[Process]:
     """The process with ``pid``, or ``None`` when there's none (it may have quit). ``cpu`` works as for :func:`processes`."""
-    if pid <= 0:
-        raise ValueError("pid must be positive, not {}".format(pid))
+    _check_pid(pid, 1, "pid must be positive and fit a pid_t, not {}")
     started = time.monotonic()
     found = _read_process(pid)
     if found is None or not cpu:
@@ -1428,8 +1515,7 @@ def kill(process: Union[int, Process], *, force: bool = False) -> None:
 
     require_macos()
     pid = process.pid if isinstance(process, Process) else int(process)
-    if pid <= 1:
-        raise ValueError("pid must be a process's, not {}".format(pid))
+    _check_pid(pid, 2, "pid must be a process's, not {}")
     if isinstance(process, Process):
         _check_same(process)  # as close to the signal as can be: the pid could still change in between, rarely
     os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -1444,6 +1530,8 @@ _SOCKET_TYPE, _SOCKET_FAMILY, _SOCKET_KIND = _SOCKET + 152, _SOCKET + 160, _SOCK
 _PROTO = _SOCKET + 240  # the in_sockinfo (or tcp_sockinfo, which starts with one)
 _REMOTE_PORT, _LOCAL_PORT, _TCP_STATE = _PROTO, _PROTO + 4, _PROTO + 80
 _REMOTE_ADDRESS, _LOCAL_ADDRESS = _PROTO + 32, _PROTO + 48
+_IP_VERSIONS = _PROTO + 24  # insi_vflag: which of IPv4 (1) and IPv6 (2) the socket carries
+_INI_IPV4, _INI_IPV6 = 0x1, 0x2
 _SOCKINFO_IN, _SOCKINFO_TCP = 1, 2
 _AF_INET, _AF_INET6 = 2, 30
 _SOCK_STREAM, _SOCK_DGRAM = 1, 2
@@ -1537,10 +1625,12 @@ def _sockets(lib: ctypes.CDLL, pid: int) -> List[int]:
     return _descriptors(lib, pid, _PROX_FDTYPE_SOCKET)
 
 
-def _address(raw: bytes, family: int) -> str:
+def _address(raw: bytes, family: int, versions: int = 0) -> str:
     import socket
 
-    if family == _AF_INET:
+    # An IPv6 socket that carries IPv4 (a dual-stack server's IPv4 client) keeps the address as
+    # IPv4's: shown as IPv6, 127.0.0.1 would read "::127.0.0.1". lsof shows it as IPv4 too.
+    if family == _AF_INET or versions & (_INI_IPV4 | _INI_IPV6) == _INI_IPV4:
         return socket.inet_ntop(socket.AF_INET, raw[12:16])  # an IPv4 address sits at the end of the 16 bytes
     return socket.inet_ntop(socket.AF_INET6, raw)
 
@@ -1565,11 +1655,12 @@ def _socket(lib: ctypes.CDLL, pid: int, fd: int) -> Optional[_Socket]:
         protocol, state = "udp", None
     else:
         return None
+    versions = info.raw[_IP_VERSIONS]
     return _Socket(
         protocol=protocol,
-        local_address=_address(info.raw[_LOCAL_ADDRESS:_LOCAL_ADDRESS + 16], family),
+        local_address=_address(info.raw[_LOCAL_ADDRESS:_LOCAL_ADDRESS + 16], family, versions),
         local_port=socket.ntohs(number(_LOCAL_PORT) & 0xFFFF),
-        remote_address=_address(info.raw[_REMOTE_ADDRESS:_REMOTE_ADDRESS + 16], family),
+        remote_address=_address(info.raw[_REMOTE_ADDRESS:_REMOTE_ADDRESS + 16], family, versions),
         remote_port=socket.ntohs(number(_REMOTE_PORT) & 0xFFFF),
         state=state,
     )
@@ -1602,7 +1693,8 @@ def ports() -> List[Port]:
 
     Like ``lsof -i`` without ``sudo``: other users' processes, the
     system's included, are left out, since macOS keeps them from this user.
-    For the connections in progress, see :func:`connections`.
+    For the connections in progress, see :func:`connections`. Raises
+    :class:`~macos.errors.MacOSError` when macOS won't list the processes.
     """
     found = set()
     for pid, name, entry in _each_socket():
@@ -1624,7 +1716,8 @@ def port_owner(port: int, protocol: str = "tcp") -> Optional[Process]:
             owner.kill()
 
     ``protocol`` is ``"tcp"`` (the default) or ``"udp"``. Only this user's
-    processes are seen, as with :func:`ports`.
+    processes are seen, as with :func:`ports`, and
+    :class:`~macos.errors.MacOSError` is raised when macOS won't list them.
     """
     if not 0 < port < 65536:
         raise ValueError("port must be from 1 to 65535, not {}".format(port))
@@ -1648,7 +1741,8 @@ def connections() -> List[Connection]:
 
     TCP connections in any state but listening (servers are in :func:`ports`),
     and UDP sockets connected to an address. Like ``lsof -i`` without
-    ``sudo``: only this user's processes are seen.
+    ``sudo``: only this user's processes are seen. Raises
+    :class:`~macos.errors.MacOSError` when macOS won't list the processes.
     """
     found = set()
     for pid, name, entry in _each_socket():
@@ -1694,10 +1788,13 @@ def open_files(process: Union[int, Process]) -> List[Path]:
     """
     The files and folders a process (a :class:`Process` or its pid) has open, with its working folder and executable.
 
-    ``[]`` for another user's process, which macOS keeps from this user.
+    ``[]`` for another user's process, which macOS keeps from this user. A pid
+    that can't be a process's (0, negative, past pid_t's largest) raises
+    :class:`ValueError`.
     """
     require_macos()
     pid = process.pid if isinstance(process, Process) else int(process)
+    _check_pid(pid, 1, "pid must be positive and fit a pid_t, not {}")
     lib, _ = _libproc()
     return sorted({Path(entry.path) for entry in _files(lib, pid)})
 
@@ -1717,8 +1814,10 @@ def who_uses(path: Union[str, "os.PathLike[str]"]) -> List[Process]:
         macos.system.who_uses("/Volumes/Backup")   # [Process(name='Preview', ...)]: why the disk won't eject
 
     For a folder or a disk, anything inside counts; a file counts under any
-    of its names (hard links). Like ``lsof`` without ``sudo``: only this
-    user's processes are seen.
+    of its names (hard links). The path may be in any case (``/volumes/backup``)
+    when the disk ignores case, as a Mac's does. Like ``lsof`` without ``sudo``:
+    only this user's processes are seen. Raises :class:`~macos.errors.MacOSError`
+    when macOS won't list the processes.
     """
     target = os.path.realpath(os.path.expanduser(os.fspath(path)))
     if not os.path.exists(target):
@@ -1727,6 +1826,12 @@ def who_uses(path: Union[str, "os.PathLike[str]"]) -> List[Process]:
     lib, _ = _libproc()
     details = os.stat(target)
     same_file = None if os.path.isdir(target) else (details.st_dev & 0xFFFFFFFF, details.st_ino)
+    if same_file is None:
+        # The kernel names what's open in the disk's own case: compared with a folder given in
+        # another, nothing inside would match. (A file is matched by its inode, whatever its case.)
+        from .finder import _as_on_disk
+
+        target = str(_as_on_disk(target))
 
     resolved: Dict[str, str] = {}  # the libraries, fonts and caches every process holds: resolved once, not per process
 
@@ -1808,8 +1913,8 @@ def network_usage(interval: Optional[float] = None) -> List[NetworkUsage]:
     included. Goes through ``nettop``; one that doesn't answer within 120
     seconds past ``interval`` raises :class:`~macos.errors.CommandTimeoutError`.
     """
-    if interval is not None and interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    if interval is not None:
+        _check_seconds("interval", interval)
     require_macos()
     found = []
     for pid, name, received, sent in _nettop_samples(interval):
@@ -1868,10 +1973,10 @@ def energy_usage(interval: float = 1.0) -> List[EnergyUsage]:
     by Apple silicon Macs; on Intel Macs it reads 0. Only this user's
     processes are seen, as with :func:`processes`. A macOS too old to
     report it (``rusage_info_v6``, macOS 12) raises
-    :class:`~macos.errors.NotSupportedError`.
+    :class:`~macos.errors.NotSupportedError`; one that won't list the
+    processes, :class:`~macos.errors.MacOSError`.
     """
-    if interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    _check_seconds("interval", interval)
     require_macos()
     lib, _ = _libproc()
     started = time.monotonic()
@@ -2207,8 +2312,8 @@ def logs(
         raise ValueError("level must be one of {}, not {!r}".format(", ".join(_LOG_LEVELS), level))
     if limit is not None and limit < 1:
         raise ValueError("limit must be 1 or more, or None, not {}".format(limit))
-    if timeout is not None and timeout <= 0:
-        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):  # NaN passes "<= 0"
+        raise ValueError("timeout must be a positive number of seconds, or None, not {}".format(timeout))
     require_macos()
     return _read_log(_log_show(process, subsystem, contains, level, last), limit, timeout)
 

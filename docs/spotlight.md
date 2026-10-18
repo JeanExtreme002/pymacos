@@ -26,7 +26,8 @@ macos.spotlight.search("kind:pdf", folder="~/Documents", limit=10)
 Spotlight answers at once, unless it's stuck or the folder is on a slow
 network volume: `timeout` stops a search still going after that many
 seconds, and raises {class}`~macos.CommandTimeoutError` (a `TimeoutError`).
-By default it waits. {func}`~macos.spotlight.search_name` takes it too.
+By default, or with `math.inf`, it waits. {func}`~macos.spotlight.search_name`
+takes it too. A `limit` that isn't an `int` raises `TypeError`.
 
 ## Searching by file name
 
@@ -70,6 +71,11 @@ data["kMDItemContentCreationDate"]            # datetime.datetime(2026, 9, 1, 14
 Dates are {class}`datetime.datetime` objects in UTC, without a time zone. Files that Spotlight hasn't
 indexed, such as those in folders it skips, only have the basic
 `kMDItemFS...` attributes (name, size, dates).
+
+A missing file, a broken symbolic link (links are followed) and an empty path
+raise `FileNotFoundError`, and a file in a folder you can't open raises
+`PermissionError`. A file that `mdls` can't read, such as one macOS's privacy
+protections guard, raises {class}`~macos.CommandError` naming it.
 
 ## Reference
 

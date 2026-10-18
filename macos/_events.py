@@ -8,6 +8,8 @@ the user's input.
 
 import collections
 import ctypes
+import math
+import numbers
 import threading
 import time
 from contextlib import contextmanager
@@ -179,6 +181,19 @@ _TAP_DISABLED = (0xFFFFFFFE, 0xFFFFFFFF)  # by timeout, by user input: turn the 
 _SLICE = 0.1  # seconds the run loop turns before a listener checks for stop() and its deadline
 
 
+def check_timeout(timeout: Optional[float]) -> None:
+    """
+    Raise :class:`ValueError` unless ``timeout`` is ``None`` (no limit) or a number of seconds, 0 or more.
+
+    Before anything is set up, so a bad one fails the call itself: a NaN
+    would otherwise never be reached, and listen for good.
+    """
+    if timeout is None:
+        return
+    if isinstance(timeout, bool) or not isinstance(timeout, numbers.Real) or math.isnan(timeout) or timeout < 0:
+        raise ValueError("timeout must be 0 or more, or None, not {!r}".format(timeout))
+
+
 class Listener:
     """
     What one listening call (``run()``, ``wait()``, ``watch()``) gathers: its own queue, stop flag and errors.
@@ -205,6 +220,7 @@ class Listener:
         Each turn has its own autorelease pool, so what the callbacks
         autorelease doesn't pile up over a long run.
         """
+        check_timeout(timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             self.check()
@@ -329,10 +345,12 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
     A listen-only tap on this thread's run loop: the events go on to the apps
     unchanged. ``convert`` runs inside the tap, so it must be quick; returning
     ``None`` skips the event, and an exception it raises comes out of the
-    iteration. Stops after ``timeout`` seconds, or when the caller stops
-    iterating. ``denied`` is the error when macOS refuses the tap: raised
+    iteration. Stops after ``timeout`` seconds (see :func:`check_timeout`), or
+    when the caller stops iterating, or calls ``close()``, from any thread.
+    ``denied`` is the error when macOS refuses the tap: raised
     here, by the call itself, not by the first turn of the iteration.
     """
+    check_timeout(timeout)
     listener = Listener()
 
     def handle(kind: int, event: int) -> int:
@@ -342,7 +360,7 @@ def listen(kinds: List[int], convert: Callable[[int, int], Any], timeout: Option
         return event
 
     tap = Tap(kinds, handle, listener, listen_only=True, denied=denied)
-    return _Listening(tap, listener.drain(timeout))
+    return _Listening(tap, listener, listener.drain(timeout))
 
 
 # Taps closed from a thread other than the one whose run loop they were on: kept for good, see
@@ -359,8 +377,9 @@ class _Listening:
     iterates to the end, breaks out, calls :meth:`close`, or drops it.
     """
 
-    def __init__(self, tap: Tap, items: Iterator[Any]) -> None:
+    def __init__(self, tap: Tap, listener: Listener, items: Iterator[Any]) -> None:
         self._tap: Optional[Tap] = tap
+        self._listener = listener
         self._items = items
         self._thread = threading.get_ident()  # the tap is on this thread's run loop: only it can hear it
 
@@ -385,8 +404,11 @@ class _Listening:
                 # callback's code would go from under it: keep it, as the blocks are kept. Kept before
                 # closing, so a close that fails halfway (silenced in __del__) can't free it either.
                 _RETIRED.append(tap)
-            # The tap first: it's what intercepts the keys. Closing the generator can fail when it's
-            # running on another thread ("generator already executing"); then it ends on its own.
+            # Stopped first: the owner's loop, if it's turning the run loop right now, ends within a
+            # slice, timeout or not (with the tap gone nothing else would ever end it). Then the tap:
+            # it's what intercepts the keys. Closing the generator fails while it's running on the
+            # owner's thread ("generator already executing"); then the stop ends it there.
+            self._listener.stop.set()
             tap.close()
             try:
                 self._items.close()  # type: ignore[attr-defined]  # a generator: its finally runs now

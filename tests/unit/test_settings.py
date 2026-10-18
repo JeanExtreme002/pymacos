@@ -126,8 +126,8 @@ def test_dock_more_settings(prefs):
         dock.set_autohide_delay(-1)
     with pytest.raises(ValueError, match="16 to 128"):
         dock.set_magnification(200)
-    with pytest.raises(ValueError, match="'genie' or 'scale'"):
-        dock.set_minimize_effect("suck")
+    with pytest.raises(ValueError, match="effect must be one of 'genie', 'scale'"):
+        dock.set_minimize_effect("explode")
 
 
 def test_finder_more_settings(prefs, fake_run, tmp_path):
@@ -773,6 +773,18 @@ def test_security_status(monkeypatch):
     monkeypatch.setattr(system, "_run", lambda args, **kwargs: answers[args[0]])
 
     assert system.security_status() == system.SecurityStatus(filevault=True, firewall=True, gatekeeper=False, sip=None)
+
+    # Real spctl exits 1 with Gatekeeper off: its output then comes from _failed_output.
+    def spctl_fails(args, **kwargs):
+        if args[0] == "spctl":
+            raise macos.CommandError(args, 1)
+        return answers[args[0]]
+
+    monkeypatch.setattr(system, "_run", spctl_fails)
+    monkeypatch.setattr(system, "_failed_output", lambda args: "assessments disabled\n")
+    assert system.security_status().gatekeeper is False
+    monkeypatch.setattr(system, "_failed_output", lambda args: "")
+    assert system.security_status().gatekeeper is None
 
     def failing(args, **kwargs):
         raise macos.MacOSError("no")

@@ -38,7 +38,7 @@ No permission is needed.
 | {func}`~macos.dock.autohide_delay` | {func}`~macos.dock.set_autohide_delay` | seconds a hidden Dock waits to show; `0` shows it at once |
 | {func}`~macos.dock.magnification` | {func}`~macos.dock.set_magnification` | the size icons grow to under the pointer, or `None` |
 | {func}`~macos.dock.show_recents` | {func}`~macos.dock.set_show_recents` | recent apps in their own section |
-| {func}`~macos.dock.minimize_effect` | {func}`~macos.dock.set_minimize_effect` | `"genie"` or `"scale"` |
+| {func}`~macos.dock.minimize_effect` | {func}`~macos.dock.set_minimize_effect` | `"genie"`, `"scale"` or `"suck"` (not in System Settings, but the Dock has it) |
 | {func}`~macos.dock.autohide_duration` | {func}`~macos.dock.set_autohide_duration` | seconds a hidden Dock takes to slide in; `0` has no animation, `None` is macOS's own |
 | {func}`~macos.dock.show_indicators` | {func}`~macos.dock.set_show_indicators` | a dot under the open apps |
 | {func}`~macos.dock.dim_hidden_apps` | {func}`~macos.dock.set_dim_hidden_apps` | translucent icons for hidden apps (⌘H) |
@@ -85,9 +85,14 @@ macos.dock.remove_app("com.apple.Maps")   # by name, bundle ID or path
 ```
 
 {func}`~macos.dock.add_app` finds the app as {func}`macos.apps.open` does,
-raising {class}`~macos.AppNotFoundError` when it isn't installed, and doesn't
-add it twice. {func}`~macos.dock.remove_app` takes it out of the Dock and
-returns whether it was there; the app stays installed.
+raising {class}`~macos.AppNotFoundError` when it isn't installed, or when the
+path is a folder that isn't an app ({func}`~macos.dock.add_folder` is for
+that), and doesn't add it twice. {func}`~macos.dock.remove_app` takes it out
+of the Dock and returns whether it was there; the app stays installed. Both
+take a `pathlib.Path` too, such as the `path` of an app from
+{func}`~macos.dock.apps`. A negative `index` (here and for
+{func}`~macos.dock.add_spacer`) counts from the right, as for `list.insert`:
+`-1` is before the last app.
 
 Blank spaces group the apps: {func}`~macos.dock.add_spacer` adds one, at the
 end or before the app at `index`, and {func}`~macos.dock.remove_spacers`
@@ -102,7 +107,9 @@ macos.dock.remove_spacers()   # 2
 ## Folders
 
 {func}`~macos.dock.add_folder` keeps a folder next to the Trash (an app
-bundle is refused: that's {func}`~macos.dock.add_app`'s). `display` is
+bundle is refused, since that's {func}`~macos.dock.add_app`'s job. An empty
+path raises `ValueError`, here and in {func}`~macos.dock.remove_folder`, since
+it would mean the current folder). `display` is
 its icon, a `"stack"` of its items (the default) or the `"folder"`; `view` is
 how it opens, `"automatic"` (the default), `"fan"`, `"grid"` or `"list"`; and
 `sort` orders its items by `"name"`, `"date_added"` (the default),

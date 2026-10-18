@@ -18,7 +18,9 @@ make several changes with one restart, put them in a
 """
 
 import ctypes
+import math
 import os
+import plistlib
 import time
 import warnings
 from dataclasses import dataclass
@@ -136,7 +138,7 @@ def restart() -> None:
 
 def autohide() -> bool:
     """Whether the Dock hides until the pointer reaches the edge of the screen."""
-    return bool(defaults.read(_DOMAIN, "autohide", default=False))
+    return defaults._as_bool(defaults.read(_DOMAIN, "autohide", default=False), False)
 
 
 def set_autohide(on: bool = True) -> None:
@@ -265,17 +267,47 @@ def _matches(tile: Dict[str, Any], app: str) -> bool:
     return bool(wanted & candidates)
 
 
-def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
+def _app_name(app: Union[str, "os.PathLike[str]"], function: str) -> str:
+    """``app`` as add_app() and remove_app() look it up: a ``Path`` (from :func:`apps`, say) is always a path."""
+    if isinstance(app, str):
+        return app
+    if not isinstance(app, os.PathLike):
+        raise TypeError("{}() takes an app's name, bundle ID or path, not {!r}".format(function, app))
+    path = os.fspath(app)
+    if not isinstance(path, str):
+        raise TypeError("{}() takes a path as text, not {!r}".format(function, app))
+    # Made absolute, so a relative Path("Safari.app") is a path, not the name of an app.
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def _is_bundle(path: Path) -> bool:
+    """Whether ``path`` is an app bundle: a ``.app``, or a folder whose Info.plist says it's an application."""
+    if path.suffix.casefold() == ".app":
+        return True
+    try:
+        with open(path / "Contents" / "Info.plist", "rb") as file:
+            info = plistlib.load(file)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    return isinstance(info, dict) and info.get("CFBundlePackageType") == "APPL"
+
+
+def add_app(app: Union[str, "os.PathLike[str]"], *, index: Optional[int] = None) -> DockApp:
     """
     Keep ``app`` in the Dock, at the end or at ``index`` (in :func:`apps`, so 0 is right after Finder), and return it.
 
     ``app`` is a name (``"Safari"``), a bundle ID or the path of a ``.app``,
     found as :func:`macos.apps.open` finds apps. An app already kept isn't
-    added twice.
+    added twice. A folder that isn't an app is refused
+    (:class:`~macos.AppNotFoundError`): :func:`add_folder` is for it.
+    ``index`` counts as for ``list.insert``: ``-1`` is before the last app.
     """
+    app = _app_name(app, "add_app")
     path = Path(_apps._locate(app))
     if not path.exists():
         raise AppNotFoundError("{!r} is not an installed app".format(app))
+    if not _is_bundle(path):  # before any tile is touched: a Dock folder at that path stays
+        raise AppNotFoundError("{!r} is not an app (a folder goes in the Dock with add_folder())".format(app))
     tiles = _tiles()
     paths = [_tile_path(tile) for tile in tiles]  # once: each is a realpath of its own
     # Kept as a tile of another kind (a folder tile at that path, say), on either side of the Dock:
@@ -317,14 +349,17 @@ def add_app(app: str, *, index: Optional[int] = None) -> DockApp:
 def _insert(tiles: List[Dict[str, Any]], tile: Dict[str, Any], index: Optional[int]) -> None:
     # index counts the apps apps() lists: find its place among all the tiles, spacers included.
     app_positions = [position for position, entry in enumerate(tiles) if _is_app(entry)]
+    if index is not None and index < 0:  # from the right, as for list.insert: -1 is before the last app
+        index = max(index + len(app_positions), 0)
     if index is None or index >= len(app_positions):
         tiles.append(tile)
     else:
-        tiles.insert(app_positions[max(index, 0)], tile)
+        tiles.insert(app_positions[index], tile)
 
 
-def remove_app(app: str) -> bool:
+def remove_app(app: Union[str, "os.PathLike[str]"]) -> bool:
     """Take ``app`` (a name, bundle ID or path) out of the Dock; return whether it was there. It stays installed."""
+    app = _app_name(app, "remove_app")
     if not app.strip():
         raise ValueError("remove_app() needs an app's name, bundle ID or path")
     # A path is resolved as add_app() resolves it; a bare "Safari.app" is a name, as for add_app().
@@ -360,7 +395,7 @@ HOT_CORNER_ACTIONS = tuple(action for action in _ACTIONS if action)
 # The keys a hot corner can wait for, as the modifier flags the Dock keeps.
 _CORNER_MODIFIERS = {"shift": 131072, "ctrl": 262144, "option": 524288, "cmd": 1048576}
 _CORNER_MODIFIER_ALIASES = {"command": "cmd", "control": "ctrl", "opt": "option", "alt": "option"}
-_EFFECTS = ("genie", "scale")
+_EFFECTS = ("genie", "scale", "suck")  # suck: hidden from System Settings, but the Dock takes it
 
 
 def hot_corners() -> Dict[str, Optional[str]]:
@@ -431,15 +466,15 @@ def autohide_delay() -> float:
 
 def set_autohide_delay(seconds: float) -> None:
     """Show a hidden Dock after ``seconds`` at the edge: ``0`` shows it at once, a classic tweak."""
-    if seconds < 0:
-        raise ValueError("seconds must not be negative, not {}".format(seconds))
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("seconds must be finite and must not be negative, not {}".format(seconds))
     defaults.write(_DOMAIN, "autohide-delay", float(seconds))
     restart()
 
 
 def magnification() -> Optional[int]:
     """The size icons grow to under the pointer, in points; ``None`` when they don't."""
-    if not defaults.read(_DOMAIN, "magnification", default=False):
+    if not defaults._as_bool(defaults.read(_DOMAIN, "magnification", default=False), False):
         return None
     return int(round(defaults._as_float(defaults.read(_DOMAIN, "largesize", default=128), 128.0)))
 
@@ -458,7 +493,7 @@ def set_magnification(size: Optional[int]) -> None:
 
 def show_recents() -> bool:
     """Whether the Dock shows recent apps that aren't kept in it, in their own section."""
-    return bool(defaults.read(_DOMAIN, "show-recents", default=True))
+    return defaults._as_bool(defaults.read(_DOMAIN, "show-recents", default=True), True)
 
 
 def set_show_recents(on: bool = True) -> None:
@@ -468,22 +503,26 @@ def set_show_recents(on: bool = True) -> None:
 
 
 def minimize_effect() -> str:
-    """How windows minimize into the Dock: ``'genie'`` or ``'scale'``."""
+    """How windows minimize into the Dock: ``'genie'``, ``'scale'`` or ``'suck'``."""
     found = defaults.read(_DOMAIN, "mineffect", default="genie")
     return found if found in _EFFECTS else "genie"
 
 
 def set_minimize_effect(effect: str) -> None:
-    """Minimize windows with the ``'genie'`` effect or the quicker ``'scale'``."""
+    """
+    Minimize windows with the ``'genie'`` effect, the quicker ``'scale'``, or ``'suck'``.
+
+    ``'suck'`` isn't offered by System Settings, but the Dock has it.
+    """
     if effect not in _EFFECTS:
-        raise ValueError("effect must be 'genie' or 'scale', not {!r}".format(effect))
+        raise ValueError("effect must be one of {}, not {!r}".format(", ".join(map(repr, _EFFECTS)), effect))
     defaults.write(_DOMAIN, "mineffect", effect)
     restart()
 
 
 def show_indicators() -> bool:
     """Whether the Dock shows a dot under the apps that are open."""
-    return bool(defaults.read(_DOMAIN, "show-process-indicators", default=True))
+    return defaults._as_bool(defaults.read(_DOMAIN, "show-process-indicators", default=True), True)
 
 
 def set_show_indicators(on: bool = True) -> None:
@@ -494,7 +533,7 @@ def set_show_indicators(on: bool = True) -> None:
 
 def minimize_to_app() -> bool:
     """Whether minimized windows go into their app's icon, instead of their own place in the Dock."""
-    return bool(defaults.read(_DOMAIN, "minimize-to-application", default=False))
+    return defaults._as_bool(defaults.read(_DOMAIN, "minimize-to-application", default=False), False)
 
 
 def set_minimize_to_app(on: bool = True) -> None:
@@ -518,8 +557,8 @@ def set_autohide_duration(seconds: Optional[float]) -> None:
     if seconds is None:
         defaults.delete(_DOMAIN, "autohide-time-modifier")
     else:
-        if seconds < 0:
-            raise ValueError("seconds must not be negative, not {}".format(seconds))
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("seconds must be finite and must not be negative, not {}".format(seconds))
         defaults.write(_DOMAIN, "autohide-time-modifier", float(seconds))
     restart()
 
@@ -531,6 +570,7 @@ def add_spacer(*, index: Optional[int] = None, small: bool = False) -> None:
     """
     Add a blank space between the Dock's apps, at the end or before the app at ``index`` in :func:`apps`.
 
+    ``index`` counts as for ``list.insert``: ``-1`` is before the last app.
     ``small=True`` adds a narrower one. They group the apps, and
     :func:`remove_spacers` takes them all out.
     """
@@ -553,7 +593,7 @@ def remove_spacers() -> int:
 
 def auto_rearrange_spaces() -> bool:
     """Whether Mission Control reorders the spaces (desktops) by the most recently used."""
-    return bool(defaults.read(_DOMAIN, "mru-spaces", default=True))
+    return defaults._as_bool(defaults.read(_DOMAIN, "mru-spaces", default=True), True)
 
 
 def set_auto_rearrange_spaces(on: bool = True) -> None:
@@ -564,7 +604,7 @@ def set_auto_rearrange_spaces(on: bool = True) -> None:
 
 def separate_spaces_per_display() -> bool:
     """Whether each display has its own spaces (and menu bar), as by default."""
-    return not defaults.read("com.apple.spaces", "spans-displays", default=False)
+    return not defaults._as_bool(defaults.read("com.apple.spaces", "spans-displays", default=False), False)
 
 
 def set_separate_spaces_per_display(on: bool = True) -> None:
@@ -578,7 +618,7 @@ def set_separate_spaces_per_display(on: bool = True) -> None:
 
 def dim_hidden_apps() -> bool:
     """Whether the icons of hidden apps (⌘H) are translucent, to tell them apart."""
-    return bool(defaults.read(_DOMAIN, "showhidden", default=False))
+    return defaults._as_bool(defaults.read(_DOMAIN, "showhidden", default=False), False)
 
 
 def set_dim_hidden_apps(on: bool = True) -> None:
@@ -589,7 +629,7 @@ def set_dim_hidden_apps(on: bool = True) -> None:
 
 def only_open_apps() -> bool:
     """Whether the Dock shows only the apps that are open, like a taskbar."""
-    return bool(defaults.read(_DOMAIN, "static-only", default=False))
+    return defaults._as_bool(defaults.read(_DOMAIN, "static-only", default=False), False)
 
 
 def set_only_open_apps(on: bool = True) -> None:
@@ -600,7 +640,7 @@ def set_only_open_apps(on: bool = True) -> None:
 
 def launch_animation() -> bool:
     """Whether an app's icon bounces while it opens."""
-    return bool(defaults.read(_DOMAIN, "launchanim", default=True))
+    return defaults._as_bool(defaults.read(_DOMAIN, "launchanim", default=True), True)
 
 
 def set_launch_animation(on: bool = True) -> None:
@@ -611,7 +651,7 @@ def set_launch_animation(on: bool = True) -> None:
 
 def group_windows_by_app() -> bool:
     """Whether Mission Control groups the windows by app."""
-    return bool(defaults.read(_DOMAIN, "expose-group-apps", default=False))
+    return defaults._as_bool(defaults.read(_DOMAIN, "expose-group-apps", default=False), False)
 
 
 def set_group_windows_by_app(on: bool = True) -> None:
@@ -622,7 +662,7 @@ def set_group_windows_by_app(on: bool = True) -> None:
 
 def switch_to_space_with_app() -> bool:
     """Whether switching to an app moves to a space (desktop) where it has windows open."""
-    return bool(defaults.read(defaults.GLOBAL, "AppleSpacesSwitchOnActivate", default=True))
+    return defaults._as_bool(defaults.read(defaults.GLOBAL, "AppleSpacesSwitchOnActivate", default=True), True)
 
 
 def set_switch_to_space_with_app(on: bool = True) -> None:
@@ -710,6 +750,8 @@ def add_folder(
         raise ValueError("sort must be one of {}, not {!r}".format(", ".join(_SORTS), sort))
     if display not in _DISPLAYS:
         raise ValueError("display must be 'stack' or 'folder', not {!r}".format(display))
+    if not str(folder).strip():  # "" would resolve to the current folder
+        raise ValueError("add_folder() needs a folder's path")
     path = Path(os.path.realpath(os.path.expanduser(str(folder))))
     if not path.is_dir():
         raise NotADirectoryError(str(path))
@@ -740,6 +782,8 @@ def add_folder(
 
 def remove_folder(folder: Union[str, "os.PathLike[str]"]) -> bool:
     """Take ``folder`` out of the Dock; return whether it was there. The folder itself stays."""
+    if not str(folder).strip():  # "" would resolve to the current folder
+        raise ValueError("remove_folder() needs a folder's path")
     path = Path(os.path.realpath(os.path.expanduser(str(folder))))
     tiles = _others()
     kept = [tile for tile in tiles if _tile_path(tile) != path]

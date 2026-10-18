@@ -18,11 +18,13 @@ way: naming one with ``app=`` raises :class:`~macos.errors.NotSupportedError`,
 and by default they're passed over.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 from . import apps
-from ._system import applescript, run as _run
+from ._system import APPLESCRIPT_TIMEOUT, applescript, osascript_error, run as _run
 from .errors import AppNotFoundError, CommandError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = ["Tab", "BROWSERS", "current_tab", "tabs", "open", "run_js"]
@@ -63,10 +65,13 @@ on clean(s)
 end clean
 """
 
+# Checked again in the script, where the check doesn't launch it: a browser quit between the
+# check in Python and the script's first event would be opened again by that event.
 _LIST = {
     _SAFARI: _CLEAN + """
 on run argv
     set out to ""
+    if application "{app}" is not running then return out
     tell application "{app}"
         repeat with w in (every window)
             try
@@ -93,6 +98,7 @@ end run
     _CHROMIUM: _CLEAN + """
 on run argv
     set out to ""
+    if application "{app}" is not running then return out
     tell application "{app}"
         repeat with w in (every window)
             set wid to id of w
@@ -184,16 +190,36 @@ end run
 """
 )
 
+# The result comes back marked by its first character: "s" and a string, as the page made it
+# (osascript adds a newline, and nothing else), "v," and a value the browser gave as a number,
+# a list or a record (printed as osascript prints them), "n" for undefined and null, "x" when the
+# browser quit meanwhile. Unmarked, a page's "missing value" would pass for undefined.
+_RUN_JS_RESULT = """    try
+        set pymacosResult to pymacosResult
+    on error number -2753 -- nothing came back: undefined, for Safari
+        return "n"
+    end try
+    if pymacosResult is missing value then return "n"
+    if class of pymacosResult is text then return "s" & pymacosResult
+    return {"v", pymacosResult}
+end run
+"""
 _RUN_JS = {
     _SAFARI: _READ_STDIN
-    + """    tell application "{app}" to return do JavaScript pymacosScript in current tab of front window
-end run
-""",
+    + """    if application "{app}" is not running then return "x"
+    tell application "{app}" to set pymacosResult to do JavaScript pymacosScript in current tab of front window
+"""
+    + _RUN_JS_RESULT,
     _CHROMIUM: _READ_STDIN
-    + """    tell application "{app}" to return execute active tab of front window javascript pymacosScript
-end run
-""",
+    + """    if application "{app}" is not running then return "x"
+    tell application "{app}" to set pymacosResult to execute active tab of front window javascript pymacosScript
+"""
+    + _RUN_JS_RESULT,
 }
+
+# Chromium's error for JavaScript from Apple Events turned off, by its number: its text is in the
+# browser's language. Safari's number isn't known, so its English text is matched only.
+_CHROMIUM_JS_OFF = re.compile(r"\(12\)$")
 
 
 @dataclass(frozen=True)
@@ -307,11 +333,17 @@ def open(url: str, app: Optional[str] = None) -> None:
     ``app`` works as in :func:`tabs`; with no browser running, it opens
     the default browser, and raises :class:`~macos.errors.AppNotFoundError`
     when macOS has none. To open a URL in whatever handles it, see :func:`macos.open`.
-    A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option.
+    A ``url`` starting with ``-`` raises :class:`ValueError`: ``open`` would take it as an option;
+    so does one with no scheme (``"example.com"``, not ``"https://example.com"``). A browser
+    given with ``app`` that isn't installed raises :class:`~macos.errors.AppNotFoundError`.
     """
     if url.startswith("-"):
         # `open` has no "--": "-g" or "-F" would be one of its options, not a URL.
         raise ValueError("url must not start with '-', not {!r}".format(url))
+    if not urlsplit(url).scheme:
+        # `open` would take it for a file in the current directory, and quote its path (the URL,
+        # token and all) in its error. The URL stays out of this message too.
+        raise ValueError("url must have a scheme, such as https://")
     browser = _browser(app)
     if browser is None:
         default = apps.default_browser()
@@ -320,14 +352,19 @@ def open(url: str, app: Optional[str] = None) -> None:
             # file:// URL to a .command or an app would run it, and this opens web pages only.
             # The URL stays out of the message: a link may carry a token, and errors end up in logs.
             raise AppNotFoundError("macOS has no default web browser to open the URL in")
-        _run(["open", "-a", default, url])
-        return
-    _run(["open", "-a", browser, url])
+        browser = default
+    try:
+        _run(["open", "-a", browser, url])
+    except CommandError as error:
+        if apps._app_missing(error):
+            # From None: the CommandError's command holds the URL.
+            raise AppNotFoundError("{} isn't installed".format(browser)) from None
+        raise  # there, but it won't open: its reason says why
 
 
 def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     """
-    Run JavaScript in the current tab, and return its result as text (``None`` for ``undefined``).
+    Run JavaScript in the current tab, and return its result as text (``None`` for ``undefined`` and ``null``).
 
     ::
 
@@ -338,24 +375,44 @@ def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     JavaScript from Apple Events* (show the Develop menu in Settings ›
     Advanced); in Chrome and the others, *View › Developer › Allow
     JavaScript from Apple Events*. Otherwise it raises
-    :class:`~macos.errors.PermissionDeniedError`. Return ``JSON.stringify(...)``
-    to get structured data back. With no browser running, it raises
+    :class:`~macos.errors.PermissionDeniedError`. A string comes back as the
+    page made it, its newlines included. Other values are turned into
+    AppleScript's by the browser, and come back as ``osascript`` prints
+    them: a number with 15 digits at most, in E-notation from 2**29
+    (``Date.now()`` gives ``'1.760612345123E+12'``), an array as ``'1, 2'``.
+    Return ``String(...)`` to get JavaScript's own text, and
+    ``JSON.stringify(...)`` for structured data. With no browser running, it raises
     :class:`~macos.errors.MacOSError`. The script reaches ``osascript`` on its
     standard input, so it doesn't show in the process list.
     """
     browser = _browser(app)
     if browser is None or not _is_running(browser):
         raise MacOSError("no browser is running")
+    source = _RUN_JS[_KINDS[browser]].replace("{app}", browser)
     try:
-        output = applescript(browser, _RUN_JS[_KINDS[browser]].replace("{app}", browser), input=script)
+        # Not applescript(): its text mode would turn the page's \r\n and \r into \n.
+        output = _run(["osascript", "-e", source], input=script, timeout=APPLESCRIPT_TIMEOUT, exact_newlines=True)
     except CommandError as error:
-        if "Allow JavaScript from Apple Events" in error.stderr or "JavaScript through AppleScript" in error.stderr:
+        english = "Allow JavaScript from Apple Events" in error.stderr or "JavaScript through AppleScript" in error.stderr
+        if english or (_KINDS[browser] == _CHROMIUM and _CHROMIUM_JS_OFF.search(error.stderr)):
             where = "Develop" if _KINDS[browser] == _SAFARI else "View › Developer"
             raise PermissionDeniedError(
                 "{} doesn't allow JavaScript from scripts: turn on {} › Allow JavaScript from Apple Events".format(
                     browser, where
                 )
             ) from None
-        raise
-    result = output.rstrip("\n")
-    return None if result == "missing value" else result
+        raise osascript_error(error, browser) from None
+    if output.endswith("\n"):
+        output = output[:-1]  # osascript's own newline: the page's are kept
+    mark, result = output[:1], output[1:]
+    if mark == "s":
+        return result
+    if mark == "v":
+        # The list's own comma, and its space unless the value is empty: {} prints as "v,"
+        result = result[1:] if result.startswith(",") else result
+        return result[1:] if result.startswith(" ") else result
+    if mark == "n":
+        return None
+    if mark == "x":
+        raise MacOSError("no browser is running")
+    raise MacOSError("{} gave the result in a form this version of pymacos can't read".format(browser))

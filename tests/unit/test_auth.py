@@ -10,6 +10,36 @@ import macos
 def test_auth_argument_checks():
     with pytest.raises(ValueError, match="reason must not be empty"):
         macos.auth.confirm("  ")
+    for reason in (None, 5, b"deploy"):
+        with pytest.raises(TypeError, match="reason must be a str, not"):
+            macos.auth.confirm(reason)
+        with pytest.raises(TypeError, match="reason must be a str, not"):
+            macos.auth.required(reason)  # when decorating, not at the first call
+
+
+def test_a_bad_timeout_raises_before_the_prompt_shows(prompts):
+    replies, _, sent = prompts
+    for timeout in (0, -1, float("nan")):
+        with pytest.raises(ValueError, match="timeout must be positive, or None"):
+            macos.auth.confirm("deploy", timeout=timeout)
+    assert not any(selector.startswith("evaluatePolicy:") for selector in sent)
+
+
+def test_confirm_without_a_timeout_waits_for_the_answer(prompts, monkeypatch):
+    import math
+
+    from macos import _objc
+
+    replies, _, _ = prompts
+    waited = []
+
+    def run_until(condition, timeout):
+        waited.append(timeout)
+        return condition()
+
+    monkeypatch.setattr(_objc, "run_until", run_until)
+    replies.append(True)
+    assert macos.auth.confirm("deploy", timeout=None) is True and waited == [math.inf]
 
 
 class _Replies(list):
@@ -222,3 +252,32 @@ def test_confirm_tells_declined_from_cant_ask(prompts):
         macos.auth.confirm("deploy")
     replies.extend([True])
     assert macos.auth.confirm("deploy") is True  # and the next prompt is unaffected
+
+
+def test_required_keeps_a_coroutine_function_one_and_asks_when_awaited(monkeypatch):
+    import asyncio
+
+    asked = []
+    monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: asked.append(reason) or True)
+
+    @macos.auth.required("deploy")
+    async def deploy(target):
+        return "deployed " + target
+
+    assert inspect.iscoroutinefunction(deploy) and not hasattr(deploy, "__wrapped__")
+    assert str(inspect.signature(deploy)) == "(target)"
+    coroutine = deploy("prod")
+    assert asked == []  # made, not awaited: no prompt yet
+    assert asyncio.run(coroutine) == "deployed prod" and asked == ["deploy"]
+
+    monkeypatch.setattr(macos.auth, "confirm", lambda reason, only_touch_id=False: False)
+    with pytest.raises(macos.PermissionDeniedError):
+        asyncio.run(deploy("prod"))
+
+
+def test_required_refuses_an_async_generator_function():
+    async def feed():
+        yield 1
+
+    with pytest.raises(TypeError, match="async generator"):
+        macos.auth.required("read the feed")(feed)

@@ -294,3 +294,119 @@ def test_dock_tiles_keep_file_urls_as_the_dock_writes_them(dock_settings):
     url = store["persistent-others"][0]["tile-data"]["file-data"]["_CFURLString"]
     assert url == "file://{}/My%20Projects/".format(app.parent) and kept.path == folder
     assert [entry.path for entry in macos.dock.folders()] == [folder]  # read back through the same escapes
+
+
+def test_dock_add_app_refuses_a_folder_that_is_not_an_app(dock_settings, monkeypatch, tmp_path):
+    store, restarts, app = dock_settings
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    monkeypatch.setattr(dock._apps, "_locate", lambda name: str(downloads))
+    folder = {"tile-data": {"file-data": {"_CFURLString": "file://{}/".format(downloads), "_CFURLStringType": 15}},
+              "tile-type": "directory-tile"}  # fmt: skip
+    store["persistent-others"] = [folder]
+    apps_before = list(store["persistent-apps"])
+    with pytest.raises(macos.AppNotFoundError, match="add_folder"):
+        macos.dock.add_app(str(downloads))
+    # Nothing touched: the Dock folder at that path stays, and no tile joins the apps.
+    assert store["persistent-others"] == [folder] and store["persistent-apps"] == apps_before and restarts == []
+    # A bundle without the .app suffix is still an app, by what its Info.plist says.
+    bundle = tmp_path / "Tool"
+    (bundle / "Contents").mkdir(parents=True)
+    with open(bundle / "Contents" / "Info.plist", "wb") as file:
+        dock.plistlib.dump({"CFBundlePackageType": "APPL"}, file)
+    monkeypatch.setattr(dock._apps, "_locate", lambda name: str(bundle))
+    assert macos.dock.add_app(str(bundle)).path == bundle
+
+
+def test_dock_add_and_remove_app_take_a_path(dock_settings, monkeypatch, tmp_path):
+    store, restarts, app = dock_settings
+    located = []
+    monkeypatch.setattr(dock._apps, "_locate", lambda name: located.append(name) or str(app))
+    assert macos.dock.add_app(app).path == app and located == [str(app)]
+    # What apps() returns goes back in as it is.
+    assert macos.dock.remove_app(macos.dock.apps()[-1].path) is True
+    assert [entry.name for entry in macos.dock.apps()] == ["Safari"]
+    # A relative Path is a path, not the name of an app.
+    monkeypatch.chdir(tmp_path)
+    macos.dock.add_app(dock.Path("Code.app"))
+    assert located[-1] == str(app) and dock._apps._is_path(located[-1])
+    assert macos.dock.remove_app(dock.Path("Code.app")) is True
+    with pytest.raises(TypeError, match="name, bundle ID or path"):
+        macos.dock.add_app(42)  # type: ignore[arg-type]
+
+    class BytesPath:
+        def __fspath__(self):
+            return b"/Applications/Safari.app"
+
+    with pytest.raises(TypeError, match="as text"):
+        macos.dock.remove_app(BytesPath())  # type: ignore[arg-type]
+
+
+def test_dock_negative_index_counts_from_the_right(dock_settings, monkeypatch, tmp_path):
+    store, _, app = dock_settings
+    mail = {"tile-data": {"file-data": {"_CFURLString": "file:///Applications/Mail.app/", "_CFURLStringType": 15},
+                          "file-label": "Mail"}, "tile-type": "file-tile"}  # fmt: skip
+    store["persistent-apps"].append(mail)  # Safari, Mail
+    macos.dock.add_spacer(index=-1)
+    assert [tile["tile-data"].get("file-label") for tile in store["persistent-apps"]] == ["Safari", None, "Mail"]
+    macos.dock.add_app("Code", index=-1)  # the spacer isn't counted: before Mail, the last app
+    assert [entry.name for entry in macos.dock.apps()] == ["Safari", "Code", "Mail"]
+    assert store["persistent-apps"][2]["tile-data"]["file-label"] == "Code"
+    macos.dock.add_spacer(index=-100, small=True)  # far past the first: first
+    assert store["persistent-apps"][0]["tile-type"] == "small-spacer-tile"
+    store["persistent-apps"] = []
+    macos.dock.add_spacer(index=-1)  # no apps at all: at the end
+    assert [tile["tile-type"] for tile in store["persistent-apps"]] == ["spacer-tile"]
+
+
+def test_dock_autohide_timings_refuse_numbers_that_are_not_finite(dock_settings):
+    store, restarts, _ = dock_settings
+    for seconds in (float("nan"), float("inf"), -1.0):
+        with pytest.raises(ValueError, match="finite"):
+            macos.dock.set_autohide_delay(seconds)
+        with pytest.raises(ValueError, match="finite"):
+            macos.dock.set_autohide_duration(seconds)
+    assert "autohide-delay" not in store and "autohide-time-modifier" not in store and restarts == []
+    macos.dock.set_autohide_delay(0)
+    assert store["autohide-delay"] == 0.0
+
+
+def test_dock_folders_refuse_an_empty_path(dock_settings):
+    store, restarts, _ = dock_settings
+    with pytest.raises(ValueError, match="needs a folder"):
+        macos.dock.add_folder("")
+    with pytest.raises(ValueError, match="needs a folder"):
+        macos.dock.remove_folder("")
+    assert "persistent-others" not in store and restarts == []
+
+
+def test_dock_minimize_effect_reads_and_writes_suck(dock_settings):
+    store, _, _ = dock_settings
+    store["mineffect"] = "suck"  # hidden from System Settings, but the Dock takes it
+    assert macos.dock.minimize_effect() == "suck"
+    macos.dock.set_minimize_effect("scale")
+    macos.dock.set_minimize_effect("suck")
+    assert store["mineffect"] == "suck"
+    store["mineffect"] = "wobbly"
+    assert macos.dock.minimize_effect() == "genie"
+    with pytest.raises(ValueError, match="'genie', 'scale', 'suck'"):
+        macos.dock.set_minimize_effect("wobbly")
+
+
+def test_dock_switches_read_text_written_without_bool_as_macos_does(dock_settings):
+    store, _, _ = dock_settings
+    switches = {"autohide": dock.autohide, "show-recents": dock.show_recents,
+                "show-process-indicators": dock.show_indicators, "minimize-to-application": dock.minimize_to_app,
+                "mru-spaces": dock.auto_rearrange_spaces, "showhidden": dock.dim_hidden_apps,
+                "static-only": dock.only_open_apps, "launchanim": dock.launch_animation,
+                "expose-group-apps": dock.group_windows_by_app,
+                "AppleSpacesSwitchOnActivate": dock.switch_to_space_with_app}  # fmt: skip
+    for off in ("NO", "false", "0"):  # `defaults write com.apple.dock autohide NO` stores the text
+        store.update(dict.fromkeys(switches, off), magnification=off, largesize=96.0, **{"spans-displays": off})
+        assert [read() for read in switches.values()] == [False] * len(switches), off
+        assert dock.magnification() is None and dock.separate_spaces_per_display() is True
+    store.update(dict.fromkeys(switches, "YES"), magnification="true", **{"spans-displays": "1"})
+    assert all(read() for read in switches.values())
+    assert dock.magnification() == 96 and dock.separate_spaces_per_display() is False
+    store.update(dict.fromkeys(switches, "maybe"))  # unreadable text reads as the default
+    assert (dock.autohide(), dock.show_recents(), dock.launch_animation()) == (False, True, True)

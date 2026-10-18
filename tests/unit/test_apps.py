@@ -197,6 +197,55 @@ def test_unquarantine(tmp_path):
         macos.apps.is_quarantined(tmp_path / "missing.app")
 
 
+def test_quarantine_checks_the_path_without_taking_an_empty_one_for_the_current_folder(tmp_path, monkeypatch):
+    import ctypes
+    import os
+
+    asked = []
+
+    class Unmarked:
+        def getxattr(self, path, *args):
+            asked.append(path)
+            ctypes.set_errno(macos._libc.ENOATTR)
+            return -1
+
+        def removexattr(self, path, *args):
+            asked.append(path)
+            ctypes.set_errno(macos._libc.ENOATTR)
+            return -1
+
+    monkeypatch.setattr(macos._libc, "lib", lambda: Unmarked())
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "file").write_text("")
+    for function in (macos.apps.is_quarantined, macos.apps.unquarantine):
+        with pytest.raises(FileNotFoundError):
+            function("")  # not the current folder, and all it holds
+        with pytest.raises(FileNotFoundError):
+            function(tmp_path / "missing.app")
+        with pytest.raises(FileNotFoundError):
+            function(tmp_path / "file" / "below")  # under a file: missing, not "not a directory"
+    assert asked == []
+
+    # A broken link has a mark of its own: it is there.
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "gone")
+    assert macos.apps.is_quarantined(link) is False and macos.apps.unquarantine(link) == 0
+
+    # A file in a folder that can't be looked in isn't called missing.
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "file").write_text("")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.X_OK):
+            pytest.skip("running as root: every folder can be looked in")
+        for function in (macos.apps.is_quarantined, macos.apps.unquarantine):
+            with pytest.raises(PermissionError):
+                function(locked / "file")
+    finally:
+        locked.chmod(0o755)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="extended attributes as macOS keeps them")
 def test_is_quarantined_reports_errors_other_than_a_missing_mark(tmp_path, monkeypatch):
     import ctypes
@@ -725,8 +774,10 @@ def test_open_returns_a_copy_of_the_app_running_from_elsewhere(fake_run, monkeyp
     # A copy that shows up at another path only after the launch isn't what was asked for.
     monkeypatch.setattr(apps, "_bundle_path", lambda handle: "/Applications/Tool.app")
     monkeypatch.setattr(apps, "_running_pids", lambda bundle_id: [])
-    with pytest.raises(macos.AppNotFoundError, match="did not show up"):
+    with pytest.raises(macos.AppNotFoundError, match="did not show up") as raised:
         apps.open("Tool", timeout=0)
+    # A TimeoutError like every other wait, and still the AppNotFoundError it was before.
+    assert isinstance(raised.value, macos.errors.AppLaunchTimeoutError) and isinstance(raised.value, TimeoutError)
 
 
 def test_open_in_the_background_returns_the_copy_running_from_elsewhere_once_the_wait_ends(fake_run, monkeypatch):
@@ -819,3 +870,240 @@ def test_open_doesnt_take_a_copy_that_was_in_front_already_before_the_one_asked_
 
     monkeypatch.setattr(apps.time, "sleep", sleep)
     assert apps.open("Tool") == launched  # not the copy that was already in front
+
+
+def test_installed_takes_no_number_or_list_for_a_bundle_id_or_a_name(tmp_path, monkeypatch):
+    """A hand-made Info.plist with an integer for an ID mustn't stop every other app from being uninstalled."""
+    import plistlib
+
+    from macos import apps
+
+    def bundle(name, info):
+        path = tmp_path / "Applications" / name
+        (path / "Contents").mkdir(parents=True)
+        (path / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+        return path
+
+    chat = bundle("Chat.app", {"CFBundleName": "Chat", "CFBundleIdentifier": "com.example.Chat"})
+    odd = bundle("Odd.app", {"CFBundleDisplayName": ["Odd"], "CFBundleName": "", "CFBundleIdentifier": 12345})
+    weird = apps._installed_app(str(odd))
+    assert weird is not None and (weird.name, weird.bundle_id) == ("Odd", None)
+    assert apps._installed_app(str(bundle("Empty.app", {"CFBundleIdentifier": ""}))).bundle_id is None
+
+    home = tmp_path / "home"
+    (home / "Library" / "Caches" / "com.example.Chat").mkdir(parents=True)
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(chat))
+    monkeypatch.setattr(apps, "_installed", lambda: [apps._installed_app(str(chat)), weird])
+    monkeypatch.setattr(apps.Path, "home", lambda: home)
+    assert apps.uninstall("Chat", dry_run=True) == [chat, home / "Library/Caches/com.example.Chat"]
+
+
+def test_a_translocated_app_is_known_by_the_path_it_was_opened_from(fake_run, monkeypatch):
+    """A downloaded app runs from a random AppTranslocation copy: open, get and uninstall must still see it."""
+    import contextlib
+    import types
+
+    from macos import apps
+
+    asked = "/Users/me/Downloads/Tool.app"
+    copy = "/private/var/folders/x/AppTranslocation/0A1B/d/Tool.app"
+    released = []
+    security = types.SimpleNamespace(SecTranslocateCreateOriginalPathForURL=lambda url, error: 99)
+    monkeypatch.setattr(apps, "_translocation", lambda: security)
+    monkeypatch.setattr(
+        apps,
+        "_cf",
+        types.SimpleNamespace(
+            file_url=lambda path, directory=False: 5, owned=contextlib.nullcontext, release=released.append
+        ),
+    )
+    monkeypatch.setattr(apps, "_app_path", lambda url: asked if url == 99 else None)
+    monkeypatch.setattr(apps.os.path, "realpath", lambda path: path)
+    assert apps._real_bundle_path(copy) == asked
+    assert apps._real_bundle_path("/Applications/Tool.app") == "/Applications/Tool.app"  # not asked about
+    monkeypatch.setattr(apps, "_translocation", lambda: None)  # a macOS that can't say
+    assert apps._real_bundle_path(copy) == copy
+    monkeypatch.setattr(apps, "_translocation", lambda: security)
+
+    running = apps.App("Tool", "com.example.tool", 8, copy)
+    monkeypatch.setattr(apps, "running", lambda include_background=False: [running])
+    assert apps.get(asked) == running and apps.get("/Applications/Tool.app") is None
+    assert apps.get(running.path) == running  # the copy's own path, as App.path hands it back
+
+    # open(): the new process at the copy's path is the one launched, not a copy that ran before.
+    monkeypatch.setattr(apps, "_locate", lambda name: asked)
+    monkeypatch.setattr(apps, "_bundle_id", lambda path: "com.example.tool")
+    monkeypatch.setattr(apps, "_running_pids", lambda bundle_id: [])
+    monkeypatch.setattr(apps, "_objc", _FakeObjC([8]))
+    monkeypatch.setattr(apps, "_running_application_class", lambda: 1)
+    monkeypatch.setattr(apps, "_bundle_path", lambda handle: apps._real_bundle_path(copy))
+    monkeypatch.setattr(apps, "_app", lambda handle: running)
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+    assert apps.open(asked, timeout=0) == running
+    monkeypatch.setattr(apps, "_locate", lambda name: copy)
+    assert apps.open(copy, timeout=0) == running  # opened by the copy's path
+
+
+def test_uninstall_refuses_an_app_running_from_a_translocated_copy(tmp_path, monkeypatch):
+    import plistlib
+
+    from macos import apps
+
+    bundle = tmp_path / "Downloads" / "Tool.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.tool"}))
+    copy = "/private/var/folders/x/AppTranslocation/0A1B/d/Tool.app"
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "_installed", lambda: [])
+    monkeypatch.setattr(apps.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(apps, "running", lambda include_background=False: [apps.App("Tool", None, 8, copy)])
+    monkeypatch.setattr(apps, "_real_bundle_path", lambda path: str(bundle) if path == copy else path)
+    monkeypatch.setattr(apps.finder, "trash", lambda path: pytest.fail("a running app was moved"))
+    with pytest.raises(macos.MacOSError, match="is running"):
+        apps.uninstall("Tool")
+
+
+def test_an_app_whose_pid_went_to_another_app_is_no_longer_running(monkeypatch):
+    """Once it has quit, its pid may go to another app: that one mustn't be force-quit or hidden in its place."""
+    from macos import apps
+
+    class Fake(_FakeObjC):
+        dates = {7: 100.0}
+
+        def send(self, receiver, selector, *args, **kwargs):
+            if selector == "launchDate":
+                self.sent.append(selector)
+                return ("date", receiver) if receiver in self.dates else None
+            if selector == "timeIntervalSinceReferenceDate":
+                return self.dates[receiver[1]]
+            return super().send(receiver, selector, *args, **kwargs)
+
+    fake = Fake([7])
+    monkeypatch.setattr(apps, "_objc", fake)
+    monkeypatch.setattr(apps, "_handle", lambda pid: pid)
+    app = apps.App("TextEdit", "com.apple.TextEdit", 7, "/Applications/TextEdit.app", _launched=100.0)
+    assert app.is_running and app.hide()
+    assert app == apps.App("TextEdit", "com.apple.TextEdit", 7, "/Applications/TextEdit.app")  # not compared
+    assert "_launched" not in repr(app)
+
+    Fake.dates = {7: 250.0}  # pid 7 is another process now
+    assert not app.is_running
+    for call in (app.hide, lambda: app.quit(force=True)):
+        with pytest.raises(macos.AppNotFoundError, match="no longer running"):
+            call()
+    assert "forceTerminate" not in fake.sent and "hide" in fake.sent  # hide only from the first, live call
+    Fake.dates = {}  # nor a process macOS has no date for
+    assert not app.is_running
+    assert apps.App("Tool", None, 7, None).is_running  # one made by hand has no date to check
+
+
+def test_activate_looks_the_app_up_in_an_autorelease_pool(fake_run, monkeypatch):
+    import contextlib
+
+    from macos import apps
+
+    pools = []
+
+    class Fake(_FakeObjC):
+        def autorelease_pool(self):
+            pools.append(len(lookups))
+            return contextlib.nullcontext()
+
+    lookups = []
+    monkeypatch.setattr(apps, "_objc", Fake([7]))
+    monkeypatch.setattr(apps, "_handle", lambda pid: lookups.append(pid) or pid)
+    assert apps.App("Tool", None, 7, "/Applications/Tool.app").activate(timeout=0)
+    assert pools[0] == 0 and fake_run.args == ["open", "-a", "/Applications/Tool.app"]  # a pool before the lookup
+
+
+@pytest.mark.parametrize("timeout", [None, float("inf")])
+def test_setting_a_default_app_can_wait_as_long_as_it_takes(monkeypatch, timeout):
+    import threading
+
+    from macos import apps
+
+    class Lock:
+        def __init__(self):
+            self.lock, self.timeouts = threading.Lock(), []
+
+        def acquire(self, *args, **kwargs):
+            self.timeouts.append(kwargs.get("timeout"))
+            return self.lock.acquire(*args, **kwargs)
+
+        def release(self):
+            self.lock.release()
+
+    lock, waits = Lock(), []
+    monkeypatch.setattr(apps, "_default_call", lock)
+    monkeypatch.setattr(apps, "_default_handler", lambda generation: 1)
+    monkeypatch.setattr(apps, "framework", lambda name: None)
+    monkeypatch.setattr(apps._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(apps._objc, "nsstring", lambda text: 1)
+    monkeypatch.setattr(apps._objc, "file_url", lambda path: 1)
+    monkeypatch.setattr(apps._objc, "send", lambda receiver, selector, *args, **kwargs: 1)
+
+    def run_until(done, wait):
+        waits.append(wait)
+        apps._default_answer(apps._default_generation[0], None)  # confirmed
+        return done()
+
+    monkeypatch.setattr(apps._objc, "run_until", run_until)
+    apps._set_default_with_workspace(1, "/Applications/Tool.app", "public.plain-text", "Tool", "txt", timeout)
+    assert lock.timeouts == [None] and waits == [float("inf")]  # no OverflowError, no TypeError
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1])
+def test_setting_a_default_app_refuses_a_timeout_that_isnt_one(monkeypatch, timeout):
+    from macos import apps
+
+    monkeypatch.setattr(apps, "_locate", lambda name: pytest.fail("looked the app up"))
+    with pytest.raises(ValueError, match="timeout"):
+        apps.set_default_for("txt", "TextEdit", timeout=timeout)
+
+
+def test_uninstall_refuses_an_app_on_the_system_volume(tmp_path, monkeypatch):
+    """Before macOS 13, Safari is a real bundle in /Applications, on the sealed, read-only system volume."""
+    import os
+    import plistlib
+    import types
+
+    from macos import apps
+
+    bundle = tmp_path / "Applications" / "Safari.app"
+    (bundle / "Contents").mkdir(parents=True)
+    (bundle / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleName": "Safari", "CFBundleIdentifier": "com.apple.Safari"})
+    )
+    devices = {"/": 1, str(bundle): 1}
+    monkeypatch.setattr(apps.os, "stat", lambda path: types.SimpleNamespace(st_dev=devices.get(str(path), 2)))
+    monkeypatch.setattr(apps.os, "statvfs", lambda path: types.SimpleNamespace(f_flag=os.ST_RDONLY))
+    monkeypatch.setattr(apps, "require_macos", lambda: None)
+    monkeypatch.setattr(apps, "_locate", lambda name: str(bundle))
+    monkeypatch.setattr(apps, "_installed", lambda: pytest.fail("listed the other apps"))
+    with pytest.raises(macos.MacOSError, match="comes with macOS"):
+        apps.uninstall("Safari", dry_run=True)
+
+    assert apps._on_system_volume(str(bundle))
+    devices[str(bundle)] = 2  # the Data volume, where /Applications's own apps are
+    assert not apps._on_system_volume(str(bundle))
+    devices[str(bundle)] = 1
+    monkeypatch.setattr(apps.os, "statvfs", lambda path: types.SimpleNamespace(f_flag=0))  # / writable: older macOS
+    assert not apps._on_system_volume(str(bundle))
+
+
+def test_get_returns_the_first_of_the_running_apps_its_name_matches(monkeypatch):
+    from macos import apps
+
+    first = apps.App(name="Tool", bundle_id="com.example.tool", pid=1, path="/Applications/Tool.app")
+    copy = apps.App(name="Tool", bundle_id="com.example.tool", pid=2, path="/Users/me/Tool.app")
+    other = apps.App(name="Other", bundle_id="com.example.other", pid=3, path="/Applications/Other.app")
+    monkeypatch.setattr(apps, "running", lambda include_background=False: [first, other, copy])
+    monkeypatch.setattr(apps, "_real_bundle_path", lambda path: path.replace("/Users/me", "/Applications"))
+
+    assert list(apps._matches("tool")) == [first, copy] and apps.get("tool") == first
+    assert list(apps._matches("com.example.other")) == [other] == [apps.get("Other.app")]
+    # Paths: both sides go through _real_bundle_path, so the copy's path finds both copies.
+    assert list(apps._matches("/Users/me/Tool.app")) == [first, copy]
+    assert list(apps._matches("Missing")) == [] and apps.get("Missing") is None

@@ -145,6 +145,10 @@ def _handler(image: Image) -> int:
 
 
 def _request(languages: Optional[Sequence[str]], fast: bool) -> int:
+    # A string is a sequence too: "zh-Hans" would go as seven one-letter codes, which Vision
+    # ignores without a word, reading the text as English.
+    if isinstance(languages, str):
+        raise TypeError("languages takes a list of codes, e.g. [{!r}], not a string".format(languages))
     request = _objc.send(_objc.send(_objc.cls("VNRecognizeTextRequest"), "alloc"), "init")
     request = _objc.send(request, "autorelease")
     _objc.send(request, "setRecognitionLevel:", _FAST if fast else _ACCURATE, argtypes=(NSInteger,), restype=None)
@@ -152,6 +156,11 @@ def _request(languages: Optional[Sequence[str]], fast: bool) -> int:
     if languages:
         codes = _objc.nsarray_of([_objc.nsstring(code) for code in languages])
         _objc.send(request, "setRecognitionLanguages:", codes, argtypes=(_objc.id,), restype=None)
+    elif _objc.send(
+        request, "respondsToSelector:", _objc.sel("setAutomaticallyDetectsLanguage:"), argtypes=(_objc.SEL,), restype=BOOL
+    ):
+        # Off by default (macOS 13+): Vision would read every script as English.
+        _objc.send(request, "setAutomaticallyDetectsLanguage:", True, argtypes=(BOOL,), restype=None)
     return request
 
 
@@ -193,8 +202,35 @@ def _perform(image: Image, request: int) -> List[int]:
         restype=BOOL,
     )
     if not ok:
-        raise _error(error, "the image could not be read", prefix="the image could not be read: ")
+        raise _read_error(image, error)
     return list(_objc.nsarray(_objc.send(request, "results")))
+
+
+# VNErrorInvalidImage: what Vision says of empty bytes, a text file or a folder,
+# but also of a real image too small to analyze (2 pixels high, say).
+_INVALID_IMAGE = 13
+
+
+def _read_error(image: Image, error: ctypes.c_void_p) -> Exception:
+    """
+    What a failed ``performRequests:error:`` on ``image`` raises.
+
+    An input that isn't an image raises what :func:`macos._objc.ciimage` does
+    (``IsADirectoryError``, ``PermissionError``, ``ValueError``), so every
+    function of the module fails the same way; Vision's own failures, a
+    readable image too small to analyze among them, stay
+    :class:`~macos.errors.MacOSError` with Vision's message.
+    """
+    if error.value:
+        domain = _objc.pystring(_objc.send(error.value, "domain"))
+        code = _objc.send(error.value, "code", restype=NSInteger)
+        if domain == "com.apple.Vision" and code == _INVALID_IMAGE:
+            # The same code for both: only decoding the input tells them apart.
+            try:
+                _objc.ciimage(image)
+            except (OSError, ValueError) as exc:
+                return exc
+    return _error(error, "the image could not be read", prefix="the image could not be read: ")
 
 
 def _box(observation: int) -> Tuple[float, float, float, float]:
@@ -219,9 +255,14 @@ def lines(image: Image, *, languages: Optional[Sequence[str]] = None, fast: bool
     ``image`` is a path or the image file's bytes, in any format macOS can
     open (PNG, JPEG, HEIC, TIFF...); for a PDF, draw its pages with
     :func:`macos.pdf.render`. ``languages`` lists the languages to
-    expect, most likely first (e.g. ``["fr-FR", "en-US"]``; see
-    :func:`languages`); by default Vision detects them. ``fast=True`` trades
-    accuracy for speed.
+    expect, most likely first, as a list (e.g. ``["fr-FR", "en-US"]``; see
+    :func:`languages`). By default Vision detects them (macOS 13+, accurate
+    mode only; before that, and with ``fast=True``, it reads Latin script, so
+    pass ``languages`` for Chinese, Japanese, Cyrillic...). ``fast=True``
+    trades accuracy for speed.
+
+    An input that isn't an image raises ``ValueError`` (``IsADirectoryError``
+    for a folder).
     """
     _load()
     found: List[Any] = []
@@ -457,7 +498,7 @@ def remove_background(image: Image, *, crop: bool = False) -> Optional[bytes]:
             restype=BOOL,
         )
         if not ok:
-            raise _error(error, "the image could not be read", prefix="the image could not be read: ")
+            raise _read_error(image, error)
         results = list(_objc.nsarray(_objc.send(request, "results")))
         if not results:
             return None
@@ -582,12 +623,15 @@ def image_distance(first: Image, second: Image) -> float:
     pixels) score less reliably. See :func:`duplicates` to group a whole folder.
     """
     _load()
-    one, two = _feature_print(first), _feature_print(second)
+    one = _feature_print(first)
     try:
-        return _distance(one, two)
+        two = _feature_print(second)  # may raise: the first print is released all the same
+        try:
+            return _distance(one, two)
+        finally:
+            _objc.send(two, "release", restype=None)
     finally:
         _objc.send(one, "release", restype=None)
-        _objc.send(two, "release", restype=None)
 
 
 def duplicates(images: Sequence[Image], *, threshold: float = 0.3) -> List[List[Image]]:

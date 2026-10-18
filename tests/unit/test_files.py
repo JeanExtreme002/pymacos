@@ -1,8 +1,11 @@
 """Unit tests for :mod:`macos._files`. They run on any platform."""
 
+import ctypes
+import errno
 import os
 import stat
 import threading
+import types
 
 import pytest
 
@@ -99,6 +102,161 @@ def test_a_symbolic_link_stays_one_and_its_file_is_replaced(tmp_path):
     assert link.is_symlink() and os.readlink(str(link)) == str(real)
     assert real.read_bytes() == b"new"
     assert sorted(os.listdir(str(tmp_path / "data"))) == ["memo-2024.bin"]
+
+
+@pytest.mark.parametrize("kind", ["empty folder", "folder", "link to a folder", "link loop"])
+def test_an_output_that_cant_be_a_file_fails_before_the_work(tmp_path, kind):
+    # A folder named like the output: a long recording mustn't run, then be thrown away.
+    target = tmp_path / "clip.mov"
+    if kind == "link loop":
+        target.symlink_to(tmp_path / "other.mov")
+        (tmp_path / "other.mov").symlink_to(target)
+        expected = errno.ELOOP
+    else:
+        folder = tmp_path / "clips" if kind == "link to a folder" else target
+        folder.mkdir()
+        if kind == "folder":
+            (folder / "inside.txt").write_bytes(b"keep")
+        if kind == "link to a folder":
+            target.symlink_to(folder)
+        expected = errno.EISDIR
+    calls = []
+    with pytest.raises(OSError) as raised:
+        _files.write_atomically(target, calls.append)
+    assert calls == [] and raised.value.errno == expected
+    assert raised.value.filename == str(target)  # the caller's path, not a hidden staging one
+    if kind == "folder":
+        assert (target / "inside.txt").read_bytes() == b"keep"
+    assert not [name for name in os.listdir(str(tmp_path)) if name.startswith(".")]
+
+
+class _FakeXattrs:
+    """libSystem's extended attribute calls, over a dictionary per path, and its access list calls."""
+
+    def __init__(self, files, lists=None):
+        self.files = files
+        self.lists = lists or {}  # path: the access list, an int standing for an acl_t
+        self.set, self.freed = [], []
+
+    def _put(self, data, buffer, size):
+        if buffer is None:
+            return len(data)
+        if size < len(data):
+            return -1
+        ctypes.memmove(buffer, data, len(data))
+        return len(data)
+
+    def listxattr(self, path, buffer, size, options):
+        names = b"".join(name + b"\0" for name in self.files.get(path, {}))
+        return self._put(names, buffer, size)
+
+    def getxattr(self, path, name, buffer, size, position, options):
+        value = self.files.get(path, {}).get(name)
+        return -1 if value is None else self._put(value, buffer, size)
+
+    def setxattr(self, path, name, buffer, size, position, options):
+        attributes = self.files.setdefault(path, {})
+        if options & 0x0002 and name in attributes:  # XATTR_CREATE
+            return -1
+        attributes[name] = ctypes.string_at(buffer, size)
+        return 0
+
+    def acl_get_file(self, path, kind):
+        assert kind == 0x100  # ACL_TYPE_EXTENDED
+        return self.lists.get(path)
+
+    def acl_set_file(self, path, kind, access):
+        assert kind == 0x100 and os.path.exists(os.fsdecode(path))
+        self.set.append((path, access, open(os.fsdecode(path), "rb").read()))
+        return 0
+
+    def acl_free(self, access):
+        self.freed.append(access)
+        return 0
+
+
+def test_replacing_a_file_keeps_its_tags_and_attributes(tmp_path, monkeypatch):
+    target = tmp_path / "photo.jpg"
+    target.write_bytes(b"old")
+    old = os.fsencode(str(target))
+    fake = _FakeXattrs(
+        lists={old: 7},
+        files={
+            old: {
+                b"com.apple.metadata:_kMDItemUserTags": b"Work",
+                b"com.apple.quarantine": b"0081;app",
+                b"user.note": b"old note",
+                b"com.apple.ResourceFork": b"stale",  # these describe the old content
+                b"com.apple.TextEncoding": b"utf-8",
+                b"com.apple.cs.CodeSignature": b"sig",
+            }
+        },
+    )
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", lambda: fake)
+
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"new")
+        new = os.fsencode(str(temporary))
+        fake.files[new] = {b"user.note": b"the writer's"}  # set by the tool that wrote it: kept
+
+    assert target.read_bytes() == b"new"
+    assert fake.files[new] == {
+        b"user.note": b"the writer's",
+        b"com.apple.metadata:_kMDItemUserTags": b"Work",
+        b"com.apple.quarantine": b"0081;app",
+    }
+    # The access list goes on the new file once it's in place, not on the staged one.
+    assert fake.set == [(old, 7, b"new")] and fake.freed == [7]
+
+
+def test_a_failed_move_leaves_no_access_list_and_no_staging_folder(tmp_path, monkeypatch):
+    # An old file whose list denies deleting it: copied to the staged file, the failed
+    # move would leave a staging folder no one can delete.
+    target = tmp_path / "locked.txt"
+    target.write_bytes(b"old")
+    fake = _FakeXattrs({}, lists={os.fsencode(str(target)): 7})
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", lambda: fake)
+
+    def refuse(source, destination):
+        raise PermissionError(errno.EPERM, "denied", destination)
+
+    monkeypatch.setattr(_files.os, "replace", refuse)
+    with pytest.raises(PermissionError):
+        with _files.replacing(target) as temporary:
+            temporary.write_bytes(b"new")
+    assert target.read_bytes() == b"old"
+    assert fake.set == [] and fake.freed == [7]
+    assert os.listdir(str(tmp_path)) == ["locked.txt"]
+
+
+def test_a_new_file_copies_no_attributes(tmp_path, monkeypatch):
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", lambda: pytest.fail("nothing to copy from"))
+    with _files.replacing(tmp_path / "new.txt") as temporary:
+        temporary.write_bytes(b"x")
+    assert (tmp_path / "new.txt").read_bytes() == b"x"
+
+
+def test_attributes_that_cant_be_copied_dont_fail_the_write(tmp_path, monkeypatch):
+    target = tmp_path / "remote.txt"
+    target.write_bytes(b"old")
+
+    class Refusing(_FakeXattrs):
+        def setxattr(self, *args):
+            return -1  # ENOTSUP: a volume without extended attributes
+
+        def acl_set_file(self, *args):
+            return -1  # EPERM: not this user's list to copy
+
+    old = os.fsencode(str(target))
+    fake = Refusing({old: {b"user.note": b"x"}}, lists={old: 7})
+    monkeypatch.setattr(_files, "sys", types.SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_files, "_xattr_lib", lambda: fake)
+    with _files.replacing(target) as temporary:
+        temporary.write_bytes(b"new")
+    assert target.read_bytes() == b"new"
 
 
 def test_write_atomically(tmp_path):

@@ -114,3 +114,120 @@ def test_ctrl_c_after_the_button_goes_down_lets_it_up(fake_events, monkeypatch):
         post.__dict__.clear()
         macos.mouse.drag(9, 9, duration=0)
     assert posted[0] == 1 and posted[-1] == 2
+
+
+def test_an_interrupted_drag_lets_go_where_it_stopped(fake_events, monkeypatch):
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise KeyboardInterrupt  # in the pause after the third step
+
+    monkeypatch.setattr(macos.mouse.time, "sleep", sleep)
+    with pytest.raises(KeyboardInterrupt):
+        macos.mouse.drag(1000, 1000, duration=1.0)
+
+    posted = fake_events.posted
+    steps = [event for event in posted if event["kind"] == 6]
+    assert len(steps) == 3
+    assert posted[-1]["kind"] == 2
+    # Released at the last step posted, not at the target, where it would drop what is dragged.
+    assert (posted[-1]["x"], posted[-1]["y"]) == (steps[-1]["x"], steps[-1]["y"]) != (1000, 1000)
+
+
+def test_an_interrupt_in_the_pause_after_a_step_lets_go_at_that_step(fake_events, monkeypatch):
+    from macos import _events
+
+    posted = []
+    post = _events.post
+
+    def interrupted(event):
+        post(event)  # the event is out; post() then pauses, and the interrupt lands there
+        posted.append(fake_events.events[event])
+        if fake_events.events[event]["kind"] == 6 and sum(e["kind"] == 6 for e in posted) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(macos.mouse.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(_events, "post", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        macos.mouse.drag(1000, 1000, duration=1.0)
+
+    steps = [event for event in posted if event["kind"] == 6]
+    assert len(steps) == 2
+    assert posted[-1]["kind"] == 2
+    # Released where the pointer is, at the second step, not one step back.
+    assert (posted[-1]["x"], posted[-1]["y"]) == (steps[-1]["x"], steps[-1]["y"])
+
+
+def test_a_failing_release_does_not_hide_the_interruption(fake_events, monkeypatch):
+    from macos import _events
+
+    def post(event):
+        raise KeyboardInterrupt if fake_events.events[event]["kind"] == 1 else OSError("release failed")
+
+    monkeypatch.setattr(_events, "post", post)
+    with pytest.raises(KeyboardInterrupt):
+        macos.mouse.drag(9, 9, duration=0)
+
+
+def test_non_finite_durations_are_refused_before_anything_is_posted(fake_events):
+    for duration in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="duration"):
+            macos.mouse.move(1, 1, duration=duration)
+        with pytest.raises(ValueError, match="duration"):
+            macos.mouse.drag(1, 1, duration=duration)
+    assert fake_events.posted == []
+
+
+def test_scroll_carries_the_keys_held(fake_events):
+    with macos.keyboard.hold("cmd"):
+        macos.mouse.scroll(3)
+
+    scrolls = [event for event in fake_events.posted if event["kind"] == "scroll"]
+    assert [event.get("flags") for event in scrolls] == [1 << 20]  # Cmd-scroll, to zoom
+
+
+def test_scroll_refuses_lines_that_would_wrap_around(fake_events):
+    for lines in (-(2**31), 2**31, 2**33 + 5):
+        with pytest.raises(ValueError, match="lines"):
+            macos.mouse.scroll(lines)
+    assert fake_events.posted == []
+
+    macos.mouse.scroll(-(2**31 - 1))  # the most there is, upwards
+    assert fake_events.posted[-1]["vertical"] == 2**31 - 1
+
+
+def test_settings_refuse_non_finite_values(monkeypatch):
+    from macos import defaults
+
+    written = []
+    monkeypatch.setattr(defaults, "write", lambda *args: written.append(args))
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="speed"):
+            macos.mouse.set_scroll_speed(value)
+        with pytest.raises(ValueError, match="seconds"):
+            macos.mouse.set_double_click_speed(value)
+    assert written == []
+
+
+@pytest.mark.parametrize("scaling, speed", [(-1, 0.0), (5.0, 1.0), (1.5, 0.5)])
+def test_a_hand_set_tracking_speed_reads_within_the_slider(monkeypatch, scaling, speed):
+    from macos import _system, defaults
+
+    written = []
+    monkeypatch.setattr(defaults, "read", lambda domain, key, default=None: scaling)
+    monkeypatch.setattr(defaults, "write", lambda *args: written.append(args[-1]))
+    monkeypatch.setattr(_system, "apply_input_settings", lambda: None)
+
+    assert macos.mouse.tracking_speed() == speed
+    macos.mouse.set_tracking_speed(macos.mouse.tracking_speed())  # saved and put back, as is
+    assert written == [round(speed * 3, 3)]
+
+
+@pytest.mark.parametrize("stored, on", [("NO", True), ("false", True), ("0", True), (0, True), ("YES", False), (True, False)])
+def test_acceleration_reads_a_hand_written_linear_setting_as_macos_does(monkeypatch, stored, on):
+    from macos import defaults
+
+    monkeypatch.setattr(defaults, "read", lambda domain, key, default=None: stored)
+    assert macos.mouse.acceleration() is on

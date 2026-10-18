@@ -15,7 +15,13 @@ macos.notify("3 tests failed", title="CI", subtitle="main", sound="Basso")
 ```
 
 `sound` is the name of a system alert sound, such as `"Basso"`, `"Glass"`,
-`"Ping"` or `"Submarine"`. {func}`macos.sound.names` lists them all.
+`"Ping"` or `"Submarine"`. {func}`macos.sound.names` lists them all, and only
+those are accepted (in any case): any other name raises `ValueError`, since
+macOS would post the notification without a sound and no error.
+
+Text longer than 4096 characters is clipped, ending in "…": Notification
+Center shows a few lines at most. Text with a NUL character or a lone
+surrogate can't be passed to `osascript` and raises `ValueError`.
 
 ## Getting notified when a script finishes
 

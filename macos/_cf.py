@@ -11,6 +11,7 @@ to :func:`release`; :func:`owned` does that automatically at the end of a
 
 import ctypes
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from functools import lru_cache, wraps
 import os
 import plistlib
@@ -61,6 +62,8 @@ def lib() -> ctypes.CDLL:
         CFTypeRef, CFRange, ctypes.c_uint32, ctypes.c_uint8, ctypes.c_bool, ctypes.c_char_p, CFIndex, ctypes.POINTER(CFIndex)
     )
     cf.CFStringGetBytes.restype = CFIndex
+    cf.CFStringGetCharacters.argtypes = (CFTypeRef, CFRange, ctypes.c_void_p)
+    cf.CFStringGetCharacters.restype = None
 
     cf.CFDataCreate.argtypes = (CFTypeRef, ctypes.c_char_p, CFIndex)
     cf.CFDataCreate.restype = CFTypeRef
@@ -209,19 +212,22 @@ def is_type(ref: Optional[int], type_id: int) -> bool:
 
 
 def to_str(ref: Optional[int]) -> Optional[str]:
-    """Copy a ``CFString`` into a Python string (``None`` for anything else), the NUL characters inside it included."""
+    """
+    Copy a ``CFString`` into a Python string (``None`` for anything else), the NUL characters inside it included.
+
+    A lone surrogate (a title an app cut in the middle of an emoji) comes back
+    as U+FFFD, the rest of the string whole.
+    """
     if not is_type(ref, lib().CFStringGetTypeID()):
         return None
     cf = lib()
     length = cf.CFStringGetLength(ref)
-    size = cf.CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8)
-    buffer = ctypes.create_string_buffer(size)
-    used = CFIndex()
-    # The bytes and their count, not a C string: one read up to the first NUL would cut the text there.
-    if cf.CFStringGetBytes(ref, CFRange(0, length), kCFStringEncodingUTF8, 0, False, buffer, size, ctypes.byref(used)) != length:
-        return None  # a character UTF-8 can't hold (a lone surrogate)
+    # Its UTF-16 units and their count, not a C string: one read up to the first NUL would cut the text there,
+    # and UTF-8 stops at a lone surrogate, which a CFString may hold.
+    buffer = (ctypes.c_uint16 * length)()
+    cf.CFStringGetCharacters(ref, CFRange(0, length), buffer)
     # NULs at the end are padding, as a device name read from a driver may carry: what a C string dropped.
-    return buffer.raw[: used.value].decode("utf-8").rstrip("\0")
+    return bytes(buffer).decode("utf-16-le", "replace").rstrip("\0")
 
 
 def data(payload: bytes) -> int:
@@ -323,7 +329,10 @@ def to_python(ref: Optional[int]) -> Any:
     Convert a property-list ``CFType`` (dictionaries, arrays, strings, numbers,
     dates, data, booleans, nested) into Python objects.
 
-    Goes through a binary property list, so every nesting level converts at once.
+    Goes through a binary property list, so every nesting level converts at
+    once. A date comes back as a naive :class:`~datetime.datetime` in UTC, as
+    :mod:`plistlib` gives it. A string the property list can't carry (one
+    with a lone surrogate) raises :class:`NotPropertyListError`.
     """
     if not ref:
         return None
@@ -332,12 +341,35 @@ def to_python(ref: Optional[int]) -> Any:
             # A MacOSError: the callers (the IORegistry, the dynamic store...) promise one for what macOS
             # gives them, and this value is macOS's; from_python() keeps a plain ValueError for the caller's own.
             raise NotPropertyListError("not a property list")
-        return plistlib.loads(to_bytes(data))
+        try:
+            return plistlib.loads(to_bytes(data))
+        except plistlib.InvalidFileException:  # CF wrote what plistlib can't read back (a lone surrogate)
+            raise NotPropertyListError("not a property list Python can read") from None
+
+
+def _plain(value: Any) -> Any:
+    """``value`` with its aware datetimes made naive UTC, at any depth; ``None`` raises ``ValueError``."""
+    if value is None:
+        # plistlib writes it as the binary format's null, which CF reads as kCFNull: no property list.
+        raise ValueError("None is not a property-list value (at any depth): leave the key or item out")
+    if isinstance(value, datetime) and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
 
 
 def from_python(value: Any) -> int:
-    """The reverse of :func:`to_python`: an owned ``CFType`` for a plist-compatible Python object."""
-    with owned(data(plistlib.dumps(value, fmt=plistlib.FMT_BINARY))) as raw:
+    """
+    The reverse of :func:`to_python`: an owned ``CFType`` for a plist-compatible Python object.
+
+    A naive :class:`~datetime.datetime` is taken as UTC, as :mod:`plistlib`
+    takes it; an aware one is converted to UTC. ``None``, at any depth,
+    raises :class:`ValueError`: a property list has no null.
+    """
+    with owned(data(plistlib.dumps(_plain(value), fmt=plistlib.FMT_BINARY))) as raw:
         ref = lib().CFPropertyListCreateWithData(None, raw, 0, None, None)
     if not ref:
         raise ValueError("not a property list")
@@ -477,6 +509,8 @@ class RunLoopSource:
     """
     A run loop source added to this thread's run loop, in the default mode; :meth:`close` removes it.
 
+    :meth:`close` may run on any thread, even after this one ended: the run loop is retained until then.
+
     With ``owned``, the source is ours (a ``Create`` result) and :meth:`close`
     releases it too; otherwise its maker (an IOKit notification port, say)
     owns it. A NULL source raises ``MacOSError``, saying ``what`` failed.
@@ -487,12 +521,21 @@ class RunLoopSource:
             raise MacOSError("could not {}: macOS gave no run loop source".format(what))
         self.source: Optional[int] = source
         self.owned = owned
-        self.loop = lib().CFRunLoopGetCurrent()
-        lib().CFRunLoopAddSource(self.loop, source, default_mode())
+        # Retained: a thread's run loop is freed when the thread ends, and close() may come after, from another.
+        self.loop: Optional[int] = retain(lib().CFRunLoopGetCurrent())
+        try:
+            lib().CFRunLoopAddSource(self.loop, source, default_mode())
+        except BaseException:
+            release(self.loop)
+            raise
 
     def close(self) -> None:
         source, self.source = self.source, None
         if source:
-            lib().CFRunLoopRemoveSource(self.loop, source, default_mode())
-            if self.owned:
-                release(source)
+            loop, self.loop = self.loop, None
+            try:
+                lib().CFRunLoopRemoveSource(loop, source, default_mode())
+                if self.owned:
+                    release(source)
+            finally:
+                release(loop)

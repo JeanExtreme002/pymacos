@@ -21,6 +21,7 @@ Python in the Dock.
 """
 
 import ctypes
+import math
 import os
 import threading
 import time
@@ -73,8 +74,12 @@ def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
     drains what it autoreleases (a title's string), which would stay for the
     rest of the process. Queued, a change with a ``key`` replaces the one with
     that key still waiting: only for setters, whose last value is all that counts.
+    Done now, it drops the one still waiting too: older, it would undo this one.
     """
     if _files.on_main_thread():  # the process's own, the one AppKit uses: not Python's idea of it in an embedder
+        if key is not None:
+            with _calls_lock:
+                _calls.pop(key, None)
         with _objc.autorelease_pool():
             change()
     else:
@@ -83,6 +88,19 @@ def _on_main(change: Callable[[], None], key: Optional[object] = None) -> None:
                 key = object()  # its own: never replaced
             _calls.pop(key, None)  # the newer value goes last, after what was asked before it
             _calls[key] = change
+
+
+def _text(value: object) -> str:
+    """
+    ``value`` as text AppKit can show, checked now, on the caller's thread.
+
+    A string UTF-8 can't hold (a lone surrogate, from ``os.fsdecode``) raises
+    :class:`UnicodeEncodeError` here, before anything is set or queued: not
+    later inside :func:`run`, far from the call, from a worker's change.
+    """
+    text = str(value)
+    text.encode("utf-8")
+    return text
 
 
 def _require_main_thread(what: str) -> None:
@@ -117,8 +135,11 @@ def _image(icon: Image, template: bool) -> int:
         label = "the icon bytes"
     else:
         path = os.path.abspath(os.path.expanduser(os.fspath(icon)))
-        if not os.path.isfile(path):
+        if not os.path.exists(path):
             raise FileNotFoundError(path)
+        _objc._readable(path)  # a folder, or a file not readable, as Python's open would say
+        if not os.path.isfile(path):  # a FIFO: NSImage would wait for a writer
+            raise ValueError("{} is not an image macOS can read".format(path))
         image = _objc.send(
             _objc.send(_objc.cls("NSImage"), "alloc"), "initWithContentsOfFile:", _objc.nsstring(path), argtypes=(_objc.id,)
         )
@@ -164,7 +185,7 @@ class MenuItem:
 
     def set_title(self, value: str) -> None:
         """Change the text of the entry."""
-        self._title = str(value)
+        self._title = _text(value)
         text = self._title
 
         def apply() -> None:
@@ -220,6 +241,10 @@ class Item:
         if title is None and icon is None:
             raise ValueError("a menu bar item needs a title, an icon, or both")
         _require_main_thread("creating a menu bar item")
+        # The texts are checked first, like the icon below: a bad one must fail before anything is in the menu bar.
+        title = None if title is None else _text(title)
+        tooltip = None if tooltip is None else _text(tooltip)
+        quit = None if quit is None else _text(quit)
         _application()
         # Its own pool: what AppKit autoreleases here (the status item before it's retained, the
         # strings) is drained now, not kept until run() turns, or for good when run() never does.
@@ -241,6 +266,10 @@ class Item:
             self._removed = False  # set once the native objects are released, on the main thread
             self._title: Optional[str] = None
             self._tooltip: Optional[str] = None
+            # The icon set_icon() gave last, until a change on the main thread shows it: a worker's newer
+            # one replaces it (and releases it) rather than keeping one image waiting per call.
+            self._next_icon: Optional[int] = None
+            self._icon_waiting = False
             self.set_title(title)
             if image is not None:
                 self._show_icon(image)
@@ -248,7 +277,7 @@ class Item:
                 self.set_tooltip(tooltip)
             if quit is not None:
                 line = int(_objc.send(_objc.cls("NSMenuItem"), "separatorItem"))  # the menu keeps it
-                self._quit_entry = _native_entry(str(quit), _quit_all, None, True, False)
+                self._quit_entry = _native_entry(quit, _quit_all, None, True, False)
                 for native in (line, self._quit_entry._native):
                     _objc.send(self._menu, "addItem:", native, argtypes=(_objc.id,), restype=None)
                 self._quit_line = line
@@ -265,7 +294,7 @@ class Item:
 
     def set_title(self, value: Optional[str]) -> None:
         """Change the text shown in the menu bar; ``None`` shows only the icon."""
-        self._title = None if value is None else str(value)
+        self._title = None if value is None else _text(value)
         text = self._title or ""
 
         def apply() -> None:
@@ -281,7 +310,7 @@ class Item:
 
     def set_tooltip(self, value: Optional[str]) -> None:
         """Change the text shown when the pointer rests on the item, or remove it with ``None``."""
-        self._tooltip = None if value is None else str(value)
+        self._tooltip = None if value is None else _text(value)
         text = self._tooltip
 
         def show() -> None:
@@ -299,14 +328,23 @@ class Item:
 
     def _show_icon(self, image: Optional[int]) -> None:
         """Put ``image`` (retained, or ``None``) on the button, and drop our reference to it."""
+        with _calls_lock:
+            replaced = self._next_icon if self._icon_waiting else None
+            self._next_icon, self._icon_waiting = image, True
+        if replaced:
+            _objc.send(replaced, "release", restype=None)  # never shown: a newer icon came first
 
         def show() -> None:
+            with _calls_lock:  # the latest icon given, whichever call queued this
+                if not self._icon_waiting:
+                    return
+                shown, self._next_icon, self._icon_waiting = self._next_icon, None, False
             if not self._removed:
-                _objc.send(self._button, "setImage:", image, argtypes=(_objc.id,), restype=None)
-            if image:
-                _objc.send(image, "release", restype=None)  # the button keeps its own reference
+                _objc.send(self._button, "setImage:", shown, argtypes=(_objc.id,), restype=None)
+            if shown:
+                _objc.send(shown, "release", restype=None)  # the button keeps its own reference
 
-        _on_main(show)
+        _on_main(show, (self, "setImage:"))
 
     @property
     def entries(self) -> List[MenuItem]:
@@ -339,10 +377,14 @@ class Item:
         shows a checkmark; flip it with :meth:`MenuItem.set_checked` in its
         callback for a setting that turns on and off.
         """
+        if callback is not None and not callable(callback):
+            raise TypeError("callback must be callable or None, not {!r}".format(callback))
         _require_main_thread("adding a menu entry")
         self._require_present("adding a menu entry")
+        title = _text(title)
+        key = None if key is None else _text(key)
         with _objc.autorelease_pool():
-            entry = _native_entry(str(title), callback, key, enabled, checked)
+            entry = _native_entry(title, callback, key, enabled, checked)
             self._insert(cast(int, entry._native))  # just made: set until remove()
         self._entries.append(entry)
         return entry
@@ -443,6 +485,9 @@ class Timer:
         # Armed by the first turn of run(): the first call is ``seconds`` after run() starts, not
         # after every(), which a script usually calls well before.
         self._next: Optional[float] = None
+        # Paused between runs: the time that was left when the last run() returned, counted again
+        # from the next one, so an hourly timer doesn't fire the moment a later run() starts.
+        self._left: Optional[float] = None
         self._cancelled = False
 
     def __repr__(self) -> str:
@@ -461,11 +506,15 @@ def every(seconds: float, callback: Callable[[], object]) -> Timer:
     Call ``callback`` (with no arguments) every ``seconds`` while :func:`run` runs, the first time after ``seconds``.
 
     Handy to keep a title current, such as a countdown or the battery level.
-    Calls pause while a menu is open.
+    Calls pause while a menu is open, and between runs: a later :func:`run`
+    goes on with the time that was left when the last one returned.
     """
-    if seconds <= 0:
+    seconds = float(seconds)
+    if not math.isfinite(seconds) or seconds <= 0:  # NaN passes "<= 0", and NaN or inf would never fire
         raise ValueError("seconds must be positive, not {}".format(seconds))
-    timer = Timer(float(seconds), callback)
+    if not callable(callback):
+        raise TypeError("callback must be callable, not {!r}".format(callback))
+    timer = Timer(seconds, callback)
     with _lock:
         _timers.append(timer)
     return timer
@@ -483,21 +532,41 @@ def quit() -> None:
 
 
 def _due_timers(now: float) -> List[Timer]:
+    """The timers due at ``now``; each is moved on by :func:`_advance` only when it's called."""
     due = []
     with _lock:
         for timer in _timers:
             if timer._cancelled:
                 continue
-            if timer._next is None:  # the first turn since every(): the first call a full interval from now
-                timer._next = now + timer.seconds
+            if timer._next is None:
+                # The first turn since every() (the first call a full interval from now), or
+                # since a run() returned (what was left of the interval then).
+                timer._next = now + (timer.seconds if timer._left is None else timer._left)
+                timer._left = None
             elif timer._next <= now:
                 due.append(timer)
-    for timer in due:
+    return due
+
+
+def _advance(timer: Timer, now: float) -> bool:
+    """Move ``timer`` on to its next call, just before this one; ``False`` if it was cancelled since."""
+    with _lock:
+        if timer._cancelled or timer._next is None:
+            return False
         # Skip the ticks missed while busy, rather than catching up in a burst:
         # the next one is always a full interval after a late call.
-        following = cast(float, timer._next) + timer.seconds
+        following = timer._next + timer.seconds
         timer._next = following if following > now else now + timer.seconds
-    return due
+        return True
+
+
+def _pause_timers(now: float) -> None:
+    """Keep what's left of each timer's interval when the last run() returns, for the next one."""
+    with _lock:
+        for timer in _timers:
+            if timer._next is not None:
+                timer._left = max(0.0, timer._next - now)
+                timer._next = None
 
 
 def _pump(app: int, wait: float) -> None:
@@ -530,8 +599,11 @@ def _pump(app: int, wait: float) -> None:
                 entry = _actions.get(_clicks.popleft())
             if entry is not None and entry.callback is not None:
                 entry.callback()
-        for timer in _due_timers(time.monotonic()):
-            timer.callback()
+        now = time.monotonic()
+        # Each moved on just before its call: one that raises leaves the others due, called next turn.
+        for timer in _due_timers(now):
+            if _advance(timer, now):
+                timer.callback()
 
 
 def run(*, timeout: Optional[float] = None) -> None:
@@ -542,7 +614,10 @@ def run(*, timeout: Optional[float] = None) -> None:
     :func:`every` timers run here, one at a time; an exception in one stops
     :func:`run` and propagates. Ctrl-C stops it too. The items stay in the
     menu bar after it returns, until :meth:`Item.remove` or the script ends.
+    A ``timeout`` of zero or less returns at once; NaN raises :class:`ValueError`.
     """
+    if timeout is not None and math.isnan(timeout):  # NaN passes "<= 0": it would run for good
+        raise ValueError("timeout must be a number of seconds, or None, not {}".format(timeout))
     _require_main_thread("macos.menubar.run()")
     # Its own flag, counted in before anything else: a quit() from now on is
     # kept, and an old one, made while nothing ran, doesn't stop this run.
@@ -560,3 +635,6 @@ def run(*, timeout: Optional[float] = None) -> None:
     finally:
         with _lock:
             _running.remove(stopped)
+            last = not _running  # a run() inside a callback's returning leaves the outer one going
+        if last:
+            _pause_timers(time.monotonic())

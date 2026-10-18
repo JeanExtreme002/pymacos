@@ -37,3 +37,13 @@ def test_volume_set_mute_unmute(fake_run):
 def test_volume_set_rejects_bad_levels(level, error):
     with pytest.raises(error):
         macos.volume.set(level)
+
+
+def test_volume_set_formats_a_plain_int(fake_run):
+    class Odd(int):
+        def __format__(self, spec):
+            return '10\ndo shell script "echo pwned"'
+
+    macos.volume.set(Odd(10))
+
+    assert fake_run.args == ["osascript", "-e", "set volume output volume 10"]

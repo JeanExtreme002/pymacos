@@ -16,6 +16,7 @@ program runs.
 """
 
 import ctypes
+import math
 import time
 from typing import Any, Optional
 
@@ -77,7 +78,7 @@ def set_mode(mode: str) -> None:
 
 def is_auto() -> bool:
     """Whether the appearance is set to *Auto* (switches between Light and Dark by time of day)."""
-    return bool(_current("AppleInterfaceStyleSwitchesAutomatically", default=False))
+    return defaults._as_bool(_current("AppleInterfaceStyleSwitchesAutomatically", default=False), False)
 
 
 def accent_color() -> str:
@@ -109,8 +110,10 @@ def wait_for_change(*, timeout: Optional[float] = None, interval: float = 1.0) -
     switches. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
     nothing changes within ``timeout`` seconds. ``interval`` is how often to check, in seconds.
     """
-    if interval <= 0:
-        raise ValueError("interval must be positive, not {}".format(interval))
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("interval must be a positive number of seconds, not {}".format(interval))
+    if timeout is not None and math.isnan(timeout):  # a NaN deadline never passes: it would wait forever
+        raise ValueError("timeout must be a number of seconds or None, not nan")
     start = mode()
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
@@ -183,7 +186,7 @@ def set_accent_color(name: str) -> None:
 def menu_bar_hidden() -> bool:
     """Whether the menu bar hides until the pointer reaches the top of the screen."""
 
-    return bool(defaults.read(defaults.GLOBAL, "_HIHideMenuBar", default=False))
+    return defaults._as_bool(defaults.read(defaults.GLOBAL, "_HIHideMenuBar", default=False), False)
 
 
 def set_hide_menu_bar(on: bool = True) -> None:
@@ -216,16 +219,21 @@ def set_scroll_bars(when: str) -> None:
 def font_smoothing() -> bool:
     """Whether text is drawn a little bolder (font smoothing), as System Settings › Appearance offers."""
 
-    return defaults.read(defaults.GLOBAL, "AppleFontSmoothing", default=1) != 0
+    # A level from 0 to 3; one written without -int (`defaults write -g AppleFontSmoothing 0`) is text.
+    return defaults._as_int(defaults.read(defaults.GLOBAL, "AppleFontSmoothing", default=1), 1) != 0
 
 
 def set_font_smoothing(on: bool = True) -> None:
     """
     Smooth fonts, or draw them thinner (``False``), which some find sharper on displays that aren't Retina.
 
-    Apps pick it up when they're reopened.
+    Apps pick it up when they're reopened. It applies to every Mac the user
+    logs in to: a value set for this Mac only (``defaults -currentHost``),
+    which would win over it, is removed.
     """
 
+    if defaults.read(defaults.GLOBAL, "AppleFontSmoothing", current_host=True) is not None:
+        defaults.delete(defaults.GLOBAL, "AppleFontSmoothing", current_host=True)
     if on:
         defaults.delete(defaults.GLOBAL, "AppleFontSmoothing")  # macOS's own
     else:

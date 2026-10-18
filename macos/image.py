@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _files, _objc
 from ._system import framework
@@ -86,7 +86,6 @@ _FORMAT_NAMES = {
     "com.microsoft.bmp": "bmp",
     "org.webmproject.webp": "webp",
     "public.avif": "avif",
-    "com.adobe.pdf": "pdf",
 }
 
 
@@ -116,6 +115,7 @@ def _io() -> ctypes.CDLL:
         "CGImageSourceCreateWithData": ((pointer, pointer), pointer),
         "CGImageSourceGetType": ((pointer,), pointer),
         "CGImageSourceGetCount": ((pointer,), ctypes.c_size_t),
+        "CGImageSourceCopyProperties": ((pointer, pointer), pointer),
         "CGImageSourceCopyPropertiesAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageSourceCreateThumbnailAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageSourceCreateImageAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
@@ -126,6 +126,7 @@ def _io() -> ctypes.CDLL:
         "CGImageDestinationFinalize": ((pointer,), ctypes.c_bool),
         "CGImageDestinationSetProperties": ((pointer, pointer), None),
         "CGImageDestinationCopyImageSource": ((pointer, pointer, pointer, pointer), ctypes.c_bool),
+        "CGImageDestinationCopyTypeIdentifiers": ((), pointer),
         "CGImageSourceCopyMetadataAtIndex": ((pointer, ctypes.c_size_t, pointer), pointer),
         "CGImageMetadataCreateMutableCopy": ((pointer,), pointer),
         "CGImageMetadataCreateMutable": ((), pointer),
@@ -147,8 +148,41 @@ def _source(path: PathLike) -> int:
         source = _io().CGImageSourceCreateWithURL(url, None)
     if not source or not _io().CGImageSourceGetCount(source):
         _cf.release(source)
+        # ImageIO gives no reason: a folder raises IsADirectoryError here, and a file that
+        # can't be opened (its permissions, or a folder such as ~/Desktop the app has no
+        # access to) PermissionError, as open() would.
+        _objc._readable(str(resolved))
         raise ValueError("{} is not an image macOS can read".format(resolved))
+    if _cf.to_str(_io().CGImageSourceGetType(source)) == "com.adobe.pdf":
+        # ImageIO opens PDFs, but sees no pixels in them: a 0 x 0 image.
+        _cf.release(source)
+        raise ValueError(
+            "{} is a PDF, not an image: draw its pages with macos.pdf.render(), "
+            "e.g. macos.pdf.render(path, page=1, size=2048)".format(resolved)
+        )
     return source
+
+
+def _single_frame(image_source: Optional[int], kind: str, path: PathLike) -> None:
+    """
+    Refuse to save an image with several frames as ``kind``, a format that holds several, with only the first.
+
+    An animated GIF would stop moving, a multi-page TIFF lose its other
+    pages. A one-image format (JPEG, PNG...) gets the first frame, as with
+    :func:`convert`.
+    """
+    if kind in _MULTI_FRAME and _io().CGImageSourceGetCount(image_source) > 1:
+        raise ValueError(
+            "{} has several frames, and only the first would be kept: save it as a one-image "
+            "format (.png, .jpg...) to get that frame".format(Path(path).expanduser().absolute())
+        )
+
+
+@lru_cache(maxsize=None)
+def _writable() -> FrozenSet[str]:
+    """The type identifiers ImageIO can write (WebP and AVIF, which it only reads, aren't)."""
+    with _cf.owned(_io().CGImageDestinationCopyTypeIdentifiers()) as kinds:
+        return frozenset(_cf.to_python(kinds) or ())
 
 
 def _output(path: PathLike) -> Tuple[Path, str]:
@@ -182,17 +216,24 @@ def _options(values: Dict[str, Union[bool, float]]) -> int:
             _cf.release(ref)
 
 
-def _write_to(path: Path, kind: str, add: Callable[[int], None], frames: int = 1) -> None:
-    """Write an image file of type ``kind`` at ``path`` (as it is: see :func:`_write`), ``add`` giving its frames."""
+def _write_to(
+    path: Path, kind: str, add: Callable[[int], None], frames: int = 1, name: Optional[Path] = None
+) -> None:
+    """
+    Write an image file of type ``kind`` at ``path`` (as it is: see :func:`_write`), ``add`` giving its frames.
+
+    Errors name ``name``, the file the caller asked for, rather than the
+    temporary ``path`` it's written to, gone by the time they're seen.
+    """
     io = _io()
     with _cf.owned(_cf.file_url(str(path))) as url, _cf.owned(_cf.string(kind)) as type_ref:
         destination = io.CGImageDestinationCreateWithURL(url, type_ref, frames, None)
     if not destination:
-        raise MacOSError("could not create {}".format(path))
+        raise MacOSError("could not create {}".format(name or path))
     try:
         add(destination)
         if not io.CGImageDestinationFinalize(destination):
-            raise MacOSError("could not write {}".format(path))
+            raise MacOSError("could not write {}".format(name or path))
     finally:
         _cf.release(destination)
 
@@ -205,7 +246,7 @@ def _write(target: Path, kind: str, add: Callable[[int], None], frames: int = 1)
     be the source itself, and a failure leaves no half-written image behind.
     """
     with _files.replacing(target) as temporary:
-        _write_to(temporary, kind, add, frames)
+        _write_to(temporary, kind, add, frames, target)
     return target
 
 
@@ -347,11 +388,14 @@ def strip_metadata(source: PathLike, output: PathLike) -> Path:
 
     Use it before sharing photos: iPhone pictures record where they were
     taken. Only the orientation is kept, so the picture still shows upright.
-    ``output``'s extension sets the format.
+    ``output``'s extension sets the format. An animated GIF or multi-page
+    TIFF is refused (``ValueError``) as a GIF or TIFF, which would keep only
+    its first frame; a one-image format (JPEG, PNG...) gets that frame.
     """
     target, kind = _output(output)
     io = _io()
     with _cf.owned(_source(source)) as image_source:
+        _single_frame(image_source, kind, source)
         orientation = _describe(image_source).orientation
         pixels = io.CGImageSourceCreateImageAtIndex(image_source, 0, None)
     if not pixels:
@@ -390,7 +434,10 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
     copy takes the format of its extension, as :func:`convert` does (a
     ``.png`` copy of a JPEG is a PNG), and an extension it can't write is
     refused (``ValueError``) unless the copy's is the original's own; the
-    image itself keeps its own format.
+    image itself keeps its own format. That format must be one macOS writes:
+    a WebP or AVIF is refused (``ValueError``) unless copied to one. So is an
+    animated GIF or multi-page TIFF whose metadata can't be rewritten as it
+    is, since saving it again would keep only its first frame.
     """
     original = Path(path).expanduser().absolute()
     target = Path(output).expanduser().absolute() if output is not None else original
@@ -401,6 +448,13 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
     with _cf.owned(_source(original)) as image_source:
         own_kind = _cf.to_str(io.CGImageSourceGetType(image_source)) or "public.jpeg"
         kind = _WRITE_TYPES.get(target.suffix.lower(), own_kind) if output is not None else own_kind
+        if kind not in _writable():
+            # ImageIO would fail deep inside, naming a temporary file.
+            raise ValueError(
+                "macOS reads {} images but can't write them: save a copy with output= ending in one of {}".format(
+                    _FORMAT_NAMES.get(kind, kind), ", ".join(sorted(_WRITE_TYPES))
+                )
+            )
         # Written beside the target and moved in place at the end, so a
         # failure never leaves a half-written photo behind.
         with _files.replacing(target) as temporary:
@@ -426,7 +480,7 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
                     ) as type_ref:
                         destination = io.CGImageDestinationCreateWithURL(url, type_ref, 1, None)
                         if not destination:
-                            raise MacOSError("could not create {}".format(temporary))
+                            raise MacOSError("could not create {}".format(target))
                         with _cf.owned(destination):
                             copied = io.CGImageDestinationCopyImageSource(destination, image_source, options, None)
             # Another format, or one (HEIC) that drops part of the changes when
@@ -443,6 +497,7 @@ def _set_properties(path: PathLike, changes: Dict[str, Dict[str, Any]], output: 
                         lambda destination: io.CGImageDestinationAddImageFromSource(
                             destination, image_source, 0, properties
                         ),
+                        name=target,
                     )
                 # Some formats have nowhere to put a tag (GIF holds no GPS): refuse rather than
                 # replace the image with a copy that silently lacks it. A value the format keeps
@@ -467,7 +522,14 @@ def set_taken_at(path: PathLike, when: datetime, *, output: Optional[PathLike] =
             macos.image.set_taken_at(photo, macos.image.taken_at(photo) + timedelta(hours=3))
 
     When ``when`` has a time zone, it's recorded too. JPEG, PNG and TIFF keep
-    their pixels untouched; other formats (HEIC) may be saved again.
+    their pixels untouched; other formats (HEIC) may be saved again. Formats
+    macOS reads but doesn't write (WebP, AVIF) raise ``ValueError`` unless
+    ``output`` is in one it writes; so do animated GIFs and multi-page TIFFs
+    when their metadata can't be changed without saving them again, which
+    would keep only their first frame.
+
+    ``path`` is replaced by a changed file, with its permissions and Finder
+    tags: a hard link to it keeps the old content.
     """
     stamp = when.strftime(_EXIF_DATE)
     exif: Dict[str, Any] = {"DateTimeOriginal": stamp, "DateTimeDigitized": stamp}
@@ -486,7 +548,13 @@ def set_location(path: PathLike, latitude: float, longitude: float, *, output: O
     Changes ``path`` itself, or saves a changed copy to ``output``. South
     latitudes and west longitudes are negative, as :func:`location` returns
     them. JPEG, PNG and TIFF keep their pixels untouched; other formats (HEIC)
-    may be saved again.
+    may be saved again. Formats macOS reads but doesn't write (WebP, AVIF)
+    raise ``ValueError`` unless ``output`` is in one it writes; so do
+    animated GIFs and multi-page TIFFs when their metadata can't be changed
+    without saving them again, which would keep only their first frame.
+
+    ``path`` is replaced by a changed file, with its permissions and Finder
+    tags: a hard link to it keeps the old content.
     """
     if not -90.0 <= latitude <= 90.0:
         raise ValueError("latitude must be from -90 to 90, not {}".format(latitude))
@@ -510,7 +578,8 @@ def convert(source: PathLike, output: PathLike, *, quality: Optional[float] = No
     date is kept. ``quality`` (0.0 to 1.0) applies to JPEG and HEIC.
 
     Animated GIFs and multi-page TIFFs keep every frame when converted to GIF
-    or TIFF; the other formats hold a single image and get the first one.
+    or TIFF, and a GIF keeps how many times it loops; the other formats hold
+    a single image and get the first one.
     """
     target, kind = _output(output)
     if quality is not None and not 0.0 <= quality <= 1.0:
@@ -519,12 +588,21 @@ def convert(source: PathLike, output: PathLike, *, quality: Optional[float] = No
     with _cf.owned(_source(source)) as image_source:
         frames = io.CGImageSourceGetCount(image_source) if kind in _MULTI_FRAME else 1
         options = _options({"kCGImageDestinationLossyCompressionQuality": quality}) if quality is not None else None
+        loops = None
+        if kind == "com.compuserve.gif":
+            # How many times a GIF plays is the file's, not a frame's: ImageIO doesn't copy it with
+            # the frames, and a GIF without it plays once. Copied only when the source records one.
+            with _cf.owned(io.CGImageSourceCopyProperties(image_source, None)) as properties:
+                loops = _cf.to_int(_cf.lookup(_cf.lookup(properties, "{GIF}"), "LoopCount"))
+        repeat = _cf.from_python({"{GIF}": {"LoopCount": loops}}) if loops is not None else None
 
         def add(destination: int) -> None:
+            if repeat:
+                io.CGImageDestinationSetProperties(destination, repeat)
             for index in range(frames):
                 io.CGImageDestinationAddImageFromSource(destination, image_source, index, options)
 
-        with _cf.owned(options):
+        with _cf.owned(options), _cf.owned(repeat):
             return _write(target, kind, add, frames)
 
 
@@ -542,7 +620,10 @@ def resize(
     The result is saved to ``output`` (its extension sets the format) and
     ``output`` is returned. Photos are turned upright first, following their
     EXIF orientation, and their metadata (date, camera, location...) is kept.
-    Images are only scaled down: a larger size keeps the original size.
+    Images are only scaled down: a larger size keeps the original size. An
+    animated GIF or multi-page TIFF is refused (``ValueError``) as a GIF or
+    TIFF, which would keep only its first frame; a one-image format (JPEG,
+    PNG...) gets that frame.
     """
     for label, value in (("width", width), ("height", height)):
         if value is not None and value <= 0:
@@ -555,6 +636,7 @@ def resize(
 
     io = _io()
     with _cf.owned(_source(source)) as image_source:
+        _single_frame(image_source, kind, source)
         current = _describe(image_source)
         if not current.width or not current.height:
             raise ValueError("{} doesn't report its size".format(source))
@@ -588,13 +670,15 @@ def _edit(source: PathLike, output: PathLike, change: Callable[[int], int], qual
     Apply ``change`` to the upright ``CIImage`` of ``source`` and save the result to ``output``.
 
     The metadata (date, camera, location...) is kept, with the orientation
-    reset to upright, since the pixels already are.
+    reset to upright, since the pixels already are. Only the first frame is
+    edited: an image with several is refused as a GIF or TIFF.
     """
     target, kind = _output(output)
     if quality is not None and not 0.0 <= quality <= 1.0:
         raise ValueError("quality must be from 0.0 to 1.0, not {}".format(quality))
     io = _io()
     with _cf.owned(_source(source)) as image_source:
+        _single_frame(image_source, kind, source)
         with _objc.autorelease_pool():
             pixels = _objc.ciimage_cgimage(change(_objc.ciimage(Path(source).expanduser().absolute())))
         with _cf.owned(pixels), _cf.owned(_metadata(image_source, quality)) as save:
@@ -626,25 +710,37 @@ def crop(
     """
     Save the part of an image inside ``box``, ``(x, y, width, height)`` in pixels from the top-left corner.
 
-    The box is measured on the upright picture, as it shows on screen. Like
+    The box is measured on the upright picture, as it shows on screen. A
+    box in fractions of a pixel (one from :func:`macos.vision.faces` scaled
+    to the image) has its edges rounded to the nearest pixel. Like
     :func:`resize`, the metadata is kept and ``output``'s extension sets the
     format::
 
         macos.image.crop("screenshot.png", "button.png", (40, 120, 200, 60))
     """
     x, y, width, height = box
+    if not all(math.isfinite(value) for value in box):
+        raise ValueError("the box must be finite numbers, not {}".format(box))
     if width <= 0 or height <= 0:
         raise ValueError("the box's width and height must be positive, not {} x {}".format(width, height))
+    # Whole pixels: Core Image would keep the fractions, and draw an image a pixel
+    # larger with see-through edges.
+    left, top = math.floor(x + 0.5), math.floor(y + 0.5)
+    right, bottom = math.floor(x + width + 0.5), math.floor(y + height + 0.5)
+    if right <= left or bottom <= top:
+        raise ValueError("the box {} is less than a pixel wide or high".format(box))
 
     def change(picture: int) -> int:
         picture = _to_origin(picture)
         extent = _extent(picture)
-        if x < 0 or y < 0 or x + width > extent.size.width or y + height > extent.size.height:
+        if left < 0 or top < 0 or right > extent.size.width or bottom > extent.size.height:
             raise ValueError(
                 "the box {} doesn't fit in the {:g} x {:g} image".format(box, extent.size.width, extent.size.height)
             )
         # Core Image measures from the bottom-left corner.
-        rect = _objc.CGRect(_objc.CGPoint(x, extent.size.height - y - height), _objc.CGSize(width, height))
+        rect = _objc.CGRect(
+            _objc.CGPoint(left, extent.size.height - bottom), _objc.CGSize(right - left, bottom - top)
+        )
         return _objc.send(picture, "imageByCroppingToRect:", rect, argtypes=(_objc.CGRect,))
 
     return _edit(source, output, change, quality)
@@ -787,6 +883,7 @@ def _srgb() -> int:
 
 def _sample(path: PathLike, longest: int = 100) -> List[Tuple[int, int, int]]:
     """The sRGB colors of an image scaled down to ``longest`` pixels, without the transparent ones."""
+    _cf.release(_source(path))  # the errors of the other functions: a PDF, a file that can't be read...
     framework("CoreImage")
     with _objc.autorelease_pool():
         picture = _to_origin(_objc.ciimage(Path(path).expanduser().absolute()))
@@ -1004,8 +1101,7 @@ def replace_background(
         macos.image.replace_background("me.jpg", "beach.jpg", "me-at-the-beach.jpg")
     """
     scenery_path = Path(background).expanduser().absolute()
-    if not scenery_path.exists():
-        raise FileNotFoundError(str(scenery_path))
+    _cf.release(_source(scenery_path))  # missing, unreadable or not an image: said before the work starts
 
     def change(picture: int) -> int:
         picture = _to_origin(picture)

@@ -30,9 +30,10 @@ import zlib
 from contextlib import contextmanager
 from functools import lru_cache
 from dataclasses import dataclass
+from numbers import Real
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union
 from urllib.parse import unquote
 
 from . import _cf, _cg, _files, _objc
@@ -96,6 +97,18 @@ class Metadata:
     modified: Optional[datetime]
 
 
+def _not_a_pdf(resolved: Path) -> ValueError:
+    """
+    The error for a file PDFKit or Core Graphics couldn't open, once it's known it can be read.
+
+    Both answer nil for a file they may not read too (mode 000, another user's, a folder privacy
+    settings guard): opening it here raises that :class:`PermissionError` (or
+    :class:`IsADirectoryError`), not a "not a PDF" that blames the file.
+    """
+    open(str(resolved), "rb").close()
+    return ValueError("{} is not a PDF".format(resolved))
+
+
 @contextmanager
 def _open(path: PathLike, password: Optional[str] = None) -> Iterator[int]:
     """Yield a ``PDFDocument`` for ``path``, inside an autorelease pool."""
@@ -105,7 +118,7 @@ def _open(path: PathLike, password: Optional[str] = None) -> Iterator[int]:
         document = _objc.send(_objc.cls("PDFDocument"), "alloc")
         document = _objc.send(document, "initWithURL:", _objc.file_url(resolved), argtypes=(_objc.id,))
         if not document:
-            raise ValueError("{} is not a PDF".format(resolved))
+            raise _not_a_pdf(resolved)
         _objc.send(document, "autorelease")
         if _objc.send(document, "isLocked", restype=BOOL):
             unlocked = password is not None and _objc.send(
@@ -247,10 +260,12 @@ def _decrypted(document: int) -> int:
 
 def _rebuilt(document: int) -> int:
     """
-    A new document (autoreleased) with ``document``'s pages (annotations and form fields come with
-    them), its metadata and its bookmarks: nothing else of the file it was read from.
+    A new document (autoreleased) with ``document``'s pages (their annotations, form fields' widgets
+    included, come with them), its metadata and its bookmarks: nothing else of the file it was read from.
 
-    Not its encryption, nor its XMP metadata packet, which PDFKit writes back unchanged otherwise.
+    Not its encryption, nor its XMP metadata packet, which PDFKit writes back unchanged otherwise. Nor
+    the catalog's /AcroForm, which PDFKit has no way to copy (nor makes again for widgets added back):
+    the fields still fill in Preview and PDFKit, but Acrobat, which builds the form from it, sees none.
     """
     plain = _new_document()
     for number in range(1, _count(document) + 1):
@@ -316,8 +331,12 @@ def merge(inputs: Sequence[PathLike], output: PathLike, *, password: Optional[st
     Join PDFs, one after another, into ``output``, and return its path.
 
     ``password`` unlocks any encrypted input (they must share it); the
-    merged PDF itself is not encrypted.
+    merged PDF itself is not encrypted. The forms' fields come along: they
+    fill in Preview, but Acrobat sees no form in the merged PDF.
     """
+    if isinstance(inputs, (str, bytes, bytearray, os.PathLike)):
+        raise TypeError("inputs must be a list of paths, not a single one: use [{!r}]".format(inputs))
+    inputs = list(inputs)
     if not inputs:
         raise ValueError("merge() needs at least one PDF")
     framework("PDFKit")
@@ -334,7 +353,8 @@ def extract(path: PathLike, output: PathLike, pages: Iterable[int], *, password:
     """
     Save the chosen ``pages`` (numbered from 1, in the order given) as a new PDF, and return its path.
 
-    Use it to split a PDF (``extract(path, "first.pdf", [1])``) or reorder its pages.
+    Use it to split a PDF (``extract(path, "first.pdf", [1])``) or reorder its pages. A form's fields
+    come along, editable in Preview but not in Acrobat, as with :func:`merge`.
     """
     numbers = list(pages)
     if not numbers:
@@ -412,11 +432,20 @@ def encrypt(
     its permissions (printing, copying, editing); by default it's
     ``password`` too. Give it a different one when the people who open the
     PDF shouldn't hold the owner's password as well.
+
+    Both passwords take ASCII characters only (letters without accents,
+    digits, punctuation): PDFKit writes no PDF with any other, so ``"pässwort"``
+    raises :class:`ValueError` before anything is written.
     """
     if not password:
         raise ValueError("the password can't be empty")
     if owner_password is not None and not owner_password:
         raise ValueError("the owner password can't be empty; leave it out to use password")
+    for label, secret in (("password", password), ("owner password", owner_password or "")):
+        if not secret.isascii():
+            raise ValueError(
+                "the {} must be ASCII (no accents, no other alphabets, no emoji): PDFKit encrypts with no other".format(label)
+            )
     with _open(path, current_password) as document:
         options = _objc.send(_objc.cls("NSMutableDictionary"), "dictionary")
         secrets = (("PDFDocumentUserPasswordOption", password), ("PDFDocumentOwnerPasswordOption", owner_password or password))
@@ -476,15 +505,30 @@ def _line(text: str, size: float) -> Tuple[int, float, float]:
     return line, float(width), ascent.value + descent.value
 
 
+def _password_bytes(password: str) -> List[bytes]:
+    """
+    The bytes to try ``password`` as, for ``CGPDFDocumentUnlockWithPassword``: UTF-8, as PDFKit's
+    newer encryption takes it, then Latin-1, as the older one (R2 to R4) holds it.
+    """
+    tried = [password.encode("utf-8")]
+    try:
+        older = password.encode("latin-1")
+    except UnicodeEncodeError:
+        return tried
+    return tried if older == tried[0] else tried + [older]
+
+
 def _open_for_drawing(source: Path, password: Optional[str]) -> int:
     """An owned, unlocked ``CGPDFDocument``, to read its objects; release it with ``CGPDFDocumentRelease``."""
     graphics = _graphics()
     with _cf.owned(_cf.file_url(str(source))) as url:
         document = graphics.CGPDFDocumentCreateWithURL(url)
     if not document:
-        raise ValueError("{} is not a PDF".format(source))
+        raise _not_a_pdf(source)
     if graphics.CGPDFDocumentIsEncrypted(document) and not graphics.CGPDFDocumentIsUnlocked(document):
-        unlocked = password is not None and graphics.CGPDFDocumentUnlockWithPassword(document, password.encode("utf-8"))
+        unlocked = password is not None and any(
+            graphics.CGPDFDocumentUnlockWithPassword(document, secret) for secret in _password_bytes(password)
+        )
         if not unlocked:
             graphics.CGPDFDocumentRelease(document)
             raise PermissionDeniedError(
@@ -578,6 +622,11 @@ def _picture_of_page(graphics: ctypes.CDLL, page: int, longest: int) -> int:
     return int(picture)
 
 
+def _ocr_pixels(page: int) -> int:
+    """The longest side, in pixels, of the picture of ``page`` that :func:`ocr` hands Vision: 3 per point."""
+    return int(min(4096, max(1024, max(_shown_size(page)) * 3)))
+
+
 def ocr(
     path: PathLike,
     output: PathLike,
@@ -596,10 +645,13 @@ def ocr(
 
     The pages look the same, and their text can now be selected, copied and
     searched, in Preview, Spotlight or :func:`text`. Pages that already have
-    text aren't read again, unless ``redo=True``. As with :func:`watermark`,
+    text aren't read again, unless ``redo=True``, which replaces their text
+    (a scanner's poor OCR, say) with Vision's: those pages become pictures
+    of what they show, so their old text isn't there twice, and they can
+    take more room and lose the sharpness of their drawing. As with :func:`watermark`,
     every page is redrawn into the new PDF: filled form fields, notes and stamps
     stay as they look, but can't be edited any more, and links go. ``languages`` works as in
-    :func:`macos.vision.lines` (``["fr-FR", "en-US"]``). ``password`` opens an
+    :func:`macos.vision.lines`: a list (``["fr-FR", "en-US"]``); a string raises :class:`TypeError`. ``password`` opens an
     encrypted PDF; the result isn't encrypted.
     """
     from . import vision
@@ -611,19 +663,28 @@ def ocr(
         # Read every page first: Vision reads the pages of the file, not the PDF being written. Each page
         # goes to Vision as the picture drawn here, with no image file in between.
         found: Dict[int, List[Any]] = {}
+        redone: Set[int] = set()  # the pages that had text, read again: their old text goes, or it'd be there twice
         for number in range(1, pages + 1):
             with _objc.autorelease_pool():
                 page = _page(document, number)
-                if not redo and (_objc.pystring(_objc.send(page, "string")) or "").strip():
-                    continue
-                longest = max(_shown_size(page))
-                picture = _picture_of_page(graphics, page, int(min(4096, max(1024, longest * 3))))
+                if (_objc.pystring(_objc.send(page, "string")) or "").strip():
+                    if not redo:
+                        continue
+                    redone.add(number)
+                picture = _picture_of_page(graphics, page, _ocr_pixels(page))
                 with _cf.owned(picture):
                     # Word by word: one stretched line would space its words wrong for search and copy.
                     found[number] = vision._picture_words(picture, languages)
 
         def draw(context: int, index: int, width: float, height: float) -> None:
-            _draw_page(graphics, context, _page(document, index + 1))
+            page = _page(document, index + 1)
+            if index + 1 in redone:
+                # Drawn as the picture Vision read, drawn again here rather than kept: hundreds of pages'
+                # pictures would otherwise stay in memory until the last is written.
+                with _cf.owned(_picture_of_page(graphics, page, _ocr_pixels(page))) as picture:
+                    graphics.CGContextDrawImage(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)), picture)
+            else:
+                _draw_page(graphics, context, page)
             for word, word_box in found.get(index + 1, []):
                 _draw_invisible(graphics, core_text, context, word, word_box, width, height)
 
@@ -882,6 +943,10 @@ def from_images(images: Sequence[Union[PathLike, bytes]], output: PathLike) -> P
     ``images`` may also hold PNG/JPEG bytes, such as :func:`macos.vision.scan_document` returns.
     JPEG photos are embedded as they are, without compressing them again.
     """
+    if isinstance(images, (str, bytes, bytearray, os.PathLike)):
+        # Not repeated in the message, as other such errors do: it may be megabytes of image bytes.
+        raise TypeError("images must be a list of images (paths or bytes), not a single one: put it in a list")
+    images = list(images)
     if not images:
         raise ValueError("from_images() needs at least one image")
     from . import image as image_module
@@ -1028,7 +1093,7 @@ def fill_form(
     password: Optional[str] = None,
 ) -> Path:
     """
-    Fill in a PDF form's fields by name, and save it to ``output``; the fields stay editable.
+    Fill in a PDF form's fields by name, and save it to ``output``; the fields stay editable (see below).
 
     ::
 
@@ -1038,6 +1103,11 @@ def fill_form(
     group of radio buttons the option to choose. The names are those
     :func:`form_fields` gives; an unknown one, or an option a field doesn't
     offer, raises :class:`ValueError` before anything is written.
+
+    An encrypted form (opened with ``password=``) is saved as a new,
+    unencrypted PDF, which keeps its fields but not the form's catalog
+    entry: they stay editable in Preview, not in Acrobat. The same goes for
+    a form that :func:`merge` or :func:`extract` made.
     """
     with _open(path, password) as document:
         known = {field.name: field for field in _fields(document)}  # the same document: read once
@@ -1074,9 +1144,15 @@ _CORNERS = ("bottom_right", "bottom_left", "top_right", "top_left")
 Position = Union[str, Tuple[float, float]]
 
 
-def _check_position(position: Position) -> None:
-    if isinstance(position, str) and position not in _CORNERS:
-        raise ValueError("position must be one of {} or (x, y), not {!r}".format(", ".join(_CORNERS), position))
+def _check_position(position: Position) -> Position:
+    """``position`` checked: a corner, or ``(x, y)`` as floats, from a tuple or a list (as json.loads gives it)."""
+    if isinstance(position, str):
+        if position in _CORNERS:
+            return position
+    elif isinstance(position, Sequence) and len(position) == 2:
+        if all(isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value) for value in position):
+            return float(position[0]), float(position[1])
+    raise ValueError("position must be one of {} or (x, y), not {!r}".format(", ".join(_CORNERS), position))
 
 
 def _unrotated(box: Tuple[float, float, float, float], width: float, height: float, rotation: int) -> Tuple[float, ...]:
@@ -1163,7 +1239,7 @@ def _origin(
     position: Position, width: float, height: float, page_width: float, page_height: float, margin: float
 ) -> Tuple[float, float]:
     """Where a box of ``width`` × ``height`` goes: its bottom-left corner, in points from the page's bottom-left."""
-    if isinstance(position, tuple):
+    if not isinstance(position, str):
         return float(position[0]), float(position[1])
     x = margin if position.endswith("left") else page_width - margin - width
     y = margin if position.startswith("bottom") else page_height - margin - height
@@ -1215,15 +1291,15 @@ def sign(
     if width <= 0:
         raise ValueError("width must be positive, not {}".format(width))
     _check_near(near, position, side)
-    corner: Position = position if position is not None else "bottom_right"
-    _check_position(corner)
-    source, _ = _image_source(image)
+    corner = _check_position(position if position is not None else "bottom_right")
+    source, label = _image_source(image)
     with _cf.owned(source):
         # Turned upright, as from_images() does: a phone's photo of a signature is stored sideways.
         orientation = images._describe(source).orientation
         picture = images._io().CGImageSourceCreateImageAtIndex(source, 0, None)
     if not picture:
-        raise ValueError("{} is not an image macOS can read".format(image))
+        # The label, not the image: bytes would put megabytes of them in the message.
+        raise ValueError("{} is not an image macOS can read".format(label))
     graphics = _graphics()
     try:
         with _open(path, password) as document:
@@ -1300,8 +1376,7 @@ def add_text(
     if size <= 0:
         raise ValueError("size must be positive, not {}".format(size))
     _check_near(near, position, side)
-    corner: Position = position if position is not None else "top_left"
-    _check_position(corner)
+    corner = _check_position(position if position is not None else "top_left")
     red, green, blue = _color(color)
     framework("AppKit")
     with _open(path, password) as document:
@@ -1389,7 +1464,7 @@ class Bookmark:
 
     title: str
     page: int
-    """The page it opens, from 1; 0 when it points nowhere in the document."""
+    """The page it opens, from 1; 0 when it points nowhere in the document (a heading, a web link...)."""
     level: int = 0
     """How deep it sits: 0 for a chapter, 1 for its sections, and so on."""
 
@@ -1446,10 +1521,18 @@ def set_bookmarks(
     Each entry is ``(title, page)``, ``(title, page, level)`` or a
     :class:`Bookmark`; pages are from 1, and a level may go at most one
     deeper than the entry before it. An empty list takes the contents away.
+
+    A :class:`Bookmark` of page 0 is a heading that opens nothing, as
+    :func:`bookmarks` gives for an entry that points out of the document:
+    its contents can be written back as they were read. The link such an
+    entry held (a web page, another file) isn't kept: it opens nothing.
     """
-    entries = []
+    entries: List[Bookmark] = []
+    headings: Set[int] = set()  # the entries that open nothing: a Bookmark of page 0, never a tuple's 0, likely meant as page 1
     for mark in marks:
         if isinstance(mark, Bookmark):
+            if isinstance(mark.page, int) and not isinstance(mark.page, bool) and mark.page == 0:
+                headings.add(len(entries))
             entries.append(mark)
         elif isinstance(mark, Sequence) and not isinstance(mark, str) and len(mark) in (2, 3):
             entries.append(Bookmark(*mark))  # a tuple, or a list as json.loads gives them
@@ -1463,7 +1546,17 @@ def set_bookmarks(
             raise ValueError("{!r} is at level {}, deeper than the entry before it allows".format(entry.title, entry.level))
         previous = entry.level
     with _open(path, password) as document:
-        pages = [_page(document, entry.page) for entry in entries]  # checks every number first
+        pages: List[Optional[int]] = []
+        for index, entry in enumerate(entries):  # checks every number first
+            if index in headings:
+                pages.append(None)
+            elif entry.page == 0 and not isinstance(entry.page, bool):
+                raise ValueError(
+                    "{!r} is on page 0, out of range: pages are from 1; a heading that opens nothing is "
+                    "Bookmark({!r}, 0)".format(entry.title, entry.title)
+                )
+            else:
+                pages.append(_page(document, entry.page))
         root = _objc.send(_objc.send(_objc.cls("PDFOutline"), "alloc"), "init")
         _objc.send(root, "autorelease")
         parents = [root]
@@ -1472,23 +1565,24 @@ def set_bookmarks(
             outline = _objc.send(_objc.send(_objc.cls("PDFOutline"), "alloc"), "init")
             _objc.send(outline, "autorelease")
             _objc.send(outline, "setLabel:", _objc.nsstring(entry.title), argtypes=(_objc.id,), restype=None)
-            # Opens at the top-left corner of the page as it's shown: its visible part (the crop box),
-            # turned by its rotation, back into the page's own coordinates.
-            bounds = _objc.send(page, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
-            rotation = int(_objc.send(page, "rotation", restype=ctypes.c_long))
-            width, height = bounds.size.width, bounds.size.height
-            shown_height = height if rotation % 180 == 0 else width
-            x, y, _, _ = _unrotated((0, shown_height, 0, 0), width, height, rotation)
-            top = _objc.CGPoint(bounds.origin.x + x, bounds.origin.y + y)
-            destination = _objc.send(
-                _objc.send(_objc.cls("PDFDestination"), "alloc"),
-                "initWithPage:atPoint:",
-                page,
-                top,
-                argtypes=(_objc.id, _objc.CGPoint),
-            )
-            _objc.send(destination, "autorelease")
-            _objc.send(outline, "setDestination:", destination, argtypes=(_objc.id,), restype=None)
+            if page is not None:
+                # Opens at the top-left corner of the page as it's shown: its visible part (the crop box),
+                # turned by its rotation, back into the page's own coordinates.
+                bounds = _objc.send(page, "boundsForBox:", _CROP_BOX, argtypes=(ctypes.c_long,), restype=_objc.CGRect)
+                rotation = int(_objc.send(page, "rotation", restype=ctypes.c_long))
+                width, height = bounds.size.width, bounds.size.height
+                shown_height = height if rotation % 180 == 0 else width
+                x, y, _, _ = _unrotated((0, shown_height, 0, 0), width, height, rotation)
+                top = _objc.CGPoint(bounds.origin.x + x, bounds.origin.y + y)
+                destination = _objc.send(
+                    _objc.send(_objc.cls("PDFDestination"), "alloc"),
+                    "initWithPage:atPoint:",
+                    page,
+                    top,
+                    argtypes=(_objc.id, _objc.CGPoint),
+                )
+                _objc.send(destination, "autorelease")
+                _objc.send(outline, "setDestination:", destination, argtypes=(_objc.id,), restype=None)
             parent = parents[-1]
             count = int(_objc.send(parent, "numberOfChildren", restype=NSUInteger))
             _objc.send(parent, "insertChild:atIndex:", outline, count, argtypes=(_objc.id, NSUInteger), restype=None)
@@ -2161,6 +2255,10 @@ _STREAM_START = re.compile(rb"\bstream\r?\n")
 _OBJECT_STREAM = re.compile(rb"/Type\s*/ObjStm\b")
 _STRING_START = re.compile(rb"<<|>>|[(\[\]<]")
 _WRITTEN_BY_PDFKIT = re.compile(rb"/(?:Producer|CreationDate|ModDate)\s*$")
+# An annotation's (or a signature's) /M: the date it was last changed, D:20261017233900Z00'00', which a
+# digit pattern would match. Skipped only when it reads as a date: any other text there is read.
+_CHANGED_ON = re.compile(rb"/M\s*$")
+_PDF_DATE = re.compile(rb"D:\d{4}[\d+\-Z' ]*")
 # The file's identifier: two strings of random bytes, new at each save, which may read as digits or letters.
 _FILE_ID = re.compile(rb"/ID\s*\[\s*(?:(?:<[0-9A-Fa-f\s]*>|\([^()]*\))\s*)?$")
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}
@@ -2209,7 +2307,8 @@ def _literal(data: bytes, start: int) -> Tuple[bytes, int]:
 def _strings(data: bytes) -> Iterator[str]:
     """
     The strings in PDF source, each on its own, and those of an array joined. Not those PDFKit writes
-    itself as it saves: the ``/Producer``, the dates, which aren't text, and the file's random ``/ID``.
+    itself as it saves: the ``/Producer``, the dates (an annotation's ``/M`` too), which aren't text, and
+    the file's random ``/ID``.
     """
     groups: List[List[str]] = []
     position = 0
@@ -2240,6 +2339,8 @@ def _strings(data: bytes) -> Iterator[str]:
             raw, position = bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode("ascii")), end + 1
         before = data[max(0, found.start() - 128):found.start()]
         if _WRITTEN_BY_PDFKIT.search(before[-32:]) or _FILE_ID.search(before):
+            continue
+        if _CHANGED_ON.search(before[-32:]) and _PDF_DATE.fullmatch(raw):
             continue
         if raw.startswith(b"\xfe\xff"):
             text = raw[2:].decode("utf-16-be", "replace")

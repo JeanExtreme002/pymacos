@@ -20,11 +20,14 @@ tags show up in Finder's sidebar and in Spotlight.
 """
 
 import collections
+import collections.abc
 import ctypes
 import fnmatch
+import math
 import os
 import stat
 import subprocess
+import threading
 import time
 import warnings
 import zipfile
@@ -37,8 +40,8 @@ from urllib.parse import quote, unquote, urlparse
 from . import _cf, _cg, _libc, _objc, defaults, spotlight
 from ._files import write_atomically
 from ._objc import BOOL, NSUInteger
-from ._system import applescript, framework, popen, require_macos, restart_process, run as _run
-from .errors import CommandTimeoutError, MacOSError, WaitTimeoutError
+from ._system import APPLESCRIPT_TIMEOUT, framework, osascript_error, popen, require_macos, restart_process, run as _run
+from .errors import CommandError, CommandTimeoutError, MacOSError, WaitTimeoutError
 
 __all__ = [
     "reveal",
@@ -102,9 +105,14 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 
 def _existing(path: PathLike) -> Path:
+    if not os.fspath(path):
+        raise FileNotFoundError("")  # as os.lstat("") does: Path("") would be the current folder
     resolved = Path(path).expanduser().absolute()
-    if not os.path.lexists(resolved):
-        raise FileNotFoundError(str(resolved))
+    # os.lstat, not os.path.lexists: that says "missing" for a file in a folder it may not look in, too.
+    try:
+        os.lstat(resolved)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FileNotFoundError(str(resolved)) from None
     return resolved
 
 
@@ -114,7 +122,8 @@ def _raise(error: ctypes.c_void_p, what: str) -> None:
 
 def _file_url(path: PathLike) -> str:
     """``path`` as the ``file://`` URL of a folder, as Finder's and the Dock's preferences keep one."""
-    return "file://{}/".format(quote(str(path)))
+    # The root is "/" already: another slash would make "file:////", read back as the path "//".
+    return "file://" + quote(str(path).rstrip("/") + "/")
 
 
 def _url_path(url: str) -> str:
@@ -186,9 +195,21 @@ def tags(path: PathLike) -> List[str]:
 
 
 def set_tags(path: PathLike, names: Iterable[str]) -> None:
-    """Replace the Finder tags on ``path`` with ``names`` (an empty list removes them all)."""
+    """
+    Replace the Finder tags on ``path`` with ``names`` (an empty list removes them all).
+
+    One name on its own (``"Work"``) is one tag, not one per letter. Empty names are left out, as
+    :func:`tags` leaves them out.
+    """
     target = _existing(path)
+    if isinstance(names, str):
+        names = [names]
+    elif isinstance(names, (bytes, bytearray)):
+        raise TypeError("names must be a str or a list of str, not {!r}".format(names))
     names = list(dict.fromkeys(names))  # drop duplicates, keep the order
+    if not all(isinstance(name, str) for name in names):
+        raise TypeError("names must be a str or a list of str, not {!r}".format(names))
+    names = [name for name in names if name]
     with _objc.autorelease_pool():
         objects = (ctypes.c_void_p * len(names))(*[_objc.nsstring(name) for name in names])
         array = _objc.send(
@@ -475,7 +496,10 @@ class Event:
 _CREATED, _RENAMED, _IS_DIR = 0x100, 0x800, 0x20000
 # MustScanSubDirs, UserDropped, KernelDropped: events were lost or coalesced, the folder must be read again.
 _RESCAN = 0x1 | 0x2 | 0x4
-_FILE_EVENTS, _NO_DEFER = 0x10, 0x2  # FSEventStreamCreateFlags: one event per file, the first one right away
+_ROOT_CHANGED = 0x20  # the watched folder itself, or a folder above it, was moved, deleted or made again
+# FSEventStreamCreateFlags: one event per file, the first one right away, and word of the folder itself
+# (WatchRoot: without it, a folder moved or deleted says nothing, and a watch of it waits forever).
+_FILE_EVENTS, _NO_DEFER, _WATCH_ROOT = 0x10, 0x2, 0x4
 _SINCE_NOW = 0xFFFFFFFFFFFFFFFF  # kFSEventStreamEventIdSinceNow
 _LATENCY = 0.1  # seconds FSEvents gathers events for before calling back
 
@@ -604,11 +628,20 @@ def watch(
     new file usually yields ``'created'`` and then ``'modified'``; saving
     over a file yields ``'modified'``. When macOS loses track (events dropped
     under heavy load), a ``'rescan'`` event names the folder to look through
-    again. Uses FSEvents, like Spotlight and Time
+    again. When the folder itself is moved or deleted, a ``'deleted'`` event
+    names it and the watch ends. Uses FSEvents, like Spotlight and Time
     Machine: no polling, and no permission needed, except that the
     Desktop, Documents and Downloads folders ask for access the first time,
     like any access to them.
+
+    Watching begins when the loop starts (at the first ``next()``), not at
+    the call: changes made before then aren't reported, and a missing
+    folder raises then. The loop must go on in the thread that started it,
+    whose run loop the events come through: another raises :class:`RuntimeError`.
     """
+    if timeout is not None and math.isnan(timeout):
+        # NaN passes every "is it over?" check as not over: the watch would never end.
+        raise ValueError("timeout must be a number of seconds, or None, not {}".format(timeout))
     folder = _as_on_disk(path)
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
@@ -624,12 +657,25 @@ def watch(
     pending: "collections.deque[Event]" = collections.deque()
     errors: List[Exception] = []
     seen: "collections.OrderedDict[Path, None]" = collections.OrderedDict()
+    gone: List[bool] = []  # the folder itself was moved or deleted: nothing more will come
 
     def changed(stream: int, info: int, count: int, paths: int, flags: "ctypes._Pointer", ids: "ctypes._Pointer") -> None:
         try:
             names = ctypes.cast(paths, ctypes.POINTER(ctypes.c_char_p))
             for index in range(count):
                 changed_path = Path(os.fsdecode(names[index]))
+                if flags[index] & _ROOT_CHANGED:
+                    # The folder, or one above it, moved or went: gone from its path, the watch is over;
+                    # still there (made again, or put back), what's in it may be anything now.
+                    seen.clear()
+                    if os.path.isdir(str(folder)):
+                        pending.append(Event(folder, "rescan", True))
+                    elif not gone:
+                        pending.append(Event(folder, "deleted", True))
+                        gone.append(True)
+                    continue
+                if gone:
+                    continue
                 if flags[index] & _RESCAN:
                     # Whatever the pattern: the files it would match may be among the lost events.
                     seen.clear()  # what was sighted may be gone, or new, unseen: start over
@@ -648,11 +694,14 @@ def watch(
 
     callback = _Callback(_cf.callback(changed))  # kept alive for as long as the stream runs
     with _cf.owned(_cf.from_python([str(folder)])) as paths:
-        stream = services.FSEventStreamCreate(None, callback, None, paths, _SINCE_NOW, _LATENCY, _FILE_EVENTS | _NO_DEFER)
+        stream = services.FSEventStreamCreate(
+            None, callback, None, paths, _SINCE_NOW, _LATENCY, _FILE_EVENTS | _NO_DEFER | _WATCH_ROOT
+        )
     if not stream:
         raise MacOSError("could not watch {}".format(folder))
     mode = _cf.default_mode()
     services.FSEventStreamScheduleWithRunLoop(stream, _cf.lib().CFRunLoopGetCurrent(), mode)
+    thread = threading.get_ident()  # whose run loop the stream is on: the only one its events reach
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
         if not services.FSEventStreamStart(stream):
@@ -662,9 +711,14 @@ def watch(
                 yield pending.popleft()
             if errors:
                 raise errors.pop(0)
+            if gone:
+                return
             remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
             if remaining <= 0:
                 return
+            if threading.get_ident() != thread:
+                # Another thread's run loop has no stream on it: it would wait, for good, for nothing.
+                raise RuntimeError("macos.finder.watch() must be iterated in the thread that started it")
             _cf.run_loop(remaining)  # and raises a Ctrl-C that came meanwhile
     finally:
         services.FSEventStreamStop(stream)
@@ -690,6 +744,7 @@ def wait_for_change(
     ``pattern`` and ``recursive`` work as in :func:`watch`. When macOS loses
     track of what changed (a ``'rescan'`` in :func:`watch`), the folder is
     looked through for a matching file made or changed since the wait began.
+    The folder itself moved or deleted returns its ``'deleted'`` event, whatever ``pattern`` says.
     """
     since = time.time()
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -783,6 +838,17 @@ end run
 """
 
 
+def _finder_paths(script: str) -> str:
+    """What a script listing paths prints, as it printed it, minus the line end ``osascript`` adds."""
+    # Not applescript(): its text mode would turn a "\r" in a name (a folder's "Icon\r") into "\n",
+    # and bytes that aren't UTF-8 into U+FFFD, a path that opens nothing.
+    try:
+        output = _run(["osascript", "-e", script], timeout=APPLESCRIPT_TIMEOUT, exact_newlines=True)
+    except CommandError as error:
+        raise osascript_error(error, "Finder") from None
+    return output[:-1] if output.endswith("\n") else output  # only that one: a name may end in "\n" too
+
+
 def selection() -> List[Path]:
     """
     The files and folders selected in Finder, in the window in front (or on the Desktop).
@@ -795,7 +861,7 @@ def selection() -> List[Path]:
     Goes through AppleScript: the first time, macOS asks to allow the app
     running Python to control Finder.
     """
-    output = applescript("Finder", _SELECTION).rstrip("\n")
+    output = _finder_paths(_SELECTION)
     return [Path(item.rstrip("/") or "/") for item in output.split("\x1e") if item]
 
 
@@ -805,7 +871,7 @@ def current_folder() -> Optional[Path]:
 
     Places that aren't folders (Recents, AirDrop, a search) give ``None`` too.
     """
-    output = applescript("Finder", _CURRENT_FOLDER).rstrip("\n")
+    output = _finder_paths(_CURRENT_FOLDER)
     return Path(output.rstrip("/") or "/") if output else None
 
 
@@ -823,7 +889,8 @@ def restart() -> None:
 
 
 def _setting(domain: str, key: str, default: bool = False) -> bool:
-    return bool(defaults.read(domain, key, default=default))
+    # As Finder reads it: "NO" (what `defaults write ... NO` stores) is false, not a non-empty string.
+    return defaults._as_bool(defaults.read(domain, key, default=default), default)
 
 
 def _set(domain: str, key: str, on: bool) -> None:
@@ -882,8 +949,8 @@ def compress(path: PathLike, output: Optional[PathLike] = None) -> Path:
     An archive already there is replaced, in one step: until the new one is
     complete, the old one stays as it was (unless the archive goes inside the
     folder it zips, where it's written in place). The new one is another file,
-    with the old one's permissions: tags or other attributes set on the old
-    archive itself, and its hard links, don't carry over.
+    with the old one's permissions, Finder tags, comment and other extended
+    attributes; a hard link to the old archive keeps the old one.
     """
     require_macos()
     source = _existing(path)
@@ -959,6 +1026,15 @@ def _extracted_over(archive: Path, destination: Path) -> Optional[List[str]]:
     return taken
 
 
+def _has_entries(folder: Path) -> bool:
+    """Whether ``folder`` holds anything; a file in place of the folder counts, as ditto fails over it."""
+    try:
+        with os.scandir(str(folder)) as entries:
+            return any(True for _ in entries)
+    except OSError:  # a file, or a folder that can't be looked into: whatever's there may be written over
+        return True
+
+
 def extract(archive: PathLike, destination: Optional[PathLike] = None, *, overwrite: Optional[bool] = None) -> Path:
     """
     Unzip an archive, like double-clicking it, into ``destination`` (by default, its folder); return ``destination``.
@@ -972,17 +1048,26 @@ def extract(archive: PathLike, destination: Optional[PathLike] = None, *, overwr
     and the archive's list of files can't be read to check them against), and ``overwrite=True`` replaces them. Say
     which you want: today they're replaced unless told otherwise, and pymacos
     2.0 will refuse by default, so replacing a file without ``overwrite=True``
-    warns (``DeprecationWarning``).
+    warns (``DeprecationWarning``), as does unzipping such an archive into a
+    destination that has files.
     """
     require_macos()
     source = _existing(archive)
     target = Path(destination).expanduser().absolute() if destination is not None else source.parent
     if overwrite is not True and target.exists():  # a destination not made yet has nothing to write over
         taken = _extracted_over(source, target)
-        if taken is None and overwrite is False:
-            raise ValueError(
-                "{} can't be read here to tell which files unzipping it would write over: "
-                "pass overwrite=True to unzip it anyway".format(source.name)
+        if taken is None and _has_entries(target):  # an empty folder has nothing to write over either
+            if overwrite is False:
+                raise ValueError(
+                    "{} can't be read here to tell which files unzipping it would write over: "
+                    "pass overwrite=True to unzip it anyway".format(source.name)
+                )
+            warnings.warn(
+                "macos.finder.extract() can't tell which files of {} are already in the destination, and writes over "
+                "them unless overwrite=False; pymacos 2.0 will refuse by default: pass overwrite=True to replace "
+                "them, or False to refuse".format(source.name),
+                DeprecationWarning,
+                stacklevel=2,
             )
         if taken and overwrite is False:
             raise FileExistsError(
@@ -1076,15 +1161,27 @@ def set_show_library_folder(on: bool = True) -> None:
 
 
 _NEW_WINDOW_TARGETS = {"PfHm": "~", "PfDe": "~/Desktop", "PfDo": "~/Documents"}
+# A folder, a disk and iCloud Drive: the targets NewWindowTargetPath names. It's left behind when another
+# is picked (Recents, PfAF; Computer, PfCm), and then names a folder new windows no longer open.
+_NEW_WINDOW_PATHS = {"PfLo", "PfVo", "PfID"}
 
 
-def new_window_folder() -> Path:
-    """The folder a new Finder window (⌘N) opens."""
+def new_window_folder() -> Optional[Path]:
+    """
+    The folder a new Finder window (⌘N) opens.
+
+    ``None`` when new windows open on a place that isn't a folder: Recents or Computer.
+    """
     target = defaults.read(_FINDER, "NewWindowTarget", default="PfHm")
-    if target in _NEW_WINDOW_TARGETS:
+    if isinstance(target, str) and target in _NEW_WINDOW_TARGETS:
         return Path(os.path.expanduser(_NEW_WINDOW_TARGETS[target]))
+    if not (isinstance(target, str) and target in _NEW_WINDOW_PATHS):
+        return None
     url = defaults.read(_FINDER, "NewWindowTargetPath", default="")
-    return Path(_url_path(url)).absolute() if url else Path.home()
+    if not isinstance(url, str) or not url.startswith("file://"):
+        return Path.home()  # no folder named, or not as a URL: the home folder, Finder's own default
+    # "/" + ...lstrip: the root as older versions wrote it ("file:////") reads back "/", not "//".
+    return Path("/" + os.path.normpath(_url_path(url)).lstrip("/"))
 
 
 def set_new_window_folder(folder: PathLike) -> None:
@@ -1225,9 +1322,12 @@ _DESKTOP_SORTS = {
 }
 
 
-def _desktop_icons() -> Dict[str, Any]:
-    view = defaults.read(_FINDER, "DesktopViewSettings", default={}) or {}
-    return dict(view.get("IconViewSettings", {}))
+def _desktop_settings() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """The desktop's view settings, and the icons' within them: each ``{}`` when hand-edited into something else."""
+    view = defaults.read(_FINDER, "DesktopViewSettings", default={})
+    view = dict(view) if isinstance(view, collections.abc.Mapping) else {}
+    icons = view.get("IconViewSettings")
+    return view, dict(icons) if isinstance(icons, collections.abc.Mapping) else {}
 
 
 def desktop_view() -> Dict[str, object]:
@@ -1238,15 +1338,17 @@ def desktop_view() -> Dict[str, object]:
     "show_item_info": False, "labels_on_bottom": True}``; ``sort`` is
     ``None`` when the icons are placed freely.
     """
-    icons = _desktop_icons()
+    icons = _desktop_settings()[1]
     sorts = {value: name for name, value in _DESKTOP_SORTS.items()}
+    arrange = icons.get("arrangeBy", "none")
     return {
-        "icon_size": int(float(icons.get("iconSize", 64))),
-        "grid_spacing": int(float(icons.get("gridSpacing", 54))),
-        "text_size": int(float(icons.get("textSize", 12))),
-        "sort": sorts.get(icons.get("arrangeBy", "none")),
-        "show_item_info": bool(icons.get("showItemInfo", False)),
-        "labels_on_bottom": bool(icons.get("labelOnBottom", True)),
+        # A value that isn't a number (text, a list), left by hand: the option's default.
+        "icon_size": defaults._as_int(icons.get("iconSize"), 64),
+        "grid_spacing": defaults._as_int(icons.get("gridSpacing"), 54),
+        "text_size": defaults._as_int(icons.get("textSize"), 12),
+        "sort": sorts.get(arrange) if isinstance(arrange, str) else None,
+        "show_item_info": defaults._as_bool(icons.get("showItemInfo", False), False),
+        "labels_on_bottom": defaults._as_bool(icons.get("labelOnBottom", True), True),
     }
 
 
@@ -1312,8 +1414,7 @@ def set_desktop_view(
         changes["labelOnBottom"] = bool(labels_on_bottom)
     if not changes:
         raise ValueError("say what to change: icon_size=, grid_spacing=, text_size=, sort=, show_item_info= or labels_on_bottom=")
-    view = dict(defaults.read(_FINDER, "DesktopViewSettings", default={}) or {})
-    icons = dict(view.get("IconViewSettings", {}))
+    view, icons = _desktop_settings()  # what can't be read as settings is written over with these
     icons.update(changes)
     view["IconViewSettings"] = icons
     defaults.write(_FINDER, "DesktopViewSettings", view)
@@ -1421,10 +1522,11 @@ def largest(
     """
     if count < 1:
         raise ValueError("count must be 1 or more, not {}".format(count))
-    if timeout is not None and timeout <= 0:
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     require_macos()  # before Spotlight: its "not supported" mustn't pass for "nothing indexed"
-    root = _existing(folder)
+    # Spelled plainly: a "..", hidden to _unindexed() as any name starting with ".", would walk it all.
+    root = _without_dots(_existing(folder))
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     sizes: Dict[Path, int] = {}
@@ -1481,7 +1583,33 @@ def largest(
     return sorted(sizes.items(), key=lambda item: (-item[1], str(item[0])))[:count]
 
 
+def _without_dots(path: Path) -> Path:
+    """``path`` with no ".." in it, still naming the folder the system would: after a symlink, ".." is the link's parent's."""
+    if ".." not in path.parts:
+        return path
+    plain = Path(os.path.normpath(path))
+    try:
+        if plain.samefile(path):
+            return plain
+    except OSError:
+        return path  # one of them can't be looked at: leave the spelling, and the error, to the system
+    return Path(os.path.realpath(path))
+
+
 def _unindexed(folder: Path) -> bool:
     """Whether Spotlight leaves ``folder`` out: a hidden one, or the user's Library, or inside one."""
-    library = Path.home() / "Library"
-    return any(part.startswith(".") for part in folder.parts[1:]) or folder == library or library in folder.parents
+    if any(part.startswith(".") for part in folder.parts[1:]):
+        return True
+    # The Library by the folder itself, not its spelling: the disk ignores case, and "~/library" is it too.
+    try:
+        library = os.stat(str(Path.home() / "Library"))
+    except OSError:
+        return False
+    for candidate in (folder, *folder.parents):
+        try:
+            found = os.stat(str(candidate))
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == (library.st_dev, library.st_ino):
+            return True
+    return False

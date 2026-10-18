@@ -67,9 +67,9 @@ def test_disk_health(monkeypatch):
 
 
 def test_argument_checks():
-    with pytest.raises(ValueError, match="interval must be positive"):
+    with pytest.raises(ValueError, match="interval must be a positive number"):
         system.network_usage(interval=0)
-    with pytest.raises(ValueError, match="interval must be positive"):
+    with pytest.raises(ValueError, match="interval must be a positive number"):
         system.energy_usage(0)
 
 

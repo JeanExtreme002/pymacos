@@ -27,9 +27,10 @@ IDE); without it macOS silently drops the events, so these functions raise
 :class:`~macos.errors.PermissionDeniedError` instead.
 """
 
+import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Iterator, List, Optional, Sequence, Tuple
 
 from . import _cf, _events
 from ._objc import CGPoint
@@ -76,6 +77,7 @@ _BUTTONS = {
 _MOVED = 5  # kCGEventMouseMoved
 _CLICK_STATE = 1  # kCGMouseEventClickState: 2 for the second click of a double-click
 _LINES = 1  # kCGScrollEventUnitLine
+_MOST_LINES = 2**31 - 1  # Core Graphics takes the wheel's lines as a 32-bit number
 
 
 def position() -> Tuple[float, float]:
@@ -104,20 +106,38 @@ def _mouse_event(kind: int, x: float, y: float, button: int, clicks: int = 0) ->
         raise MacOSError("could not create a mouse event")
     if clicks:
         cg.CGEventSetIntegerValueField(event, _CLICK_STATE, clicks)
-    flags = _events.held_flags()
-    if flags:  # inside macos.keyboard.hold(), on this thread
-        cg.CGEventSetFlags(event, flags)
+    _hold_keys(event)
     return event
 
 
-def _glide(kind: int, x: float, y: float, button: int, duration: float) -> None:
-    """Move to ``(x, y)`` in steps over ``duration`` seconds (or at once), posting ``kind`` events."""
+def _hold_keys(event: int) -> None:
+    flags = _events.held_flags()
+    if flags:  # inside macos.keyboard.hold(), on this thread
+        _events.graphics().CGEventSetFlags(event, flags)
+
+
+def _check_duration(duration: float) -> None:
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("duration must not be negative or infinite, not {}".format(duration))
+
+
+def _glide(kind: int, x: float, y: float, button: int, duration: float, at: Optional[List[float]] = None) -> None:
+    """
+    Move to ``(x, y)`` in steps over ``duration`` seconds (or at once), posting ``kind`` events.
+
+    ``at``, when given, is kept as the ``[x, y]`` of the step being posted (or last posted).
+    """
     start_x, start_y = position()
     steps = max(1, int(duration * 60))  # about 60 moves a second, like a real mouse
     started = time.monotonic()
     for step in range(1, steps + 1):
         fraction = step / steps
-        _events.post(_mouse_event(kind, start_x + (x - start_x) * fraction, start_y + (y - start_y) * fraction, button))
+        point = (start_x + (x - start_x) * fraction, start_y + (y - start_y) * fraction)
+        if at is not None:
+            # Set before posting: post() pauses after the event is out, and an interrupt there
+            # must not leave ``at`` a step behind the pointer.
+            at[:] = point
+        _events.post(_mouse_event(kind, point[0], point[1], button))
         if steps > 1:
             # Each step is due by the clock, not after a fixed sleep: the pause post() takes after
             # every event (and the time posting takes) would otherwise add up to a third more.
@@ -131,8 +151,7 @@ def move(x: float, y: float, *, duration: float = 0.0) -> None:
     Apps see it as a real mouse movement (hover effects, tooltips). Needs the
     Accessibility permission.
     """
-    if duration < 0:
-        raise ValueError("duration must not be negative, not {}".format(duration))
+    _check_duration(duration)
     _events.require_permission()
     _glide(_MOVED, x, y, 0, duration)
 
@@ -189,8 +208,10 @@ def click_text(
     Text is found as :func:`macos.screen.find_text` does, ignoring case; the
     first match from the top is clicked. With ``timeout``, it waits up to that
     many seconds for the text to show up. Raises
-    :class:`~macos.errors.MacOSError` when it isn't on the screen. Needs the
-    Screen Recording and Accessibility permissions.
+    :class:`~macos.errors.MacOSError` when it isn't on the screen.
+    ``languages`` is a list, such as ``["en-US"]`` (a single str raises
+    :class:`TypeError`). Needs the Screen Recording and Accessibility
+    permissions.
     """
     from . import screen
 
@@ -210,20 +231,28 @@ def drag(x: float, y: float, *, button: str = "left", duration: float = 0.3) -> 
     Press ``button`` where the pointer is, move to ``(x, y)`` over ``duration`` seconds, and release it.
 
     Moves windows, selects text, drops files... Use :func:`move` first to
-    choose where the drag starts. Needs the Accessibility permission.
+    choose where the drag starts. The button is always released: if the drag
+    is interrupted (Ctrl-C), where it stopped, so nothing is dropped at
+    ``(x, y)``. Needs the Accessibility permission.
     """
     down, up, dragged, number = _button(button)
-    if duration < 0:
-        raise ValueError("duration must not be negative, not {}".format(duration))
+    _check_duration(duration)
     _events.require_permission()
     start_x, start_y = position()
+    at = [start_x, start_y]
     try:
         # Inside the try: a Ctrl-C in the pause right after the press must let go too.
         _events.post(_mouse_event(down, start_x, start_y, number, 1))
-        _glide(dragged, x, y, number, duration)
-    finally:
-        # Always let go, or the button stays pressed for the whole system.
-        _events.post(_mouse_event(up, x, y, number, 1))
+        _glide(dragged, x, y, number, duration, at)
+    except BaseException:
+        # Let go all the same, or the button stays pressed for the whole system; but where the
+        # pointer got to: a release at (x, y) would move it there and finish the drag.
+        try:
+            _events.post(_mouse_event(up, at[0], at[1], number, 1))
+        except BaseException:
+            pass  # the interruption is what the caller needs to see
+        raise
+    _events.post(_mouse_event(up, x, y, number, 1))
 
 
 def scroll(lines: int, *, horizontal: bool = False) -> None:
@@ -231,16 +260,23 @@ def scroll(lines: int, *, horizontal: bool = False) -> None:
     Scroll by ``lines``: positive scrolls down (towards the end), negative up.
 
     With ``horizontal=True``, positive scrolls right and negative left. It
-    scrolls what is under the pointer. Needs the Accessibility permission.
+    scrolls what is under the pointer. Keys held with
+    :func:`macos.keyboard.hold` apply, as for a real wheel: Cmd-scroll zooms in
+    many apps. ``lines`` goes up to 2,147,483,647 either way. Needs the
+    Accessibility permission.
     """
     if not lines:
         return
+    if not -_MOST_LINES <= lines <= _MOST_LINES:
+        # Beyond it, the number would wrap around and scroll the other way.
+        raise ValueError("lines must be from -{0} to {0}, not {1}".format(_MOST_LINES, lines))
     _events.require_permission()
     # A wheel turned "up" is positive for Core Graphics: flip the sign.
     vertical, sideways = (0, -lines) if horizontal else (-lines, 0)
     event = _events.graphics().CGEventCreateScrollWheelEvent2(None, _LINES, 2, vertical, sideways, 0)
     if not event:
         raise MacOSError("could not create a scroll event")
+    _hold_keys(event)
     _events.post(event)
 
 
@@ -274,8 +310,10 @@ def watch(*, timeout: Optional[float] = None) -> Iterator[Click]:
     Monitoring* permission (:func:`has_listen_permission` checks it, not
     :func:`has_permission`, which is Accessibility): without it, the call
     itself raises :class:`~macos.PermissionDeniedError`, before the loop
-    starts. Loop on the thread that called it: the clicks are heard on that
-    thread's run loop.
+    starts, as a ``timeout`` that is negative or not a number raises
+    :class:`ValueError`. Loop on the thread that called it: the clicks are
+    heard on that thread's run loop. To stop it from another thread, call
+    ``close()`` on what it returns.
     """
     cg = _events.graphics()
     downs = {_BUTTONS["left"][0]: "left", _BUTTONS["right"][0]: "right", _BUTTONS["middle"][0]: None}
@@ -301,10 +339,17 @@ _SPEED_MAX = 3.0  # the slider's range in System Settings goes up to 3
 
 
 def tracking_speed() -> float:
-    """The pointer speed with a mouse, from 0.0 (slowest) to 1.0 (fastest). For the trackpad, see :mod:`macos.trackpad`."""
+    """
+    The pointer speed with a mouse, from 0.0 (slowest) to 1.0 (fastest). For the trackpad, see :mod:`macos.trackpad`.
+
+    A speed set by hand beyond the slider's range (such as ``-1`` with
+    ``defaults write``, to turn acceleration off) reads as the nearer end, so
+    :func:`set_tracking_speed` takes whatever this returns.
+    """
     from . import defaults
 
-    return round(defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.mouse.scaling", default=1.0), 1.0) / _SPEED_MAX, 3)
+    scaling = defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.mouse.scaling", default=1.0), 1.0)
+    return round(max(0.0, min(1.0, scaling / _SPEED_MAX)), 3)
 
 
 def set_tracking_speed(speed: float) -> None:
@@ -342,8 +387,8 @@ def set_scroll_speed(speed: float) -> None:
     from . import defaults
     from ._system import apply_input_settings
 
-    if speed < 0:
-        raise ValueError("speed must not be negative, not {}".format(speed))
+    if not math.isfinite(speed) or speed < 0:
+        raise ValueError("speed must not be negative or infinite, not {}".format(speed))
     defaults.write(defaults.GLOBAL, "com.apple.scrollwheel.scaling", float(speed))
     apply_input_settings()
 
@@ -363,8 +408,8 @@ def set_double_click_speed(seconds: float) -> None:
     """
     from . import defaults
 
-    if seconds <= 0:
-        raise ValueError("seconds must be positive, not {}".format(seconds))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("seconds must be positive and finite, not {}".format(seconds))
     defaults.write(defaults.GLOBAL, "com.apple.mouse.doubleClickThreshold", float(seconds))
 
 
@@ -372,7 +417,7 @@ def acceleration() -> bool:
     """Whether the pointer goes farther the faster the mouse moves (pointer acceleration, on by default)."""
     from . import defaults
 
-    return not defaults.read(defaults.GLOBAL, "com.apple.mouse.linear", default=False)
+    return not defaults._as_bool(defaults.read(defaults.GLOBAL, "com.apple.mouse.linear", default=False), False)
 
 
 def set_acceleration(on: bool = True) -> None:

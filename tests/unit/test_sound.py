@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.sound`. They run on any platform."""
 
+from pathlib import Path
+
 import pytest
 
 import macos
@@ -74,3 +76,96 @@ def test_a_named_sound_is_played_from_a_copy(monkeypatch):
 
     # The shared instance soundNamed: returns may be playing already.
     assert sent == ["soundNamed:", "copy"]
+
+
+def _fake_player(monkeypatch):
+    """Record what ``_load`` sends, as (selector, args), with nothing to play."""
+    sent = []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append((selector, args))
+        return 7
+
+    monkeypatch.setattr(macos.sound, "_appkit", lambda: None)
+    monkeypatch.setattr(macos.sound._objc, "send", send)
+    monkeypatch.setattr(macos.sound._objc, "cls", lambda name: 1)
+    monkeypatch.setattr(macos.sound._objc, "nsstring", lambda text: text)
+    return sent
+
+
+def _sound_folders(monkeypatch, tmp_path, *folders):
+    """Point the alert sound folders at ``folders`` under ``tmp_path``, made empty."""
+    paths = tuple(tmp_path / folder for folder in folders)
+    for path in paths:
+        path.mkdir(parents=True)
+    monkeypatch.setattr(macos.sound, "_SOUND_FOLDERS", paths)
+    monkeypatch.setattr(macos.sound, "require_macos", lambda: None)
+    return paths
+
+
+def test_a_listed_name_with_a_dot_is_played_from_its_file(monkeypatch, tmp_path):
+    (user,) = _sound_folders(monkeypatch, tmp_path, "user")
+    (user / "My.Sound.aiff").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    sent = _fake_player(monkeypatch)
+
+    assert "My.Sound" in macos.sound.names()
+    macos.sound._load("My.Sound")
+
+    assert sent[-1] == ("initWithContentsOfFile:byReference:", (str(user / "My.Sound.aiff"), False))
+
+
+def test_a_missing_file_with_an_extension_is_still_file_not_found(monkeypatch, tmp_path):
+    _sound_folders(monkeypatch, tmp_path, "user")
+    monkeypatch.chdir(tmp_path)
+    _fake_player(monkeypatch)
+
+    with pytest.raises(FileNotFoundError):
+        macos.sound._load("done.mp3")
+
+
+def test_a_path_object_always_means_a_file(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    sent = _fake_player(monkeypatch)
+
+    with pytest.raises(FileNotFoundError):
+        macos.sound._load(Path("Glass"))  # not the alert sound
+    (tmp_path / "chime").write_bytes(b"")
+    macos.sound._load(Path("chime"))
+
+    assert [selector for selector, args in sent] == ["alloc", "initWithContentsOfFile:byReference:"]
+
+
+def test_set_alert_sound_picks_the_file_play_would(monkeypatch, tmp_path):
+    user, system = _sound_folders(monkeypatch, tmp_path, "user", "system")
+    (system / "Glass.aiff").write_bytes(b"")
+    (user / "Glass.aiff").write_bytes(b"")
+    written = []
+    monkeypatch.setattr(macos.sound.defaults, "write", lambda domain, key, value: written.append(value))
+
+    macos.sound.set_alert_sound("Glass")
+
+    assert written == [str(user / "Glass.aiff")]  # soundNamed: looks in ~/Library/Sounds first
+
+
+def test_the_user_sound_folder_comes_first():
+    assert macos.sound._SOUND_FOLDERS[0] == Path("~/Library/Sounds").expanduser()
+    assert macos.sound._SOUND_FOLDERS[-1] == Path("/System/Library/Sounds")
+
+
+@pytest.mark.parametrize("value", [5, b"/System/Library/Sounds/Glass.aiff", ["Glass"], ""])
+def test_a_hand_edited_alert_sound_reads_as_macos_own(monkeypatch, value):
+    monkeypatch.setattr(macos.sound.defaults, "read", lambda *args, **kwargs: value)
+
+    assert macos.sound.alert_sound() is None
+
+
+@pytest.mark.parametrize(
+    "value, on",
+    [(1, True), (0, False), ("0", False), ("1", True), (True, True), ("x", True), ("NO", False), ("false", False),
+     ("YES", True), (False, False)],
+)
+def test_ui_sounds_reads_a_hand_edited_value(monkeypatch, value, on):
+    monkeypatch.setattr(macos.sound.defaults, "read", lambda *args, **kwargs: value)
+
+    assert macos.sound.ui_sounds() is on

@@ -36,6 +36,8 @@ _MODIFIERS = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | _FN
 # The keys macOS flags with Fn whether or not Fn is held: the F-keys, the
 # arrows, and home, end, page up, page down, forward delete and help.
 _FN_FLAGGED = keyboard._FN_FLAGGED
+# The keys that are a flags change to macOS, not a key press: the modifiers, and Caps Lock.
+_NO_KEY_DOWN = frozenset(keyboard._MODIFIER_FLAGS) | {keyboard._KEYS["caps_lock"]}
 
 _DENIED = (
     "listening to the keyboard needs the Input Monitoring and Accessibility permissions: allow the app "
@@ -110,17 +112,30 @@ class _Listener(_events.Listener):
 
 
 _listeners = _events.Listeners()
+# Whether this thread is in a callback that run() called: a run() there would never be handed a shortcut.
+_calling = threading.local()
 
 
 def _combination(keys: str) -> Tuple[int, int]:
     """The key code and modifier flags of a shortcut such as ``"cmd+shift+k"``."""
-    modifiers, code, shifted = keyboard._parse(keys)
-    if code in keyboard._MODIFIER_FLAGS:
-        # A modifier pressed on its own is a flags change to macOS, not a key press: the tap,
-        # which listens to key presses, would never see it, and the shortcut would never fire.
+    if not keys.strip():
+        raise ValueError("a shortcut needs a key, such as 'cmd+shift+k' or 'f5'")
+    try:
+        modifiers, code, shifted = keyboard._parse(keys)
+    except ValueError as error:
+        if "type()" not in str(error):
+            raise
+        # A character the layout has no key for: the advice to type() it is for keyboard.press.
         raise ValueError(
-            "{!r} is a modifier on its own, which can't be a shortcut: end it with a key, such as "
-            "'cmd+shift+k' or 'f5'".format(keys)
+            "{!r} has a character no key types on this keyboard layout: pick a key it has, or a name "
+            "such as 'f5'".format(keys)
+        ) from None
+    if code in _NO_KEY_DOWN:
+        # A modifier pressed on its own, or Caps Lock, is a flags change to macOS, not a key press:
+        # the tap, which listens to key presses, would never see it, and the shortcut would never fire.
+        raise ValueError(
+            "{!r} is a modifier on its own or Caps Lock, which can't be a shortcut: end it with a key, "
+            "such as 'cmd+shift+k' or 'f5'".format(keys)
         )
     flags = 0
     for flag, _ in modifiers:
@@ -137,9 +152,23 @@ def register(keys: str, callback: Callable[[], object]) -> Hotkey:
     ``keys`` is a shortcut such as ``"ctrl+option+s"`` or ``"f5"``, written
     as for :func:`macos.keyboard.press`. Pick one apps don't use: the app in
     front won't get it. Registering a shortcut again replaces its callback.
-    Holding the keys doesn't repeat the call.
+    Holding the keys doesn't repeat the call. A modifier alone and Caps Lock
+    can't be shortcuts: they raise :class:`ValueError`, and a ``callback``
+    that isn't callable raises :class:`TypeError`.
+
+    A character such as the ``a`` of ``"cmd+a"`` is looked up on the
+    keyboard layout in use now, and the shortcut keeps to that physical key:
+    after a switch to another layout, it's still the key that typed ``a``
+    then. Register the shortcut again after a switch to follow the new one;
+    key names such as ``"f5"`` or ``"space"`` don't depend on the layout.
+
+    With no :func:`run` in progress, a :func:`wait` calls the callbacks of
+    the other shortcuts pressed meanwhile; the one it waits for it takes
+    without calling its callback.
     """
     code, flags = _combination(keys)
+    if not callable(callback):
+        raise TypeError("callback must be callable, not {!r}".format(callback))
     hotkey = Hotkey(keys, code, flags, callback)
     with _lock:
         _registered[(code, flags)] = hotkey
@@ -275,6 +304,7 @@ def _listen(on_press: Callable[[Tuple[int, int]], bool], wanted: Optional[Tuple[
     thread; the tap runs on its own (see :class:`_TapThread`), so a slow
     ``on_press`` doesn't hold up the keyboard.
     """
+    _events.check_timeout(timeout)  # before the tap: a NaN would never be reached, and listen for good
     listener = _Listener(wanted)
     with _listeners.listening(listener):
         tapping = _TapThread(listener)
@@ -286,17 +316,25 @@ def _listen(on_press: Callable[[Tuple[int, int]], bool], wanted: Optional[Tuple[
             tapping.close()
 
 
-def _call(combination: Tuple[int, int]) -> None:
+def _call(combination: Tuple[int, int], *, running: bool = False) -> None:
     with _lock:
         hotkey = _registered.get(combination)
     if hotkey is not None:
-        with _events.marked():  # the keys it presses aren't shortcuts to catch: see _handler
-            hotkey.callback()
+        previous = getattr(_calling, "on", False)
+        # Only run()'s callbacks: one a wait() called may start a run(), which becomes the oldest.
+        _calling.on = previous or running
+        try:
+            with _events.marked():  # the keys it presses aren't shortcuts to catch: see _handler
+                hotkey.callback()
+        finally:
+            _calling.on = previous
 
 
 def run(*, timeout: Optional[float] = None) -> None:
     """
     Listen for the registered shortcuts and call their callbacks, until :func:`stop` or ``timeout`` seconds.
+
+    A ``timeout`` that isn't a number of seconds, 0 or more, raises :class:`ValueError`.
 
     Callbacks run on this thread, one at a time; an exception in one stops
     :func:`run` and propagates. Ctrl-C stops it too. The keyboard is watched
@@ -304,8 +342,19 @@ def run(*, timeout: Optional[float] = None) -> None:
     keys typed in other apps, and may press keys itself. With no shortcut
     registered it warns (:class:`RuntimeWarning`) and waits all the same:
     shortcuts registered meanwhile, from another thread, are caught from
-    then on.
+    then on. Called from a callback that :func:`run` called, it raises
+    :class:`RuntimeError`: the shortcuts would go on to the :func:`run` that
+    callback is holding up, and none would be called; register the shortcuts
+    of a "mode" there and return.
     """
+    if getattr(_calling, "on", False):
+        # The oldest run() calls the callbacks (see _dispatch), and it's this thread's, busy in the
+        # callback: a run() here would swallow every shortcut and call none until it ended.
+        raise RuntimeError(
+            "run() can't be called from a callback run() called: register or unregister shortcuts there and "
+            "return, and the run() in progress calls them"
+        )
+    _events.check_timeout(timeout)  # before the warning below, which would promise a wait that never comes
     with _lock:
         registered = bool(_registered)
     if not registered:
@@ -319,7 +368,7 @@ def run(*, timeout: Optional[float] = None) -> None:
         )
 
     def call(combination: Tuple[int, int]) -> bool:
-        _call(combination)
+        _call(combination, running=True)
         return False
 
     _listen(call, None, timeout)
@@ -328,6 +377,8 @@ def run(*, timeout: Optional[float] = None) -> None:
 def wait(keys: str, *, timeout: Optional[float] = None) -> bool:
     """
     Wait until ``keys`` is pressed, in any app; return ``False`` if ``timeout`` seconds pass first.
+
+    A ``timeout`` that isn't a number of seconds, 0 or more, raises :class:`ValueError`.
 
     Handy to start or pause a script from anywhere::
 

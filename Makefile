@@ -33,7 +33,7 @@ help:
 	@echo "  $(YELLOW)test-unit$(NC)        - Run the unit tests only (safe: nothing on this Mac changes)"
 	@echo "  $(YELLOW)test-live$(NC)        - Run the live tests only, but not the intrusive ones"
 	@echo "  $(YELLOW)test-live-all$(NC)    - Run the live tests only, the intrusive ones too"
-	@echo "  $(YELLOW)test-coverage$(NC)    - Run the unit tests with a coverage report (the figure CI gates on for every Python)"
+	@echo "  $(YELLOW)test-coverage$(NC)    - Run the unit tests with a coverage report, failing under the $(COVERAGE_MIN)% CI gates on for every Python"
 	@echo "  $(YELLOW)lint$(NC)             - Run the linter (flake8)"
 	@echo "  $(YELLOW)type-check$(NC)       - Run the type checker (mypy)"
 	@echo "  $(YELLOW)check$(NC)            - Run lint, type-check and test-unit: what CI runs on a pull request, except the docs and live tests"
@@ -117,12 +117,15 @@ test-live-all:
 	@echo "$(GREEN)Running live tests, the intrusive ones too (camera, microphone, browser, schedule, settings)...$(NC)"
 	$(WITH_SWITCHES) $(PYTHON) -m pytest $(TEST_DIR)/live -v -rs
 
-# The unit tests with coverage: the figure CI gates on for every Python (it
-# gates both suites together on one, where the live tests' coverage is known)
+# The unit tests with coverage, held to the gate CI applies on every Python (it
+# gates both suites together on one, where the live tests' coverage is known).
+# Keep it in step with --cov-fail-under in .github/workflows/test.yml.
+COVERAGE_MIN = 70
+
 .PHONY: test-coverage
 test-coverage:
 	@echo "$(GREEN)Running unit tests with coverage...$(NC)"
-	$(PYTHON) -m pytest $(TEST_DIR) -m "not live" --cov=$(PACKAGE_NAME) --cov-report=html --cov-report=term
+	$(PYTHON) -m pytest $(TEST_DIR) -m "not live" --cov=$(PACKAGE_NAME) --cov-report=html --cov-report=term --cov-fail-under=$(COVERAGE_MIN)
 	@echo "$(YELLOW)HTML report available at htmlcov/index.html$(NC)"
 
 # Run linter

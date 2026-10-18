@@ -137,6 +137,7 @@ def _off_the_main_thread(function):
 def test_shortcuts_off_the_main_thread_use_a_us_keyboard_on_a_us_layout(monkeypatch):
     monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {})
     monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.ABC")
+    monkeypatch.setattr(macos.keyboard, "_is_jis", lambda: False)
 
     parsed = _off_the_main_thread(lambda: [macos.keyboard._parse(keys) for keys in ("cmd+plus", "?", "a")])
 
@@ -653,3 +654,210 @@ def test_watch_only_warns_about_the_main_thread_when_that_is_the_problem(monkeyp
     monkeypatch.setattr(keyboard, "_layout", lambda: (_ for _ in ()).throw(macos.MainThreadError("main thread only")))
     with pytest.warns(RuntimeWarning, match="main thread only; until then, watch"), pytest.raises(Stop):
         next(keyboard.watch())
+
+
+def test_a_worker_on_a_jis_keyboard_refuses_the_characters_it_types_elsewhere(monkeypatch):
+    # ABC on a Japanese keyboard: "[" is the key US puts "]" on, and "=" is Shift+"-".
+    monkeypatch.setattr(macos.keyboard, "_LAYOUTS", {})
+    monkeypatch.setattr(macos.keyboard, "_current_layout_id", lambda: "com.apple.keylayout.ABC")
+    monkeypatch.setattr(macos.keyboard, "_is_jis", lambda: True)
+
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("cmd+a")) == ([(1 << 20, 55)], 0, False)
+    assert _off_the_main_thread(lambda: macos.keyboard._parse("/")) == ([], 44, False)
+    for keys in ("[", "ctrl+=", "shift+'", "@"):
+        error = _off_the_main_thread(lambda: macos.keyboard._parse(keys))
+        assert isinstance(error, macos.MainThreadError) and "JIS" in str(error), keys
+
+
+def test_jis_layout_type_is_read_from_the_keyboard_kind(monkeypatch):
+    from types import SimpleNamespace
+
+    carbon = SimpleNamespace(LMGetKbdType=lambda: 198, KBGetLayoutType=lambda kind: 0x4A495320 if kind == 198 else 0)
+    monkeypatch.setattr(macos.keyboard, "_text_input", lambda: carbon)
+    assert macos.keyboard._is_jis() is True
+    carbon.LMGetKbdType = lambda: 40
+    assert macos.keyboard._is_jis() is False
+
+
+def test_watch_names_the_keys_by_the_layout_in_use_at_each_key(monkeypatch):
+    us = {"a": (0, False), "q": (12, False)}
+    azerty = {"q": (0, False), "a": (12, False)}
+    current = [us]
+    convert = _watching(monkeypatch, lambda: current[0], text="a")
+    cmd = 1 << 20
+
+    assert convert(10, (0, cmd)).shortcut == "cmd+a"
+    current[0] = azerty  # switched to French mid-watch
+    assert convert(10, (12, cmd)).shortcut == "cmd+a"  # not "cmd+q": that would quit the app
+    assert convert(10, (0, cmd)).shortcut == "cmd+q"
+
+
+def test_watch_warns_once_when_the_layout_becomes_unreadable_mid_watch(monkeypatch):
+    def unread():
+        raise macos.MainThreadError("the keyboard layout in use (French) can only be read on the main thread")
+
+    current = [lambda: {"k": (40, False)}]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        convert = _watching(monkeypatch, lambda: current[0](), text="x")
+        assert convert(10, (40, 0)).key == "k"
+    current[0] = unread
+    with pytest.warns(RuntimeWarning, match="names the keys by what they type") as caught:
+        assert convert(10, (40, 0)).key == "x"
+        assert convert(10, (40, 0)).key == "x"
+    assert len(caught) == 1
+
+
+@pytest.mark.parametrize(
+    "stored, expected",
+    [(False, False), (True, True), ("false", False), ("0", False), ("NO", False), (" yes ", True),
+     ("TRUE", True), ("1", True), ("0.5", False), (2, True), (0, False), ("fast", True), ([1], True), (None, True)],
+)
+def test_yes_or_no_settings_read_text_as_macos_does(monkeypatch, stored, expected):
+    # "fast", a list or nothing aren't a yes or a no: the setting's default (True for press and hold).
+    monkeypatch.setattr(macos.keyboard, "_global", lambda key, default: stored)
+    assert macos.keyboard.press_and_hold() is expected
+
+
+def test_every_yes_or_no_setting_reads_false_text_as_false(monkeypatch):
+    monkeypatch.setattr(macos.keyboard, "_global", lambda key, default: "false")
+    kb = macos.keyboard
+    readers = (kb.press_and_hold, kb.standard_function_keys, kb.autocorrect, kb.smart_quotes, kb.smart_dashes,
+               kb.auto_capitalization, kb.double_space_period, kb.inline_predictions)
+    assert [reader() for reader in readers] == [False] * len(readers)
+
+
+def test_hand_edited_numeric_settings_read_without_raising(monkeypatch):
+    written = {}
+    stored = {"KeyRepeat": "fast", "InitialKeyRepeat": 0, "AppleKeyboardUIMode": "2.5"}
+    monkeypatch.setattr(macos.keyboard, "_global", lambda key, default: stored.get(key, default))
+    monkeypatch.setattr(macos.keyboard, "_set_global", lambda key, value, apply=True: written.update({key: value}))
+
+    assert macos.keyboard.key_repeat() == (0.09, 0.375)  # System Settings' defaults
+    assert macos.keyboard.full_keyboard_access() is True
+    stored["AppleKeyboardUIMode"] = "fast"
+    assert macos.keyboard.full_keyboard_access() is False
+    macos.keyboard.set_full_keyboard_access(True)  # writes a clean mask over it
+    assert written == {"AppleKeyboardUIMode": 2}
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_set_key_repeat_and_backlight_timeout_refuse_nan_and_infinity(monkeypatch, value):
+    monkeypatch.setattr(macos.keyboard, "_set_global", lambda *args, **kwargs: pytest.fail("written"))
+    monkeypatch.setattr(macos.keyboard, "_backlight", lambda: pytest.fail("sent"))
+    with pytest.raises(ValueError, match="interval must be positive"):
+        macos.keyboard.set_key_repeat(value)
+    with pytest.raises(ValueError, match="delay must be positive"):
+        macos.keyboard.set_key_repeat(delay=value)
+    with pytest.raises(ValueError, match="seconds must be positive, or None"):
+        macos.keyboard.set_backlight_timeout(value)
+
+
+def test_a_remapping_remappings_has_no_name_for_can_be_undone(monkeypatch):
+    from macos import keyboard
+
+    mappings = {0x700000064: keyboard._HID_CODES["escape"], keyboard._HID_CODES["caps_lock"]: keyboard._HID_CODES["escape"]}
+    written = []
+    monkeypatch.setattr(keyboard, "_mappings", lambda: dict(mappings))
+    monkeypatch.setattr(keyboard, "_set_mappings", written.append)
+
+    assert keyboard.remappings() == {"0x700000064": "escape", "caps_lock": "escape"}
+    keyboard.remap("0x700000064", None)
+    assert written == [{keyboard._HID_CODES["caps_lock"]: keyboard._HID_CODES["escape"]}]  # only that one undone
+    keyboard.remap("caps_lock", "0x700000064")
+    assert written[-1][keyboard._HID_CODES["caps_lock"]] == 0x700000064
+    with pytest.raises(ValueError, match="remappings\\(\\) prints"):
+        keyboard.remap("-", "escape")
+
+
+def test_set_layout_refuses_an_empty_name(monkeypatch):
+    from contextlib import contextmanager
+
+    from macos import keyboard
+
+    @contextmanager
+    def sources():
+        yield [(3, "ABC", "com.apple.keylayout.ABC")]
+
+    monkeypatch.setattr(keyboard, "_require_main_thread", lambda what: None)
+    monkeypatch.setattr(keyboard, "_input_sources", sources)
+    monkeypatch.setattr(keyboard, "_text_input", lambda: pytest.fail("switched"))
+    for name in ("", "  "):
+        with pytest.raises(ValueError, match="needs a layout name"):
+            keyboard.set_layout(name)
+
+
+@pytest.mark.parametrize("keys", ["cmd + +", "cmd+ +", "cmd++"])
+def test_a_spaced_last_plus_is_the_plus_key(monkeypatch, keys):
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"=": (24, False), "+": (24, True)})
+    assert macos.keyboard._parse(keys) == ([(1 << 20, 55)], 24, True)
+    assert macos.keyboard._encode_shortcut(keys) == "@+"
+
+
+def test_spaced_plus_forms_read_alike(monkeypatch):
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"=": (24, False), "+": (24, True)})
+    assert macos.keyboard._parse("cmd+shift + +") == ([(1 << 20, 55), (1 << 17, 56)], 24, True)
+    assert macos.keyboard._parse("+ +") == ([], 24, True)
+    assert macos.keyboard._encode_shortcut("cmd + shift + +") == "@$+"
+    with pytest.raises(ValueError, match="empty part"):  # not "'' is not a modifier"
+        macos.keyboard._parse("cmd++e")
+
+
+@pytest.mark.parametrize("stored", ["NO", "false", "0"])
+def test_yes_or_no_settings_read_through_defaults_as_bool(monkeypatch, stored):
+    calls = []
+    real = macos.defaults._as_bool
+    monkeypatch.setattr(macos.defaults, "read", lambda domain, key, default=None: stored)
+    monkeypatch.setattr(macos.defaults, "_as_bool", lambda value, fallback: calls.append(value) or real(value, fallback))
+    assert macos.keyboard.autocorrect() is False
+    assert calls == [stored]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), -1])
+def test_type_refuses_an_interval_that_is_not_a_finite_number_of_seconds(fake_events, value):
+    with pytest.raises(ValueError, match="interval must be 0 or more seconds"):
+        macos.keyboard.type("ab", interval=value)
+    assert fake_events.posted == []  # refused before the first character, not mid-text
+
+
+def _symbolic_hotkeys(monkeypatch, stored):
+    written = {}
+    monkeypatch.setattr(macos.defaults, "read", lambda domain, key, default=None: stored)
+    monkeypatch.setattr(macos.defaults, "write", lambda domain, key, value: written.update({key: value}))
+    monkeypatch.setattr(macos._system, "apply_input_settings", lambda: None)
+    return written
+
+
+def test_system_shortcuts_read_enabled_as_macos_does_and_skip_hand_edited_entries(monkeypatch):
+    _symbolic_hotkeys(monkeypatch, {"64": {"enabled": "NO"}, "65": "garbage", "28": ["x"], "29": {"enabled": 0}})
+    found = macos.keyboard.system_shortcuts()
+    assert found["spotlight"] is False  # the text 'NO' is off, as macOS reads it
+    assert found["finder_search"] is True  # not a dictionary: as if missing, which is on
+    assert found["screenshot"] is True
+    assert found["screenshot_to_clipboard"] is False
+
+
+@pytest.mark.parametrize("stored", ["garbage", ["x"], None])
+def test_set_system_shortcut_replaces_an_entry_that_is_not_a_dictionary(monkeypatch, stored):
+    written = _symbolic_hotkeys(monkeypatch, {"64": stored, "65": {"enabled": True}})
+    macos.keyboard.set_system_shortcut("spotlight", False)
+    hotkeys = written["AppleSymbolicHotKeys"]
+    assert hotkeys["64"] == {"enabled": False, "value": {"parameters": [65535, 49, 1048576], "type": "standard"}}
+    assert hotkeys["65"] == {"enabled": True}
+
+
+def test_system_shortcuts_survive_a_hand_edited_table(monkeypatch):
+    written = _symbolic_hotkeys(monkeypatch, "garbage")
+    assert set(macos.keyboard.system_shortcuts().values()) == {True}
+    macos.keyboard.set_system_shortcut("spotlight", False)
+    assert written["AppleSymbolicHotKeys"]["64"]["enabled"] is False
+
+
+def test_parse_takes_the_callers_own_advice(monkeypatch):
+    monkeypatch.setattr(macos.keyboard, "_layout", lambda: {"a": (0, False)})
+    with pytest.raises(ValueError, match=r"^a shortcut needs a key$"):
+        macos.keyboard._parse(" ", empty="a shortcut needs a key")
+    with pytest.raises(ValueError, match=r"^'cmd\+é' has 'é' no key types$"):
+        macos.keyboard._parse("cmd+é", no_key="{keys!r} has {key!r} no key types")
+    with pytest.raises(ValueError, match=r"use type\(\) for text"):  # press()'s advice by default
+        macos.keyboard._parse("é")

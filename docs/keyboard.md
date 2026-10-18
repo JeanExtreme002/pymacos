@@ -101,8 +101,12 @@ for key in macos.keyboard.watch():
 A {class}`~macos.keyboard.KeyPress` also has the `key`, its `modifiers`
 (`fn`, `cmd`, `ctrl`, `option`, `shift`; the keys macOS flags with Fn on its
 own, F5 or an arrow, don't count it), the virtual key `code` and whether it's
-a `repeat` from holding the key down. It goes on until you `break` out of the
-loop, or `timeout` seconds pass. Off the main thread, with a layout that
+a `repeat` from holding the key down. The keys are named by the layout in use
+when each one is pressed, so a switch from ABC to French mid-loop names Cmd+A
+`cmd+a` still. It goes on until you `break` out of the
+loop, `timeout` seconds pass, or another thread calls `close()` on what it
+returned (a `timeout` that isn't `None` or 0 or more raises `ValueError`
+at once). Off the main thread, with a layout that
 isn't US-compatible and wasn't read there yet (see [Keyboard
 layouts](#keyboard-layouts)), it warns (`RuntimeWarning`) and names the keys
 by what they type instead: call {func}`~macos.keyboard.layout` once from the
@@ -143,7 +147,10 @@ and works on any thread with any layout.) On another thread, they use the layout
 thread last read, or the US positions when the layout in use is US-compatible
 (US, ABC...). With any other layout they raise
 {class}`~macos.MainThreadError` instead of pressing the wrong keys: on an
-AZERTY keyboard, Cmd+A sent at the US position would be Cmd+Q. Call
+AZERTY keyboard, Cmd+A sent at the US position would be Cmd+Q. On a Japanese
+(JIS) keyboard the US positions serve for letters, digits and the keys that sit
+where they do on a US one; `[`, `]`, `=`, `'`, `\`, `@`, `^` and the other
+characters JIS types elsewhere raise it too. Call
 {func}`~macos.keyboard.layout` once from the main thread before starting the
 thread:
 
@@ -252,10 +259,14 @@ macos.keyboard.remap("caps_lock", None)       # Caps Lock again
 macos.keyboard.clear_remappings()
 ```
 
-Keys are named as for {func}`~macos.keyboard.press`, plus the right-hand
-modifiers: letters, digits, `f1` to `f20`, the modifiers (`cmd`, `right_cmd`,
+Keys are letters, digits, `f1` to `f20`, the modifiers (`cmd`, `right_cmd`,
 `option`, `right_option`, `ctrl`, `right_ctrl`, `shift`, `right_shift`, `fn`), `caps_lock`, `escape`, `enter`,
-`tab`, `space`, `delete`, the arrows... It applies at once, with no
+`tab`, `space`, `delete`, the arrows..., named as for
+{func}`~macos.keyboard.press`. Punctuation (`-`, `[`...) isn't: a remapping
+names a physical key, which types another character on each layout. Any other
+key is written as its HID usage, the way {func}`~macos.keyboard.remappings`
+shows a key it has no name for: `remap("0x700000064", None)` undoes the
+remapping of the key left of Z on an ISO keyboard. It applies at once, with no
 permission, and lasts until the Mac restarts: to keep it, run it at login
 with [`macos.schedule`](schedule.md).
 

@@ -19,7 +19,9 @@ running Python (your terminal or IDE) the first time.
 
 import ctypes
 import json
+import math
 import time
+import unicodedata
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Dict, List, Set, Tuple, Union
@@ -70,6 +72,14 @@ def _bluetooth() -> ctypes.CDLL:
     return bluetooth
 
 
+def _check_timeout(timeout: Any) -> None:
+    # NaN passes "<= 0", and a NaN (or inf) deadline is never passed: the wait would never end.
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be a number of seconds, not {!r}".format(timeout))
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds, not {}".format(timeout))
+
+
 def _require_controller() -> None:
     with _objc.autorelease_pool():
         if not _objc.send(_objc.cls("IOBluetoothHostController"), "defaultController"):
@@ -91,8 +101,7 @@ def set_power(on: bool, *, timeout: float = 10.0) -> None:
     and mouse. Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if
     the switch hasn't happened within ``timeout`` seconds.
     """
-    if timeout <= 0:
-        raise ValueError("timeout must be positive, not {}".format(timeout))
+    _check_timeout(timeout)
     bluetooth = _bluetooth()
     _require_controller()
     bluetooth.IOBluetoothPreferenceSetControllerPowerState(1 if on else 0)
@@ -160,8 +169,15 @@ def devices() -> List[Device]:
     found: List[Device] = []
     seen: Set[Tuple[str, str]] = set()
     for section in sections:
+        if not isinstance(section, dict):
+            continue
         for key, connected in (("device_connected", True), ("device_not_connected", False)):
-            for entry in section.get(key) or []:
+            entries = section.get(key) or []
+            if isinstance(entries, dict):
+                entries = [entries]  # one device, not wrapped in a list
+            elif not isinstance(entries, list):
+                entries = []
+            for entry in entries:
                 for name, properties in _entries(entry):
                     device = _device(name, properties, connected)
                     # The same device can be listed twice (connected, and in the
@@ -175,30 +191,55 @@ def devices() -> List[Device]:
     return found
 
 
+def _fold(name: str) -> str:
+    # macOS names devices "Jean’s AirPods" (U+2019), while a keyboard types "Jean's".
+    return unicodedata.normalize("NFC", name).translate({0x2018: "'", 0x2019: "'", 0x02BC: "'"}).casefold()
+
+
+def _listed(found: List[Device]) -> str:
+    return ", ".join("{!r} ({})".format(d.name, d.address) if d.address else repr(d.name) for d in found)
+
+
 def _find(target: Union[str, Device]) -> Device:
     """A paired device by :class:`Device`, address, full name or a unique part of its name."""
     if isinstance(target, Device):
         return target
+    if not isinstance(target, str):
+        raise TypeError("device must be a Device or a str (its address or name), not {!r}".format(target))
     wanted = target.strip()
     if not wanted:
         # "" is part of every name: it would pick the only device paired.
         raise ValueError("name a Bluetooth device: its address, its name or part of it")
     paired = devices()
+    address = wanted.upper().replace("-", ":")
     for device in paired:
-        if (device.address and wanted.upper().replace("-", ":") == device.address) or wanted == device.name:
+        if device.address and address == device.address:
             return device
-    loose = [device for device in paired if wanted.casefold() in device.name.casefold()]
+    # The name as written first, so two devices told apart only by case or
+    # apostrophe can still be named; then ignoring those.
+    folded = _fold(wanted)
+    exact = [device for device in paired if device.name == wanted] or [
+        device for device in paired if _fold(device.name) == folded
+    ]
+    if len(exact) > 1:
+        raise ValueError(
+            "several paired Bluetooth devices are named {!r} ({}); use the address".format(target, _listed(exact))
+        )
+    if exact:
+        return exact[0]
+    loose = [device for device in paired if folded in _fold(device.name)]
     if len(loose) == 1:
         return loose[0]
-    names = ", ".join(repr(device.name) for device in paired) or "none"
     if not loose:
+        names = ", ".join(repr(device.name) for device in paired) or "none"
         raise ValueError("no paired Bluetooth device matches {!r}; paired: {}".format(target, names))
-    raise ValueError("{!r} matches several paired devices ({}); use the full name".format(target, names))
+    raise ValueError(
+        "{!r} matches several paired devices ({}); use the full name or the address".format(target, _listed(loose))
+    )
 
 
 def _connection(target: Union[str, Device], selector: str, verb: str, connected: bool, timeout: float) -> Device:
-    if timeout <= 0:
-        raise ValueError("timeout must be positive, not {}".format(timeout))
+    _check_timeout(timeout)
     device = _find(target)
     if not power():
         raise MacOSError("Bluetooth is off; turn it on with macos.bluetooth.set_power(True)")
@@ -237,7 +278,9 @@ def connect(device: Union[str, Device], *, timeout: float = 10.0) -> Device:
     Connect a paired device and return it, like clicking it in the Bluetooth menu.
 
     ``device`` is a :class:`Device`, its address, its full name or part of
-    its name when that matches only one device (``"AirPods"``). The device
+    its name when that matches only one device (``"AirPods"``); names match
+    whatever the case or the style of apostrophe. Two devices with the same
+    name raise ``ValueError``: give the address then. The device
     must be on and in range. This returns once the device is connected, or
     raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) after
     ``timeout`` seconds, or :class:`~macos.errors.MacOSError` right away when

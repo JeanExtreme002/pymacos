@@ -29,7 +29,8 @@ and warns (`DeprecationWarning`): pymacos 2.0 will raise `ValueError` there too.
 A key that isn't set returns `default` (`None` unless given). As apps see
 their preferences, a key an app's domain doesn't set falls back to the global
 domain's, so `read("com.apple.dock", "AppleLocale")` returns the system's
-locale where `defaults read` says it doesn't exist. Without a key, it
+locale where `defaults read` says it doesn't exist. A date comes back as a
+naive `datetime` in UTC. Without a key, it
 returns the whole domain as a dict, and {func}`~macos.defaults.keys` lists its
 keys:
 
@@ -49,6 +50,11 @@ macos.defaults.write("com.apple.finder", "ShowPathbar", True)
 macos.defaults.write("com.example.tool", "servers", ["a.example.com", "b.example.com"])
 ```
 
+A naive `datetime` is taken as UTC, as `read` gives dates back, so pass an
+aware one (`datetime.now(timezone.utc)`, or any time zone: it's converted)
+for the time it is now. A property list has no null: `None` raises
+`ValueError`, inside a list or dict too; `delete` removes a key.
+
 The change reaches the system at once, but most apps only read their
 preferences when they start: restart the app to see it. For the Dock, the
 Finder and the screenshots, see [Dock](dock.md), [Finder](finder.md) and
@@ -64,7 +70,9 @@ system's, or a sandboxed app's container. The `set_*` functions built on it
 
 A few settings are kept per Mac, such as the screen saver's delay:
 `defaults -currentHost` reads them. Pass `current_host=True` to any of the
-functions for the same:
+functions for the same. Reading this way gets only what is kept for this
+Mac, with no fallback to the app's settings for any Mac or to the global
+domain, as `defaults -currentHost read` does:
 
 ```python
 macos.defaults.read("com.apple.screensaver", "idleTime", current_host=True)   # 1200
@@ -87,6 +95,8 @@ It restores the preferences only: restart what reads them, as the `set_*`
 functions do.
 
 Name `(domain, key)` pairs, or a whole domain such as `"com.apple.dock"`.
+A domain or key it couldn't write back (empty, or a path) raises before
+anything is read, so the block doesn't run.
 If a key can't be written back, the others are still restored, then the
 first error (usually {class}`~macos.errors.PermissionDeniedError`) is raised.
 When the block itself fails, its own error is the one raised, and what

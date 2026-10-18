@@ -20,8 +20,10 @@ battery.health           # 80 (percent of the original capacity)
 {func}`~macos.power.battery` returns `None` on a Mac without a battery, such as
 a Mac mini or an iMac.
 
-`health` is the battery's maximum capacity compared with when it was new, the
-same number as System Settings › Battery › Battery Health.
+`health` is the battery's maximum capacity compared with when it was new: the
+full charge it holds now over its design capacity. System Settings › Battery ›
+Battery Health applies its own correction to that, so it can show a point or
+two more.
 
 `time_remaining` is the time until the battery is empty, or until it's full
 while charging. It's `None` while macOS is still estimating it, and when the
@@ -47,13 +49,20 @@ with macos.power.keep_awake():
     train_model()   # takes hours; the Mac won't sleep meanwhile
 ```
 
-It also works as a decorator:
+It also works as an `async with` block, and as a decorator:
 
 ```python
 @macos.power.keep_awake()
 def backup():
     ...
+
+@macos.power.keep_awake()
+async def sync_photos():
+    ...   # the Mac stays awake while the coroutine is awaited
 ```
+
+A generator function can't be decorated (it raises `TypeError`); use a `with`
+block inside it instead.
 
 By default the display can still turn off. Pass `display=True` to keep it on
 too, for example while showing a dashboard:
@@ -63,8 +72,8 @@ with macos.power.keep_awake(display=True):
     run_dashboard()
 ```
 
-The `reason` argument names the request in `pmset -g assertions` and in
-Activity Monitor. Closing a laptop's lid still puts it to sleep.
+The `reason` argument, a string, names the request in `pmset -g assertions`
+and in Activity Monitor. Closing a laptop's lid still puts it to sleep.
 
 ## What keeps the Mac awake
 
@@ -84,7 +93,10 @@ what it says it's doing (`reason`), the macOS name of the request (`kind`),
 whether it keeps the display on too (`display`), since when (`since`) and,
 when it gives up by itself, until when (`until`). macOS itself shows up as
 `powerd` while the display is on; apps playing sound or video,
-{func}`~macos.power.keep_awake` and `caffeinate` are the usual others.
+{func}`~macos.power.keep_awake` and `caffeinate` are the usual others, and
+File or Screen Sharing serving someone, or a Time Machine backup. Some of these
+(Time Machine's among them) keep the Mac awake only on AC power: like `pmset`,
+the list has them on battery too.
 
 ## Sleeping
 

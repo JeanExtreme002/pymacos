@@ -1,6 +1,7 @@
 """Helpers shared by several test modules: small images and markers."""
 
 import os
+import warnings
 from pathlib import Path
 
 import pytest
@@ -33,17 +34,35 @@ def png_size(png):
 WALLPAPER_MOVIE = Path("/System/Library/Desktop Pictures/.wallpapers/Sequoia Sunrise/Sequoia Sunrise.mov")
 
 
+_ON = {"1", "true", "yes", "on"}
+_OFF = {"", "0", "false", "no", "off"}
+
+
+def switch(name):
+    """
+    Whether the environment variable ``name`` is on: ``1``, ``true``, ``yes`` or ``on``, in any case.
+
+    ``0``, ``false``, ``no``, ``off`` and an unset variable are off, as is anything else, with a
+    warning: a switch written to say "off" must never turn on the tests that change this Mac.
+    """
+    value = os.environ.get(name, "").strip().lower()
+    if value not in _ON | _OFF:
+        warnings.warn("{}={!r} is neither on nor off: taken as off (set it to 1 to turn it on)".format(
+            name, os.environ[name]))
+    return value in _ON
+
+
 # GitHub's runners, where the tests that change the Mac may run unasked: a throwaway machine.
-# ``CI`` alone isn't enough, as it's set in many a shell that is someone's Mac.
-ON_GITHUB = bool(os.environ.get("GITHUB_ACTIONS"))
+# ``CI`` alone isn't enough, as it's set in many a shell that is someone's Mac; GitHub sets this one to "true".
+ON_GITHUB = os.environ.get("GITHUB_ACTIONS") == "true"
 
 SETTINGS = pytest.mark.skipif(
-    not (ON_GITHUB or os.environ.get("PYMACOS_SETTINGS_TESTS")),
+    not (ON_GITHUB or switch("PYMACOS_SETTINGS_TESTS")),
     reason="changes (then restores) a setting of this Mac: set PYMACOS_SETTINGS_TESTS=1 to run",
 )
 
 CAPTURE = pytest.mark.skipif(
-    not os.environ.get("PYMACOS_CAPTURE_TESTS"),
+    not switch("PYMACOS_CAPTURE_TESTS"),
     reason="turns the camera or the microphone on: set PYMACOS_CAPTURE_TESTS=1 to run",
 )
 

@@ -60,9 +60,16 @@ It needs no administrator password, but doesn't show in System Settings'
 *Exclude from Backups* list either. Copies made before stay on the backup disk.
 
 {func}`~macos.time_machine.is_excluded` tells whether Time Machine leaves a path
-out for any reason: {func}`~macos.time_machine.exclude`, the list in System
-Settings, or macOS itself, which skips caches and temporary files. What's
-inside an excluded folder is excluded too.
+out, as `tmutil` sees it: {func}`~macos.time_machine.exclude`, the list in
+System Settings, or what macOS marks itself, like `~/Library/Caches` and the
+per-user temporary folder (`$TMPDIR`). What's inside an excluded folder is
+excluded too. Some system-wide places Time Machine always skips, such as
+`/private/tmp`, `/private/var/vm` and `/Volumes`, still read as included.
+
+All three raise `ValueError` for an empty path, rather than act on the current
+folder, and `FileNotFoundError` for one that doesn't exist. In a folder macOS
+protects (Mail, Messages, the Trash), they need Full Disk Access for the app
+running Python: without it, {class}`~macos.PermissionDeniedError` is raised.
 
 ## Reference
 

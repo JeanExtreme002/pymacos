@@ -108,7 +108,8 @@ def run(
     PATH. A non-zero exit status raises
     :class:`CommandError` carrying the command's stderr. With ``timeout``,
     a command still running after that many seconds is killed, and
-    :class:`CommandTimeoutError` raised.
+    :class:`CommandTimeoutError` raised. ``input`` is written to its standard
+    input; without it, that input is empty (``/dev/null``), never Python's own.
 
     Text mode turns ``\r\n`` and ``\r`` into ``\n``; ``exact_newlines=True``
     keeps them as the command wrote them, for output that holds file names
@@ -117,10 +118,15 @@ def run(
     Output that isn't valid UTF-8 never raises: in text mode the bad bytes
     become U+FFFD, and with ``exact_newlines=True`` they are kept the way
     :func:`os.fsdecode` keeps them (surrogate escapes), so a file name read
-    back still opens the same file.
+    back still opens the same file. ``input`` that can't be written as UTF-8
+    (a lone surrogate) raises :class:`UnicodeEncodeError` in either mode,
+    rather than reach the command with ``?`` in its place.
     """
+    # Encoded here, strictly, whichever the mode: text mode's errors="replace" would also turn what
+    # can't be encoded into "?", and the command would be handed (or speak, or open) other text.
+    data = None if input is None else input.encode("utf-8")
     if exact_newlines:
-        output = _completed(args, None if input is None else input.encode("utf-8"), timeout)
+        output = _completed(args, data, timeout)
     else:
         output = _completed(args, input, timeout, text=True, encoding="utf-8", errors="replace")
     # Bytes when exact_newlines asked for them (and from some test doubles): decoded the same way either way.
@@ -136,6 +142,8 @@ def run_bytes(args: Sequence[str], *, timeout: Optional[float] = None) -> bytes:
 def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **options: Any) -> Union[str, bytes]:
     """Run the command for :func:`run` and :func:`run_bytes`, and return its standard output, or raise what went wrong."""
     require_macos()
+    if input is None:
+        options["stdin"] = subprocess.DEVNULL  # never the caller's: pbcopy, say and the like would read the terminal
     try:
         result = subprocess.run(
             list(args), executable=executable(args[0]), capture_output=True, timeout=timeout, input=input, **options
@@ -150,26 +158,6 @@ def _completed(args: Sequence[str], input: Any, timeout: Optional[float], **opti
     if result.returncode != 0:
         raise CommandError(args, result.returncode, stderr)
     return result.stdout
-
-
-def _terminal_interrupted_us() -> bool:
-    """
-    Whether a Ctrl-C would have come from this process's terminal, to its whole foreground process group.
-
-    True when this process group is the terminal's foreground one: the terminal sent SIGINT to every
-    process in it, the commands this one started included. False with no terminal (a service, an IDE
-    without one) or in the background, where an interrupt can only have come from elsewhere.
-    """
-    try:
-        terminal = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
-    except OSError:
-        return False
-    try:
-        return os.tcgetpgrp(terminal) == os.getpgrp()
-    except OSError:
-        return False
-    finally:
-        os.close(terminal)
 
 
 class UnfinishedInterrupt(KeyboardInterrupt):
@@ -187,32 +175,91 @@ def run_to_the_end(args: Sequence[str], *, timeout: float, grace: float) -> None
     killed and :class:`UnfinishedInterrupt` (a ``KeyboardInterrupt``) says its
     file is incomplete. Otherwise it is as :func:`run`, minus the output.
 
-    It stays in Python's process group, not a session of its own, so what
-    signals the whole group (closing the terminal, for one) ends it too, rather
-    than leave the screen recording with nobody to stop it. A signal to Python
-    alone (``kill`` of its pid) still leaves it to run until its own end.
+    It runs in a process group of its own, so the SIGINT it gets is always
+    the one sent here, whoever interrupted Python: the terminal's Ctrl-C (sent
+    to the whole group), Jupyter's interrupt or a ``kill`` of Python's pid.
+    What would end Python (SIGHUP when the terminal closes, SIGTERM, SIGQUIT)
+    is passed on to it first, rather than leave the screen recording with
+    nobody to stop it, unless Python handles that signal itself or this runs
+    off the main thread: then it runs until its own end. So does it when
+    Python is killed (SIGKILL). Its standard input is never the terminal's,
+    so a key typed there doesn't stop it (``screencapture -v`` would read one):
+    Ctrl-C does.
     """
-    process = popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # process_group is new in Python 3.11; before, a session of its own puts it in a group of its own too
+    # (preexec_fn=os.setpgrp would, but isn't safe while other threads run).
+    alone = {"process_group": 0} if sys.version_info >= (3, 11) else {"start_new_session": True}
+    # Its standard input is a pipe nothing is written to, closed only once it has ended. screencapture -v
+    # reads a key to stop on; from the terminal, in a background group, that read would stop it (SIGTTIN)
+    # and freeze the recording, and an empty input (EOF) could end it as soon as it starts.
+    reading, writing = os.pipe()
     try:
-        _, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        raise CommandTimeoutError(args, timeout) from None
-    except KeyboardInterrupt as interrupt:
-        if process.poll() is None and not _terminal_interrupted_us():
-            process.send_signal(signal.SIGINT)  # a Ctrl-C the terminal sent reached it already: never twice
+        process = popen(args, stdin=reading, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **alone)
+    except BaseException:
+        os.close(writing)
+        raise
+    finally:
+        os.close(reading)  # the command has its own copy
+    try:
+        _until_the_end(process, args, timeout=timeout, grace=grace)
+    finally:
+        os.close(writing)
+
+
+def _until_the_end(process: "subprocess.Popen[Any]", args: Sequence[str], *, timeout: float, grace: float) -> None:
+    """Wait on ``process`` for :func:`run_to_the_end`: asked to stop on Ctrl-C, killed when out of time."""
+    with _passing_on_endings(process):
         try:
-            process.communicate(timeout=grace)
-        except BaseException:  # out of time, or a second Ctrl-C: it's stopped for good, its file unfinished
+            _, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
-            raise UnfinishedInterrupt(*interrupt.args) from interrupt
-        if process.returncode != 0:
-            raise UnfinishedInterrupt(*interrupt.args) from interrupt  # it ended, but not cleanly: can't trust the file
-        raise
+            raise CommandTimeoutError(args, timeout) from None
+        except KeyboardInterrupt as interrupt:
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)  # in a group of its own, no other SIGINT reached it: once
+            try:
+                process.communicate(timeout=grace)
+            except BaseException:  # out of time, or a second Ctrl-C: it's stopped for good, its file unfinished
+                process.kill()
+                process.communicate()
+                raise UnfinishedInterrupt(*interrupt.args) from interrupt
+            if process.returncode != 0:
+                raise UnfinishedInterrupt(*interrupt.args) from interrupt  # it ended, but not cleanly: can't trust the file
+            raise
     if process.returncode != 0:
         raise CommandError(args, process.returncode, (stderr or b"").decode("utf-8", "replace"))
+
+
+# The signals that end Python by default, and that reached a command in Python's process group too.
+_ENDINGS = ("SIGHUP", "SIGTERM", "SIGQUIT")
+
+
+@contextmanager
+def _passing_on_endings(process: "subprocess.Popen[Any]") -> Iterator[None]:
+    """
+    While ``process`` runs, pass it each signal of :data:`_ENDINGS` before it ends Python, as it would by default.
+
+    Only those Python leaves at their default (one it handles or ignores stays as it is), and only
+    on the main thread, the one signal handlers can be set from; the handlers are put back after.
+    """
+    def pass_on(number: int, frame: Any) -> None:
+        if process.poll() is None:
+            process.send_signal(number)
+        signal.signal(number, signal.SIG_DFL)
+        os.kill(os.getpid(), number)  # then ends Python, as it would have
+
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for name in _ENDINGS:
+            number = getattr(signal, name)
+            if signal.getsignal(number) == signal.SIG_DFL:
+                previous[number] = signal.signal(number, pass_on)
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 # Seconds an ``osascript`` that controls an app may take, for the whole script. Each Apple event

@@ -20,13 +20,14 @@ Force Quit window use), queried natively through the Objective-C runtime.
 
 import ctypes
 import errno
+import math
 import os
 import shutil
 import threading
 import time
 import uuid
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
@@ -35,7 +36,7 @@ from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
 from ._objc import BOOL, NSInteger, NSUInteger
 from ._system import applescript, framework, require_macos, run as _run
-from .errors import AppNotFoundError, CommandError, MacOSError, WaitTimeoutError
+from .errors import AppLaunchTimeoutError, AppNotFoundError, CommandError, MacOSError, WaitTimeoutError
 
 __all__ = [
     "App",
@@ -125,9 +126,19 @@ class App:
     bundle_id: Optional[str]
     pid: int
     path: Optional[str]
+    # When the process started, as macOS says: once the app quits, its pid can go to another app, which
+    # must not be the one hidden or force-quit. None for an App made by hand, or a process with no date.
+    _launched: Optional[float] = field(default=None, compare=False, repr=False)
+
+    def _live(self) -> Optional[int]:
+        """The ``NSRunningApplication`` of this very process, or ``None`` if it's gone (its pid may be another's now)."""
+        handle = _handle(self.pid)
+        if not handle or (self._launched is not None and _launch_date(handle) != self._launched):
+            return None
+        return handle
 
     def _handle(self) -> int:
-        handle = _handle(self.pid)
+        handle = self._live()
         if not handle:
             raise AppNotFoundError("{} (pid {}) is no longer running".format(self.name, self.pid))
         return handle
@@ -135,7 +146,7 @@ class App:
     @property
     def is_running(self) -> bool:
         with _objc.autorelease_pool():
-            handle = _handle(self.pid)
+            handle = self._live()
             return bool(handle) and not _objc.send(handle, "isTerminated", restype=BOOL)
 
     @property
@@ -160,7 +171,8 @@ class App:
             # that isn't active itself, which a script never is: the call
             # returns YES and nothing happens. LaunchServices (`open`) has no
             # such restriction.
-            self._handle()  # raise AppNotFoundError if it has quit
+            with _objc.autorelease_pool():
+                self._handle()  # raise AppNotFoundError if it has quit
             _run(["open", "-a", self.path])
         else:
             with _objc.autorelease_pool():
@@ -207,6 +219,12 @@ class App:
         return True
 
 
+def _launch_date(handle: int) -> Optional[float]:
+    """When the app of ``handle`` started, in seconds since 2001; ``None`` when macOS has no date for it."""
+    date = _objc.send(handle, "launchDate")
+    return float(_objc.send(date, "timeIntervalSinceReferenceDate", restype=ctypes.c_double)) if date else None
+
+
 def _app(handle: int) -> App:
     url = _objc.send(handle, "bundleURL")
     return App(
@@ -214,6 +232,7 @@ def _app(handle: int) -> App:
         bundle_id=_objc.pystring(_objc.send(handle, "bundleIdentifier")),
         pid=_objc.send(handle, "processIdentifier", restype=ctypes.c_int),
         path=_objc.pystring(_objc.send(url, "path")) if url else None,
+        _launched=_launch_date(handle),
     )
 
 
@@ -223,13 +242,21 @@ def running(*, include_background: bool = False) -> List[App]:
 
     By default only regular apps (the ones with a Dock icon) are listed.
     ``include_background=True`` adds menu-bar extras, agents and helpers.
+
+    Raises :class:`~macos.errors.MacOSError` when macOS won't list the
+    running processes, as in some sandboxes, rather than say none is running.
     """
     with _objc.autorelease_pool():
         return [_app(handle) for handle in _handles(include_background)]
 
 
 def frontmost() -> Optional[App]:
-    """Return the application that currently has keyboard focus."""
+    """
+    Return the application that currently has keyboard focus.
+
+    Raises :class:`~macos.errors.MacOSError` when macOS won't list the
+    running processes, as :func:`running` does.
+    """
     with _objc.autorelease_pool():
         for handle in _handles(include_background=True):
             if _objc.send(handle, "isActive", restype=BOOL):
@@ -250,21 +277,34 @@ def get(name: str) -> Optional[App]:
     ``"Calculator"`` also finds it on a system where it is shown as
     ``"Calculadora"``. Paths may be symlinks. Returns ``None`` if it isn't
     running.
+
+    An app macOS runs from a hidden copy (App Translocation, for a downloaded
+    app that hasn't been moved yet) is found by the path it was opened from;
+    its ``path`` is the copy's, and that path finds it too.
+
+    Raises :class:`~macos.errors.MacOSError` when macOS won't list the
+    running processes, as :func:`running` does.
     """
+    return next(_matches(name), None)
+
+
+def _matches(name: str) -> Iterator[App]:
+    """Yield every running app :func:`get` would find by ``name``, in turn: copies of one app share it."""
     if _is_path(name):
-        wanted_path = os.path.realpath(os.path.expanduser(name))
+        # Both sides go through the same mapping, so the copy's own path (the
+        # one App.path holds) finds it as well as the path it was opened from.
+        wanted_path = _real_bundle_path(os.path.expanduser(name))
         for app in running(include_background=True):
-            if app.path and os.path.realpath(app.path) == wanted_path:
-                return app
-        return None
+            if app.path and _real_bundle_path(app.path) == wanted_path:
+                yield app
+        return
 
     wanted = name.casefold()
     for app in running(include_background=True):
         file_name = os.path.basename(app.path or "")
         candidates = (app.name, app.bundle_id, file_name, os.path.splitext(file_name)[0])
         if wanted in {part.casefold() for part in candidates if part}:
-            return app
-    return None
+            yield app
 
 
 def _locate(name: str) -> str:
@@ -302,7 +342,44 @@ def _bundle_id(path: str) -> Optional[str]:
 def _bundle_path(handle: int) -> Optional[str]:
     url = _objc.send(handle, "bundleURL")
     path = _objc.pystring(_objc.send(url, "path")) if url else None
-    return os.path.realpath(path) if path else None
+    return _real_bundle_path(path) if path else None
+
+
+@lru_cache(maxsize=None)
+def _translocation() -> Optional[ctypes.CDLL]:
+    """Security.framework, set up to ask where a translocated app came from; ``None`` if this macOS can't say."""
+    security = framework("Security")
+    try:
+        function = security.SecTranslocateCreateOriginalPathForURL  # since macOS 10.12
+    except AttributeError:
+        return None
+    function.argtypes = (_cf.CFTypeRef, ctypes.c_void_p)
+    function.restype = _cf.CFTypeRef
+    return security
+
+
+def _real_bundle_path(path: str) -> str:
+    """
+    The real path of the bundle at ``path``, or, for a translocated app, of the one it was opened from.
+
+    macOS runs a downloaded app that hasn't been moved (it's still quarantined) from a random, read-only
+    copy, ``/private/var/folders/.../AppTranslocation/<UUID>/d/Tool.app``: that's the path its running app
+    reports. Compared as it is, it would never be the app that was opened.
+    """
+    real = os.path.realpath(path)
+    if "/AppTranslocation/" not in real:
+        return real
+    try:
+        security = _translocation()
+        if security is None:
+            return real
+        error = ctypes.c_void_p()
+        with _cf.owned(_cf.file_url(real, directory=True)) as url:
+            original = _app_path(security.SecTranslocateCreateOriginalPathForURL(url, ctypes.byref(error)))
+        _cf.release(error.value)
+    except (OSError, MacOSError):
+        return real  # not something to fail over: the copy's own path is all there is to compare
+    return os.path.realpath(original) if original else real
 
 
 def _running_pids(bundle_id: Optional[str]) -> Sequence[int]:
@@ -326,6 +403,7 @@ def _find_launched(
     the one asked for. Until it's in front, the one at ``path`` may still be coming up, so the poll goes on;
     ``in_front=False`` takes it in the background too (``open -g``, which doesn't bring it to the front).
     """
+    path = _real_bundle_path(path)  # _bundle_path maps a translocated copy back: so must the path asked for
     with _objc.autorelease_pool():
         candidates: Iterable[int]
         if bundle_id is not None:
@@ -380,6 +458,14 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
     behind), and that running copy is returned after a second (or once
     ``timeout`` ends, if sooner), when the one asked for hasn't come up:
     check its ``path``. In front, the copy must then be the active app.
+
+    An app that hasn't shown up within ``timeout`` seconds raises
+    :class:`~macos.errors.AppLaunchTimeoutError`, saying it "did not show
+    up": a :class:`TimeoutError`, and still an ``AppNotFoundError`` (a
+    ``LookupError``), as it was before. A downloaded app macOS
+    runs from a hidden copy (App Translocation) is returned all the same: its
+    ``path`` is the copy's. :class:`~macos.errors.MacOSError` is raised when
+    macOS won't list the running processes, as :func:`running` does.
     """
     path = _locate(name)
     bundle_id = _bundle_id(path)
@@ -407,7 +493,7 @@ def open(name: str, *, background: bool = False, timeout: float = 10.0) -> App:
         if app is not None:
             return app
         if now >= deadline:
-            raise AppNotFoundError("{!r} was launched but did not show up within {}s".format(name, timeout))
+            raise AppLaunchTimeoutError("{!r} was launched but did not show up within {}s".format(name, timeout))
         time.sleep(0.1)
 
 
@@ -494,7 +580,7 @@ def default_for(kind: str) -> Optional[str]:
             return _app_path(services.LSCopyDefaultApplicationURLForContentType(identifier, _ALL_ROLES, None))
 
 
-def set_default_for(kind: str, app: str, *, timeout: float = 60.0) -> None:
+def set_default_for(kind: str, app: str, *, timeout: Optional[float] = 60.0) -> None:
     """
     Make ``app`` open a kind of file by default, like Get Info › Open with › Change All.
 
@@ -508,10 +594,14 @@ def set_default_for(kind: str, app: str, *, timeout: float = 60.0) -> None:
     to ``timeout`` seconds for the answer, and raises
     :class:`~macos.errors.MacOSError` if it's declined, or
     :class:`~macos.errors.WaitTimeoutError` (a ``MacOSError`` and a
-    ``TimeoutError``) if it doesn't come. The
+    ``TimeoutError``) if it doesn't come. ``timeout=None`` (or ``math.inf``)
+    waits as long as it takes. The
     default browser can't be set this way: macOS asks for that one in System
     Settings.
     """
+    # NaN passes "< 0", and would stop the wait at once.
+    if timeout is not None and (math.isnan(timeout) or timeout < 0):
+        raise ValueError("timeout must be zero or more seconds, or None, not {}".format(timeout))
     path = _locate(app)
     with _cf.owned(_content_type(kind)) as identifier:
         type_name = _cf.to_str(identifier) or ""
@@ -570,16 +660,20 @@ def _retire_default_handler() -> None:
         del _default_answers[:]
 
 
-def _set_default_with_workspace(workspace: int, path: str, type_name: str, app: str, kind: str, timeout: float) -> None:
+def _set_default_with_workspace(
+    workspace: int, path: str, type_name: str, app: str, kind: str, timeout: Optional[float]
+) -> None:
     """``NSWorkspace``'s way (macOS 12+), which reports back through a completion handler."""
     framework("UniformTypeIdentifiers")
     content_type = _objc.send(_objc.cls("UTType"), "typeWithIdentifier:", _objc.nsstring(type_name), argtypes=(_objc.id,))
     if not content_type:
         raise ValueError("{!r} isn't a kind of file macOS knows".format(kind))
     # One deadline for both waits: for another call's confirmation to end, then for this one's.
-    deadline = time.monotonic() + timeout
+    # None or inf waits for good; a lock can't be given a wait past TIMEOUT_MAX (inf overflows it).
+    unbounded = timeout is None or timeout >= threading.TIMEOUT_MAX
+    deadline = math.inf if timeout is None else time.monotonic() + timeout
     late = WaitTimeoutError("{} wasn't confirmed as the default for {!r} within {} seconds".format(app, kind, timeout))
-    if not _default_call.acquire(timeout=max(0.0, timeout)):
+    if not (_default_call.acquire() if unbounded else _default_call.acquire(timeout=max(0.0, timeout or 0.0))):
         raise late
     try:
         if time.monotonic() >= deadline:
@@ -845,16 +939,30 @@ def default_browser() -> Optional[str]:
 _QUARANTINE = b"com.apple.quarantine"
 
 
+def _quarantine_target(path: Union[str, "os.PathLike[str]"]) -> Path:
+    """``path`` expanded, once it's known to be there: a symbolic link counts, broken or not, as its own mark is meant."""
+    if not os.fspath(path):
+        raise FileNotFoundError("")  # as os.lstat("") does: Path("") would be the current folder, and all it holds
+    target = Path(os.path.expanduser(os.fspath(path)))
+    # os.lstat, not os.path.lexists: that says "missing" for a file in a folder it may not look in, too.
+    try:
+        os.lstat(target)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FileNotFoundError(str(target)) from None
+    return target
+
+
 def is_quarantined(path: Union[str, "os.PathLike[str]"]) -> bool:
     """
     Whether macOS marked ``path`` as downloaded from the internet, so it checks it before it first opens.
 
     That mark is what makes macOS say an app "is damaged and can't be
     opened" or asks "Are you sure you want to open it?".
+
+    A missing path and ``""`` raise :class:`FileNotFoundError`; a path in a
+    folder you can't open, :class:`PermissionError`.
     """
-    target = Path(os.path.expanduser(os.fspath(path)))
-    if not os.path.lexists(target):
-        raise FileNotFoundError(str(target))
+    target = _quarantine_target(path)
     size = _libc.lib().getxattr(os.fsencode(target), _QUARANTINE, None, 0, 0, _XATTR_NOFOLLOW)
     if size >= 0:
         return True
@@ -876,10 +984,12 @@ def unquarantine(path: Union[str, "os.PathLike[str]"]) -> int:
     Returns how many files had it. Like ``xattr -dr com.apple.quarantine``:
     do it only for apps you trust, since it skips the check macOS makes
     the first time they open. Gatekeeper still applies its other rules.
+
+    A missing path and ``""`` raise :class:`FileNotFoundError` (``""`` is
+    never taken for the current folder); a path in a folder you can't open,
+    :class:`PermissionError`.
     """
-    target = Path(os.path.expanduser(os.fspath(path)))
-    if not os.path.lexists(target):
-        raise FileNotFoundError(str(target))
+    target = _quarantine_target(path)
     libc = _libc.lib()
     paths = [target]
     if target.is_dir() and not target.is_symlink():
@@ -946,10 +1056,13 @@ def _installed_app(path: str, *, skip_unreadable: bool = True) -> Optional[Insta
         return None
     if not isinstance(info, dict):
         return None  # a valid plist, but not an app's description
-    name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or Path(path).stem
+    # A hand-made or damaged Info.plist may hold a number or a list where a name goes: not a name.
+    names = (info.get(key) for key in ("CFBundleDisplayName", "CFBundleName"))
+    name = next((value for value in names if isinstance(value, str) and value), Path(path).stem)
+    bundle_id = info.get("CFBundleIdentifier")
     return InstalledApp(
-        name=str(name),
-        bundle_id=info.get("CFBundleIdentifier"),
+        name=name,
+        bundle_id=bundle_id if isinstance(bundle_id, str) and bundle_id else None,
         version=str(info["CFBundleShortVersionString"]) if info.get("CFBundleShortVersionString") else None,
         path=Path(path),
     )
@@ -1111,6 +1224,19 @@ def _claims(app: InstalledApp, everything: Sequence[InstalledApp]) -> Tuple[List
     return names, ids
 
 
+def _on_system_volume(path: str) -> bool:
+    """
+    Whether ``path`` is on macOS's own sealed, read-only volume, as Safari is in ``/Applications`` before macOS 13.
+
+    The same disk as ``/`` and read-only: an app copied to ``/Applications`` is on the Data volume, and one on
+    a read-only disk image isn't on ``/``'s disk.
+    """
+    try:
+        return os.stat(path).st_dev == os.stat("/").st_dev and bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
 def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = False) -> List[Path]:
     """
     Uninstall an app: move it to the Trash, with the files it left in your
@@ -1153,7 +1279,7 @@ def uninstall(name: str, *, dry_run: bool = False, include_name_matches: bool = 
     app = _installed_app(path, skip_unreadable=False)  # one that can't be read says so, rather than "isn't an app"
     if app is None:
         raise AppNotFoundError("{} isn't an app".format(path))
-    if path.startswith(("/System/", "/usr/")):
+    if path.startswith(("/System/", "/usr/")) or _on_system_volume(path):
         raise MacOSError("{} comes with macOS and can't be uninstalled".format(app.name))
     names, others = _claims(app, _installed())  # not installed(): its warning points at the call to uninstall()
     if not include_name_matches:

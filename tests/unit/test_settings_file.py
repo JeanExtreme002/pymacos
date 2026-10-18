@@ -123,8 +123,74 @@ def test_other_failures_are_not_hidden(fake_settings, monkeypatch):
     with pytest.warns(RuntimeWarning, match="dock.size couldn't be read.*Night Shift"):
         exported = settings.export()
     assert "size" not in exported["dock"] and exported["dock"]["autohide"] is False
-    with pytest.raises(macos.MacOSError, match="Night Shift"):
-        settings.apply({"dock": {"size": 64}})
+
+
+def test_export_leaves_out_a_preference_of_a_shape_its_reader_cannot_take(fake_settings, monkeypatch):
+    def garbled():
+        return ["an array"].get("IconViewSettings")  # a dict edited by hand into an array: AttributeError
+
+    monkeypatch.setitem(settings._SETTINGS["dock"], "size", settings._Setting(garbled, lambda value: None))
+    with pytest.warns(RuntimeWarning, match="dock.size couldn't be read"):
+        exported = settings.export()
+    assert "size" not in exported["dock"] and exported["dock"]["autohide"] is False
+
+
+def test_export_leaves_out_a_value_apply_would_refuse(fake_settings, monkeypatch):
+    def speed(value):
+        if not 0 <= value <= 1:
+            raise ValueError("must be from 0 to 1")
+
+    table = settings._SETTINGS["dock"]
+    monkeypatch.setitem(table, "size", settings._Setting(lambda: 1.667, table["size"].change, check=speed))
+    with pytest.warns(RuntimeWarning, match=r"dock.size is 1.667, which apply\(\) can't set.*from 0 to 1"):
+        exported = settings.export()
+    assert "size" not in exported["dock"]
+    assert settings.apply(json.loads(json.dumps(exported))) == []  # what's exported applies
+
+
+def test_the_real_checks_refuse_what_hand_set_preferences_read_as(monkeypatch):
+    # A scaling of 5 (a faster pointer than the slider gives) reads as 1.667; a beep path elsewhere as its stem.
+    with pytest.raises(ValueError, match="from 0 to 1"):
+        settings._SETTINGS["trackpad"]["tracking_speed"].check(1.667)
+    monkeypatch.setattr(macos.sound, "names", lambda: ["Funk", "Glass"])
+    with pytest.raises(ValueError, match="no alert sound is named 'Custom'"):
+        settings._SETTINGS["sound"]["alert_sound"].check("Custom")
+    settings._SETTINGS["sound"]["alert_sound"].check("Funk")
+
+
+def test_apply_writes_a_setting_it_cannot_read(fake_settings, monkeypatch):
+    values, changes, _ = fake_settings
+    written = []
+
+    def broken():
+        raise ValueError("could not convert string to float: 'abc'")  # a garbled leaf, read by float()
+
+    def change(value):
+        written.append(value)
+
+    monkeypatch.setitem(settings._SETTINGS["dock"], "size", settings._Setting(broken, change))
+    # Writing the value given is what repairs it, and the other settings still apply.
+    assert settings.apply({"dock": {"autohide": True, "size": 64}}) == ["dock.autohide", "dock.size"]
+    assert written == [64] and values["autohide"] is True
+
+
+def test_apply_names_a_setting_it_could_not_read_when_putting_back(fake_settings, monkeypatch):
+    values, changes, _ = fake_settings
+
+    def broken():
+        raise macos.MacOSError("hidutil answered in a form it can't read")
+
+    def refused(value):
+        raise macos.PermissionDeniedError("the domain isn't writable")
+
+    table = settings._SETTINGS["dock"]
+    monkeypatch.setitem(table, "size", settings._Setting(broken, lambda value: None))
+    monkeypatch.setitem(table, "autohide", settings._Setting(table["autohide"].read, refused))
+    with _notes_or_warning() as reported:
+        with pytest.raises(macos.PermissionDeniedError) as caught:
+            settings.apply({"dock": {"size": 64, "autohide": True}})
+    text = " ".join(getattr(caught.value, "__notes__", [])) + " ".join(str(item.message) for item in reported)
+    assert "dock.size (its value before couldn't be read)" in text
 
 
 def test_export_leaves_out_a_value_it_cannot_make_sense_of(fake_settings, monkeypatch):
@@ -277,6 +343,10 @@ def test_every_real_setting_has_a_check_and_this_macs_values_pass_it():
         ("screen.screenshot_name", "a/b", "without /"),
         ("system.menu_bar_spacing", 4.5, "a whole number"),
         ("system.clock_format", {"date": "sometimes"}, "date: must be"),
+        ("dock.size", 10 ** 400, "from 16 to 128"),
+        ("dock.autohide_delay", float("inf"), "a number"),
+        ("screen.screenshot_folder", "~/no such folder for pymacos", "no folder '~/no such folder for pymacos'"),
+        ("finder.new_window_folder", "/no/such/folder", "create it first"),
     ],
 )
 def test_the_real_checks_refuse_bad_values(name, value, message):
@@ -298,3 +368,88 @@ def test_remappings_are_built_in_full_before_the_swap(monkeypatch):
 
     settings._set_remappings({"caps_lock": "escape", "0x700000064": "right_option", "tab": None})
     assert swapped == [{0x700000039: 0x700000029, 0x700000064: 0x7000000E6}]
+
+
+def test_the_folder_checks_take_a_folder_this_mac_has(tmp_path):
+    for name in ("screen.screenshot_folder", "finder.new_window_folder"):
+        section, key = name.split(".")
+        settings._SETTINGS[section][key].check(str(tmp_path))
+        settings._SETTINGS[section][key].check("~")
+        with pytest.raises(ValueError, match="create it first"):
+            settings._SETTINGS[section][key].check(str(tmp_path / "gone"))
+        (tmp_path / "file").write_text("")
+        with pytest.raises(ValueError, match="create it first"):
+            settings._SETTINGS[section][key].check(str(tmp_path / "file"))
+
+
+def test_apply_refuses_a_missing_folder_before_changing_anything(fake_settings, monkeypatch, tmp_path):
+    _, changes, _ = fake_settings
+    table = settings._SETTINGS["dock"]
+    monkeypatch.setitem(table, "size", table["size"]._replace(check=settings._folder))
+    with pytest.raises(ValueError, match="invalid settings: dock.size no folder"):
+        settings.apply({"dock": {"autohide": True, "size": str(tmp_path / "QuickTime Recordings")}})
+    assert changes == []
+
+
+def test_a_finder_folder_that_is_not_a_folder_is_left_out_of_the_export():
+    assert settings._portable(None) is None
+    with pytest.raises(ValueError, match="must be text"):
+        settings._SETTINGS["finder"]["new_window_folder"].check(None)
+
+
+@pytest.mark.parametrize(
+    "name, current, wanted",
+    [
+        ("keyboard.key_repeat", [0.03, 0.3], [None, 0.3]),
+        ("keyboard.key_repeat", [0.03, 0.3], [0.03, None]),
+        ("keyboard.remappings", {"caps_lock": "escape"}, {"caps_lock": "esc"}),
+        ("keyboard.remappings", {"caps_lock": "escape"}, {"caps_lock": "escape", "tab": None}),
+        ("keyboard.remappings", {"0x700000064": "right_option"}, {"0x700000064": "right_option"}),
+        (
+            "dock.hot_corners",
+            {"top_left": {"action": "desktop", "modifier": "cmd+shift"}},
+            {"top_left": {"action": "desktop", "modifier": "shift+cmd"}},
+        ),
+        ("screen.screenshot_format", "jpg", "JPEG"),
+        ("screen.screenshot_format", "png", ".png"),
+        ("screen.screenshot_folder", "~/Shots", "~/Shots/"),
+        ("finder.new_window_folder", "~/Downloads", "~/Downloads/"),
+        ("finder.new_window_folder", "~/Downloads", "~/Documents/../Downloads"),
+    ],
+)
+def test_a_value_written_another_way_is_already_as_wanted(name, current, wanted, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(settings.Path, "home", staticmethod(lambda: tmp_path))
+    section, key = name.split(".")
+    setting = settings._SETTINGS[section][key]
+    if name == "screen.screenshot_folder":
+        wanted = str(tmp_path / "Shots") + "/"  # absolute, with a trailing slash
+    assert settings._same(section, key, setting, settings._normalized(current), wanted)
+
+
+@pytest.mark.parametrize(
+    "name, current, wanted",
+    [
+        ("keyboard.key_repeat", [0.03, 0.3], [None, 0.5]),
+        ("keyboard.remappings", {"caps_lock": "escape"}, {"caps_lock": "ctrl"}),
+        ("keyboard.remappings", {"caps_lock": "escape"}, {}),
+        ("dock.hot_corners", {"top_left": {"action": "desktop", "modifier": "cmd"}}, {"top_left": {"action": "desktop"}}),
+        ("screen.screenshot_format", "jpg", "png"),
+        ("finder.new_window_folder", "~/Downloads", "~/Documents"),
+    ],
+)
+def test_a_value_that_really_differs_still_differs(name, current, wanted, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(settings.Path, "home", staticmethod(lambda: tmp_path))
+    section, key = name.split(".")
+    setting = settings._SETTINGS[section][key]
+    assert not settings._same(section, key, setting, settings._normalized(current), wanted)
+
+
+def test_apply_leaves_alone_a_value_already_in_place_written_another_way(fake_settings, monkeypatch):
+    values, changes, restarts = fake_settings
+    table = settings._SETTINGS["keyboard"]
+    monkeypatch.setitem(table, "key_repeat", table["key_repeat"]._replace(canon=settings._key_repeat_canon))
+    assert settings.apply({"keyboard": {"key_repeat": [None, 0.225]}}) == []
+    assert settings.apply({"keyboard": {"key_repeat": [None, 0.3]}}) == ["keyboard.key_repeat"]
+    assert changes == [("key_repeat", [None, 0.3])]  # the setter is given the value as it was

@@ -13,13 +13,14 @@ call names its ``argtypes``/``restype`` instead of relying on ctypes defaults.
 """
 
 import ctypes
+import errno
 import os
 import platform
 import threading
 import time
 from contextlib import contextmanager
 from functools import lru_cache, partial, wraps
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from . import _cf
 from ._system import framework, require_macos
@@ -96,9 +97,17 @@ def sel(name: str) -> int:
 
 
 def send(receiver: Optional[int], selector: str, *args: Any, argtypes: Sequence[Any] = (), restype: Any = id) -> Any:
-    """Send ``selector`` to ``receiver`` and return the result as ``restype``."""
+    """
+    Send ``selector`` to ``receiver`` and return the result as ``restype``.
+
+    A message to nil answers nil, 0 or, for a struct, one of all zeros, as compiled Objective-C does.
+    """
     if len(args) != len(argtypes):
         raise TypeError("send({!r}) got {} arguments but {} argtypes".format(selector, len(args), len(argtypes)))
+    if not receiver and isinstance(restype, type) and issubclass(restype, ctypes.Structure):
+        # objc_msgSend's nil path zeroes only the return registers, not the buffer a big struct
+        # comes back through (a CGAffineTransform on arm64, a CGRect on Intel): that would be garbage.
+        return restype()
     return _prototype(restype, tuple(argtypes))(receiver, sel(selector), *args)
 
 
@@ -149,13 +158,25 @@ def utf16_offsets(text: str) -> List[int]:
     return offsets
 
 
+class _NSRange(ctypes.Structure):
+    _fields_ = [("location", NSUInteger), ("length", NSUInteger)]
+
+
 def pystring(obj: Optional[int]) -> Optional[str]:
-    """Convert an ``NSString`` to a Python string (``None`` stays ``None``), NUL characters included."""
+    """
+    Convert an ``NSString`` to a Python string (``None`` stays ``None``), NUL characters included.
+
+    Half an emoji (a lone UTF-16 surrogate, which an app cutting text may leave) comes out as U+FFFD.
+    """
     if not obj:
         return None
     data = send(obj, "dataUsingEncoding:", NSUTF8StringEncoding, argtypes=(NSUInteger,))
     if not data:
-        return None
+        # UTF-8 can't hold a lone surrogate, but the string is still there: read its UTF-16 units.
+        count = send(obj, "length", restype=NSUInteger)
+        units = (ctypes.c_uint16 * count)()
+        send(obj, "getCharacters:range:", units, _NSRange(0, count), argtypes=(ctypes.c_void_p, _NSRange), restype=None)
+        return bytes(units).decode("utf-16-le", errors="replace")
     length = send(data, "length", restype=NSUInteger)
     return ctypes.string_at(send(data, "bytes", restype=ctypes.c_void_p), length).decode("utf-8") if length else ""
 
@@ -217,15 +238,23 @@ def nsdictionary_of(items: Dict[str, int]) -> int:
     )
 
 
-def file_url(path: "os.PathLike[str] | str") -> int:
-    """Create an autoreleased file ``NSURL`` for ``path``."""
+def file_url(path: Union[str, "os.PathLike[str]"]) -> int:
+    """
+    Create an autoreleased file ``NSURL`` for ``path``, the name kept byte for byte.
+
+    Built from the bytes, not with ``fileURLWithPath:``, which decomposes accents (NFD): a file
+    macOS creates at the URL would otherwise get another name than the one asked for. A name
+    that isn't UTF-8 (a network volume's) works the same way.
+    """
     text = os.fspath(path)
-    try:
-        return send(cls("NSURL"), "fileURLWithPath:", nsstring(text), argtypes=(id,))
-    except UnicodeEncodeError:
-        # A name that isn't UTF-8 (a network volume's), which an NSString can't hold: by its bytes,
-        # as a CFURL, which is an NSURL too.
-        return send(_cf.file_url(os.path.abspath(text), directory=os.path.isdir(text)), "autorelease")
+    return send(
+        cls("NSURL"),
+        "fileURLWithFileSystemRepresentation:isDirectory:relativeToURL:",
+        os.fsencode(os.path.abspath(text)),
+        os.path.isdir(text),
+        None,
+        argtypes=(ctypes.c_char_p, BOOL, id),
+    )
 
 
 def error_message(error: ctypes.c_void_p, default: Optional[str] = "unknown error") -> Optional[str]:
@@ -275,12 +304,14 @@ class CGAffineTransform(ctypes.Structure):
     _fields_ = [(name, ctypes.c_double) for name in ("a", "b", "c", "d", "tx", "ty")]
 
 
-def ciimage(image: "bytes | bytearray | os.PathLike[str] | str") -> int:
+def ciimage(image: Union[bytes, bytearray, "os.PathLike[str]", str]) -> int:
     """
     An autoreleased ``CIImage`` of an image file or its bytes, turned upright.
 
     The EXIF orientation is applied, so a portrait photo comes out standing.
-    Loads AppKit and CoreImage.
+    Loads AppKit and CoreImage. A folder raises :class:`IsADirectoryError`, a
+    file that can't be read :class:`PermissionError`, and anything else macOS
+    can't read as an image :class:`ValueError`.
     """
     framework("AppKit")
     core_image = framework("CoreImage")
@@ -299,10 +330,24 @@ def ciimage(image: "bytes | bytearray | os.PathLike[str] | str") -> int:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
         picture = send(cls("CIImage"), "imageWithContentsOfURL:options:", file_url(path), options, argtypes=(id, id))
+        if not picture:
+            _readable(path)
         label = path
     if not picture:
         raise ValueError("{} is not an image macOS can read".format(label))
     return picture
+
+
+def _readable(path: str) -> None:
+    """
+    Raise what Python's own ``open`` would for a ``path`` macOS couldn't load: a folder, or a file not readable.
+
+    Core Image just answers nil, which would read as a file that isn't an image.
+    """
+    if os.path.isdir(path):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+    if os.path.isfile(path):  # not a FIFO, whose open would wait for a writer
+        open(path, "rb").close()  # PermissionError: the file's mode, or no Files and Folders access
 
 
 @lru_cache(maxsize=None)
@@ -546,16 +591,19 @@ def run_until(done: Any, timeout: float) -> bool:
     """
     Spin the current thread's run loop until ``done()`` is true or ``timeout`` seconds pass; return ``done()``.
 
-    Callbacks scheduled on the main queue (the camera's, for example) only
+    Callbacks scheduled on the main queue (the geocoder's, for example) only
     run while the main thread's run loop turns, which a script never does.
+    A ``timeout`` of ``math.inf`` waits for ``done()``; NaN raises :class:`ValueError`.
     """
+    if timeout != timeout:  # NaN: no deadline it would ever pass, so a wait that never ends
+        raise ValueError("timeout must be a number, not NaN")
     deadline = time.monotonic() + timeout
     while not done():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        # No pool here: what the callbacks hand over (to camera's delegate,
-        # say) must outlive the slice, until the caller's own pool drains it.
+        # No pool here: what the callbacks hand over (to a geocoder's
+        # handler, say) must outlive the slice, until the caller's own pool drains it.
         if not _cf.run_loop(min(0.05, remaining), once=False):
             time.sleep(min(0.05, remaining))
     return bool(done())

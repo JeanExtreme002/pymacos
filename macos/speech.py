@@ -42,7 +42,7 @@ def say(
     text: str,
     *,
     voice: Optional[str] = None,
-    rate: Optional[int] = None,
+    rate: Optional[float] = None,
     wait: bool = True,
     output: Union[str, "os.PathLike[str]", None] = None,
 ) -> Optional[Path]:
@@ -58,11 +58,24 @@ def say(
 
     An unknown ``voice`` is not an error: ``say`` falls back to the default
     voice, matching names loosely (``"samantha"`` and ``"Eddy"`` both work).
+    ``voice="?"`` is a ``ValueError``: ``say`` would list the voices instead of
+    speaking; use :func:`~macos.speech.voices` for that. A ``rate`` that isn't a
+    positive number is an error too, since ``say`` would silently ignore it.
     """
+    # Always hand say a str: with input=None it would read the caller's own
+    # stdin, since the text is read from "-".
+    if not isinstance(text, str):
+        raise TypeError("text must be a str, not {}".format(type(text).__name__))
     args = ["say"]
     if voice is not None:
+        if voice == "?":
+            raise ValueError("voice '?' lists the voices instead of speaking; use macos.speech.voices()")
         args += ["-v", voice]
     if rate is not None:
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            raise TypeError("rate must be a number of words per minute, not {!r}".format(rate))
+        if not rate > 0:
+            raise ValueError("rate must be positive, not {}".format(rate))
         args += ["-r", str(rate)]
     target = None
     if output is not None:
@@ -80,6 +93,9 @@ def say(
         _run(args, input=text)
         return target
 
+    # Encode before starting say, the way the blocking path does (errors
+    # replaced), so a failure here can't leave a process waiting on stdin.
+    data = text.encode("utf-8", "replace")
     process = popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Write the text before returning, not from a background thread: if the
@@ -87,10 +103,19 @@ def say(
     # text reached say, which would then speak nothing.
     assert process.stdin is not None
     try:
-        process.stdin.write(text.encode("utf-8"))
+        process.stdin.write(data)
         process.stdin.close()
     except BrokenPipeError:
         pass  # say exited early; there is nothing left to speak to.
+    except BaseException:
+        # Interrupted mid-write (Ctrl-C, say): don't leave say behind.
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+        process.kill()
+        process.wait()
+        raise
 
     # Reap the process when it finishes, so no zombie is left behind.
     threading.Thread(target=process.wait, daemon=True).start()

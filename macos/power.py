@@ -19,10 +19,12 @@ like the ``caffeinate`` command does.
 """
 
 import ctypes
-from contextlib import contextmanager
+import functools
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from types import TracebackType
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
 from . import _cf, _iokit, _objc
 from ._system import framework, run as _run
@@ -64,8 +66,9 @@ def _battery_registry(*names: str) -> Dict[str, Optional[int]]:
 def _health() -> Tuple[Optional[int], Optional[int]]:
     data = _battery_registry("CycleCount", "DesignCapacity", "NominalChargeCapacity", "AppleRawMaxCapacity", "MaxCapacity")
     design = data["DesignCapacity"]
-    # System Settings uses the nominal charge capacity; older Macs only have
-    # the raw maximum (Apple Silicon) or report MaxCapacity in mAh (Intel).
+    # The nominal charge capacity, which macOS corrects on its own before
+    # System Settings shows it; older Macs only have the raw maximum (Apple
+    # Silicon) or report MaxCapacity in mAh (Intel).
     full = data["NominalChargeCapacity"] or data["AppleRawMaxCapacity"]
     if full is None and (data["MaxCapacity"] or 0) > 100:
         full = data["MaxCapacity"]
@@ -91,8 +94,10 @@ class Battery:
     cycle_count: Optional[int] = None
     """How many full charge cycles the battery has gone through."""
     health: Optional[int] = None
-    """Maximum capacity compared with when it was new, in percent, as shown in
-    System Settings › Battery › Battery Health."""
+    """Maximum capacity compared with when it was new, in percent: the full
+    charge the battery holds now over its design capacity. System Settings ›
+    Battery › Battery Health applies its own correction, so it can show a
+    point or two more."""
 
 
 def _minutes(value: Optional[int]) -> Optional[timedelta]:
@@ -145,33 +150,93 @@ def low_power_mode() -> bool:
         return bool(has_it and _objc.send(info, "isLowPowerModeEnabled", restype=_objc.BOOL))
 
 
-@contextmanager
-def keep_awake(*, display: bool = False, reason: str = "pymacos keep_awake") -> Iterator[None]:
+_Function = TypeVar("_Function", bound=Callable[..., Any])
+
+
+class _KeepAwake:
+    """What :func:`keep_awake` returns: a context manager, sync or async, and a decorator."""
+
+    def __init__(self, display: bool, reason: str) -> None:
+        self._display = display
+        self._reason = reason
+        # One assertion per entry, so the same object can be entered again
+        # while it's held (nested blocks) and each exit releases its own.
+        self._held: List[int] = []
+
+    def __enter__(self) -> None:
+        io = _iokit.lib()
+        kind = "PreventUserIdleDisplaySleep" if self._display else "PreventUserIdleSystemSleep"
+        assertion = ctypes.c_uint32()
+        with _cf.owned(_cf.string(kind)) as kind_ref, _cf.owned(_cf.string(self._reason)) as reason_ref:
+            status = io.IOPMAssertionCreateWithName(kind_ref, _ASSERTION_ON, reason_ref, ctypes.byref(assertion))
+        if status != _iokit.SUCCESS:
+            raise MacOSError("could not create the power assertion (IOReturn {:#x})".format(status & 0xFFFFFFFF))
+        self._held.append(assertion.value)
+
+    def __exit__(
+        self, kind: Optional[Type[BaseException]], error: Optional[BaseException], traceback: Optional[TracebackType]
+    ) -> None:
+        _iokit.lib().IOPMAssertionRelease(self._held.pop())
+
+    async def __aenter__(self) -> None:
+        self.__enter__()
+
+    async def __aexit__(
+        self, kind: Optional[Type[BaseException]], error: Optional[BaseException], traceback: Optional[TracebackType]
+    ) -> None:
+        self.__exit__(kind, error, traceback)
+
+    def __call__(self, function: _Function) -> _Function:
+        if inspect.isgeneratorfunction(function) or inspect.isasyncgenfunction(function):
+            # Calling one only makes the generator: nothing would be held while
+            # it runs, and holding it between items could keep the Mac up for good.
+            raise TypeError("keep_awake() can't decorate a generator function: use it as a with block inside")
+        display, reason = self._display, self._reason
+        wrapper: Callable[..., Any]
+        if inspect.iscoroutinefunction(function):
+            # Calling it only makes the coroutine: hold the assertion while it's awaited.
+            @functools.wraps(function)
+            async def wrapper(*args: Any, **kwargs: Any) -> Any:
+                async with _KeepAwake(display, reason):
+                    return await function(*args, **kwargs)
+
+        else:
+
+            @functools.wraps(function)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                with _KeepAwake(display, reason):
+                    return function(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+
+def keep_awake(*, display: bool = False, reason: str = "pymacos keep_awake") -> _KeepAwake:
     """
     Keep the Mac from going to sleep while the block runs.
 
     By default the display may still turn off; ``display=True`` keeps it on
     too. ``reason`` shows up in ``pmset -g assertions`` and Activity Monitor.
-    It works as a decorator as well::
+    It works as an ``async with`` block, and as a decorator as well::
 
         @macos.power.keep_awake()
         def backup():
             ...
 
+    On an ``async def`` function the Mac stays awake while the coroutine is
+    awaited. A generator function raises :class:`TypeError`: use a ``with``
+    block inside it instead. A ``reason`` that isn't a string raises
+    :class:`TypeError`, and one that can't be encoded as UTF-8 (a lone
+    surrogate) :class:`ValueError`.
+
     Closing the lid still puts a laptop to sleep, as with ``caffeinate``.
     """
-    io = _iokit.lib()
-    kind = "PreventUserIdleDisplaySleep" if display else "PreventUserIdleSystemSleep"
-    assertion = ctypes.c_uint32()
-    with _cf.owned(_cf.string(kind)) as kind_ref, _cf.owned(_cf.string(reason)) as reason_ref:
-        status = io.IOPMAssertionCreateWithName(kind_ref, _ASSERTION_ON, reason_ref, ctypes.byref(assertion))
-    if status != _iokit.SUCCESS:
-        raise MacOSError("could not create the power assertion (IOReturn {:#x})".format(status & 0xFFFFFFFF))
-
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a str, not {}".format(type(reason).__name__))
     try:
-        yield
-    finally:
-        io.IOPMAssertionRelease(assertion.value)
+        reason.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("reason can't be encoded as UTF-8: {!r}".format(reason)) from None
+    return _KeepAwake(display, reason)
 
 
 _PMSET_TIMEOUT = 30.0  # seconds: pmset only asks for the sleep, and answers at once
@@ -242,7 +307,8 @@ def _adapter(found: Any) -> Optional[Adapter]:
 
 # The assertions that keep the Mac awake, and whether they keep the display on too, as powerd applies them
 # (PMAssertions.c). Not UserIsActive, which is someone using the Mac, nor ExternalMedia, which only
-# delays the deeper standby sleep.
+# delays the deeper standby sleep. PreventSystemSleep, BackgroundTask (Time Machine) and the push
+# service ones hold only on AC power or in dark wake; on battery pmset lists them all the same.
 _KEEPS_AWAKE = {
     "PreventUserIdleSystemSleep": False,
     "NoIdleSleepAssertion": False,
@@ -251,6 +317,10 @@ _KEEPS_AWAKE = {
     "DenySystemSleep": False,
     "InternalPreventSleep": False,
     "MaintenanceActivity": False,
+    "NetworkClientActive": False,
+    "BackgroundTask": False,
+    "ApplePushServiceTask": False,
+    "InteractivePushServiceTask": False,
     "PreventUserIdleDisplaySleep": True,
     "NoDisplaySleepAssertion": True,
     "InternalPreventDisplaySleep": True,
@@ -286,7 +356,10 @@ def sleep_blockers() -> List[SleepBlocker]:
             print(blocker.process, blocker.reason)   # caffeinate  caffeinate command-line tool
 
     macOS itself shows up as ``powerd`` while the display is on. Apps playing
-    sound or video, :func:`keep_awake` and ``caffeinate`` are the usual others.
+    sound or video, :func:`keep_awake` and ``caffeinate`` are the usual others,
+    and File or Screen Sharing serving someone, or a Time Machine backup. Some
+    of these keep the Mac awake only on AC power: like ``pmset``, the list has
+    them on battery too.
     """
     io = _iokit.lib()
     found = _cf.CFTypeRef()

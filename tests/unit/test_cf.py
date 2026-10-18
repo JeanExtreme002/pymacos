@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos._cf`. They run on any platform, but the round trips through CoreFoundation itself."""
 
+import ctypes
 import sys
 
 import pytest
@@ -47,12 +48,91 @@ def test_run_loop_source(fake_cf):
     borrowed = _cf.RunLoopSource(8, owned=False, what="watch it")
     borrowed.close()
     assert [call for call in fake_cf.calls if call[0] != "CFRunLoopGetCurrent"] == [
+        ("CFRetain", "loop"),  # the thread's run loop is freed when the thread ends: close() may come after
         ("CFRunLoopAddSource", "loop", 7, "mode"),
         ("CFRunLoopRemoveSource", "loop", 7, "mode"),
         ("CFRelease", 7),
+        ("CFRelease", "loop"),
+        ("CFRetain", "loop"),
         ("CFRunLoopAddSource", "loop", 8, "mode"),
         ("CFRunLoopRemoveSource", "loop", 8, "mode"),  # not released: its maker owns it
+        ("CFRelease", "loop"),
     ]
+
+
+def test_run_loop_source_closes_from_another_thread_after_its_own_ended(fake_cf):
+    import threading
+
+    made = []
+    worker = threading.Thread(target=lambda: made.append(_cf.RunLoopSource(7, owned=True, what="watch it")))
+    worker.start()
+    worker.join()
+    made[0].close()  # on the main thread, the worker gone: the loop it retained is still there
+    assert fake_cf.calls[-3:] == [
+        ("CFRunLoopRemoveSource", "loop", 7, "mode"),
+        ("CFRelease", 7),
+        ("CFRelease", "loop"),
+    ]
+    assert made[0].loop is None
+
+
+def test_from_python_rejects_none_at_any_depth(fake_cf):
+    for value in (None, [1, None], {"a": None}, {"a": [{"b": None}]}, (None,)):
+        with pytest.raises(ValueError, match="None is not a property-list value"):
+            _cf.from_python(value)
+    assert fake_cf.calls == []  # nothing reached CoreFoundation
+
+
+def test_from_python_takes_aware_datetimes_as_utc(fake_cf):
+    import datetime
+    import plistlib
+
+    created = []
+    fake_cf.CFDataCreate = lambda allocator, payload, size: created.append(payload) or 3
+    fake_cf.CFPropertyListCreateWithData = lambda *args: 9
+    naive = datetime.datetime(2026, 10, 17, 15, 0)
+    aware = datetime.datetime(2026, 10, 17, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-3)))
+    assert _cf.from_python({"when": aware, "list": [aware, naive], "tuple": (aware,)}) == 9
+    assert plistlib.loads(created[0]) == {"when": naive, "list": [naive, naive], "tuple": [naive]}
+
+
+def test_to_python_raises_the_packages_error_for_what_plistlib_cannot_read(fake_cf, monkeypatch):
+    fake_cf.CFPropertyListCreateData = lambda *args: 3
+    monkeypatch.setattr(_cf, "to_bytes", lambda ref: b"bplist00 not really")
+    with pytest.raises(_cf.NotPropertyListError, match="not a property list Python can read") as caught:
+        _cf.to_python(7)
+    assert isinstance(caught.value, ValueError)
+
+
+def test_to_str_replaces_a_lone_surrogate_and_keeps_the_rest(fake_cf, monkeypatch):
+    units = "a\ud83dbc\0".encode("utf-16-le", "surrogatepass")
+    monkeypatch.setattr(_cf, "is_type", lambda ref, type_id: True)
+    fake_cf.CFStringGetLength = lambda ref: len(units) // 2
+
+    def characters(ref, span, buffer):
+        assert (span.location, span.length) == (0, len(units) // 2)
+        ctypes.memmove(buffer, units, len(units))
+
+    fake_cf.CFStringGetCharacters = characters
+    assert _cf.to_str(7) == "a\ufffdbc"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls CoreFoundation")
+def test_a_lone_surrogate_in_a_real_cfstring():
+    units = "a\ud83dbc".encode("utf-16-le", "surrogatepass")
+    with _cf.owned(_cf.lib().CFStringCreateWithBytes(None, units, len(units), 0x14000100, False)) as ref:  # UTF-16LE
+        assert _cf.to_str(ref) == "a\ufffdbc"  # not None for the whole string
+        with pytest.raises(_cf.NotPropertyListError):
+            _cf.to_python(ref)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="calls CoreFoundation")
+def test_dates_round_trip_as_naive_utc():
+    import datetime
+
+    aware = datetime.datetime(2026, 10, 17, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-3)))
+    with _cf.owned(_cf.from_python([aware])) as ref:
+        assert _cf.to_python(ref) == [datetime.datetime(2026, 10, 17, 15, 0)]
 
 
 def test_run_loop_with_nothing_to_wait_for(fake_cf):

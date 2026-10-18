@@ -20,7 +20,7 @@ macos.trackpad.set_tracking_speed(0.7)        # from 0.0 to 1.0
 | {func}`~macos.trackpad.secondary_click` | {func}`~macos.trackpad.set_secondary_click` | `"two_fingers"`, `"bottom_right"`, `"bottom_left"` (a corner) or `None` |
 | {func}`~macos.trackpad.three_finger_drag` | {func}`~macos.trackpad.set_three_finger_drag` | drag windows and text with three fingers, without pressing |
 | {func}`~macos.trackpad.click_pressure` | {func}`~macos.trackpad.set_click_pressure` | `"light"`, `"medium"` or `"firm"`, like the Click slider |
-| {func}`~macos.trackpad.tracking_speed` | {func}`~macos.trackpad.set_tracking_speed` | 0.0 (slowest) to 1.0 (fastest), like the slider |
+| {func}`~macos.trackpad.tracking_speed` | {func}`~macos.trackpad.set_tracking_speed` | 0.0 (slowest) to 1.0 (fastest), like the slider; a speed set by hand past its ends reads as 0.0 or 1.0 |
 
 Tap to click and the scroll direction apply at once; the pointer speed at the
 next login. Three-finger dragging clashes with the three-finger swipes: set
@@ -45,8 +45,11 @@ The names are in {data}`~macos.trackpad.GESTURES`: `swipe_between_pages`,
 `launchpad` and `show_desktop`. The swipes between full-screen apps and up
 to Mission Control take the number of fingers, `3` or `4` (`True` is 3), or
 `False` to turn them off: four frees
-three fingers for three-finger drag. Changing the Dock's gestures restarts
-the Dock.
+three fingers for three-finger drag. App Exposé swipes down with the fingers
+Mission Control swipes up with, as in System Settings: moving one moves the
+other, and the swipe stays while either is on. Moving the full-screen apps off
+three fingers leaves a three-finger "swipe between pages" alone. Changing the
+Dock's gestures restarts the Dock.
 
 ## Reference
 

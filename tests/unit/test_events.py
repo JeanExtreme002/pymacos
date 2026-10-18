@@ -47,7 +47,7 @@ def test_events_run_calls_the_callbacks_of_each_event(monkeypatch):
     events.on("sleep", lambda: calls.append(("d", "no arguments")))
     events.on("sleep", print)  # a builtin: it gets the event
 
-    def listen(names, on_event, timeout, required=None):
+    def listen(names, on_event, timeout, required=None, listener=None):
         assert names == list(events.NAMES)  # every event: a callback registered meanwhile gets its events too
         assert required == {"sleep", "wake"}  # the sources these need must work; the others may only warn
         for name in ("wake", "sleep"):
@@ -68,7 +68,7 @@ def test_events_run_calls_a_callback_registered_while_it_runs(monkeypatch):
 
     events.on("wake", first)
 
-    def listen(names, on_event, timeout, required=None):
+    def listen(names, on_event, timeout, required=None, listener=None):
         for name in ("wake", "app_quit", "app_quit"):
             on_event(macos.events.Event(name))
 
@@ -89,6 +89,90 @@ def test_events_wait_returns_the_awaited_event(monkeypatch):
     assert events.wait("wake") == macos.events.Event("wake")
     monkeypatch.setattr(events, "_listen", lambda names, on_event, timeout: None)
     assert events.wait("wake", timeout=0.1) is None
+
+
+def test_events_run_skips_a_callback_removed_by_an_earlier_one(monkeypatch):
+    calls = []
+
+    def first(event):
+        calls.append("first")
+        second.remove()  # disarms the next one, for this very event too
+
+    events.on("wake", first)
+    second = events.on("wake", lambda event: calls.append("second"))
+    events.on("wake", lambda event: calls.append("third"))
+
+    def listen(names, on_event, timeout, required=None, listener=None):
+        assert on_event(macos.events.Event("wake")) is False
+
+    monkeypatch.setattr(events, "_listen", listen)
+    events.run()
+
+    assert calls == ["first", "third"]
+
+
+def test_events_run_calls_no_more_callbacks_after_stop(monkeypatch):
+    calls = []
+
+    def first(event):
+        calls.append("first")
+        events.stop()
+
+    events.on("wake", first)
+    events.on("wake", lambda event: calls.append("second"))
+    outcomes = []
+
+    def listen(names, on_event, timeout, required=None, listener=None):
+        with events._listeners.listening(listener):  # as the real _listen counts it in
+            outcomes.append(on_event(macos.events.Event("wake")))
+            outcomes.append(on_event(macos.events.Event("wake")))
+
+    monkeypatch.setattr(events, "_listen", listen)
+    events.run()
+
+    assert calls == ["first"]
+    assert outcomes == [True, True]  # the run ends: the event loop is told to stop
+
+
+def test_events_on_refuses_a_callback_that_is_not_callable():
+    with pytest.raises(TypeError, match="callback must be callable, not None"):
+        events.on("wake", None)
+    with pytest.raises(TypeError, match="callable"):
+        events.on("wake", "print")
+    assert events._handlers == []  # nothing registered: run() still has no callbacks
+    with pytest.raises(ValueError, match="no callbacks registered"):
+        events.run()
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, "5", True])
+def test_events_run_and_wait_refuse_a_bad_timeout_before_listening(monkeypatch, timeout):
+    listened = []
+    monkeypatch.setattr(events, "_listen", lambda *args, **kwargs: listened.append(args))
+    events.on("wake", print)
+
+    with pytest.raises(ValueError, match="timeout must be 0 or more, or None"):
+        events.run(timeout=timeout)
+    with pytest.raises(ValueError, match="timeout must be 0 or more, or None"):
+        events.wait("wake", timeout=timeout)
+    assert listened == []
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, "5", True])
+def test_listen_refuses_a_bad_timeout_before_setting_anything_up(monkeypatch, timeout):
+    made = []
+    monkeypatch.setattr(events, "framework", lambda name: made.append(name))
+    monkeypatch.setattr(events, "_observer", lambda listener, cleanup: made.append("observer"))
+
+    with pytest.raises(ValueError, match="timeout must be 0 or more, or None"):
+        events._listen(["wake"], lambda event: True, timeout)
+    assert made == [] and events._listeners.active() == []
+
+
+def test_events_off_type_hints_resolve():
+    import typing
+
+    # On Python 3.9 a "Handler | str" annotation can't be evaluated.
+    assert typing.get_type_hints(events.off)["handler"] == typing.Union[events.Handler, str]
 
 
 def test_events_run_and_wait_refuse_a_worker_thread(monkeypatch):
@@ -308,3 +392,78 @@ def test_listen_only_warns_when_a_source_no_registered_event_needs_fails(monkeyp
 
     with pytest.raises(macos.MacOSError, match="configd"):  # the same source, needed by an event registered at the start
         events._listen(["wake", "network_changed"], lambda event: True, 0, required={"network_changed"})
+
+
+@pytest.fixture
+def fake_tap(monkeypatch):
+    """An event tap without Core Graphics: made, closed, never fed."""
+    from macos import _events
+
+    class Graphics:
+        def CGEventTapCreate(self, tap, place, options, mask, callback, info):
+            return 4242
+
+    class Source:
+        def __init__(self, source, *, owned, what):
+            pass
+
+        def close(self):
+            pass
+
+    class CoreFoundation:
+        def CFMachPortCreateRunLoopSource(self, allocator, port, order):
+            return 1
+
+        def CFMachPortInvalidate(self, port):
+            pass
+
+    monkeypatch.setattr(_events, "graphics", lambda: Graphics())
+    monkeypatch.setattr(_events._cf, "RunLoopSource", Source)
+    monkeypatch.setattr(_events._cf, "lib", CoreFoundation)
+    monkeypatch.setattr(_events._cf, "release", lambda ref: None)
+    monkeypatch.setattr(_events, "_RETIRED", [])
+    return _events
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), -1, "5", True, [1]])
+def test_a_bad_timeout_fails_the_call_before_any_tap_is_made(fake_tap, monkeypatch, timeout):
+    # A NaN deadline is never reached: it would listen for good though the caller set a timeout.
+    made = []
+    monkeypatch.setattr(fake_tap, "Tap", lambda *args, **kwargs: made.append(args))
+    with pytest.raises(ValueError, match="timeout must be 0 or more, or None"):
+        fake_tap.listen([10], lambda kind, event: event, timeout, "no")
+    assert made == []
+    with pytest.raises(ValueError, match="timeout must be 0 or more, or None"):
+        next(fake_tap.Listener().drain(timeout))  # what events and hotkeys turn, the same check
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 0.5, 2, float("inf")])
+def test_a_good_timeout_is_accepted(fake_tap, timeout):
+    fake_tap.check_timeout(timeout)
+
+
+def test_a_watch_closed_from_another_thread_ends_its_loop_without_a_timeout(fake_tap, monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(fake_tap._objc, "spin", lambda seconds: time.sleep(0.01))  # a run loop with nothing coming
+    watching, ended = [], threading.Event()
+
+    def owner():
+        watching.append(fake_tap.listen([10], lambda kind, event: event, None, "no"))
+        for _ in watching[0]:
+            pass
+        ended.set()
+
+    worker = threading.Thread(target=owner, daemon=True)
+    worker.start()
+    while not watching:
+        time.sleep(0.01)
+    time.sleep(0.05)  # the owner is inside its loop: closing the generator from here can't work
+    watching[0].close()
+    try:
+        assert ended.wait(5), "the owner's loop kept listening after close()"
+    finally:
+        watching[0]._listener.stop.set()  # never leave the thread spinning, even on failure
+        worker.join(5)
+    assert watching[0]._tap is None

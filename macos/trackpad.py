@@ -41,9 +41,14 @@ _TRACKPADS = ("com.apple.AppleMultitouchTrackpad", "com.apple.driver.AppleBlueto
 _SPEED_MAX = 3.0  # the slider's range in System Settings goes up to 3
 
 
+def _is_on(domain: str, key: str, default: bool) -> bool:
+    """A yes-or-no preference as macOS reads it: one written by hand as ``NO`` or ``0`` is off."""
+    return defaults._as_bool(defaults.read(domain, key, default=default), default)
+
+
 def tap_to_click() -> bool:
     """Whether a tap on the trackpad clicks, without pressing it."""
-    return bool(defaults.read(_TRACKPADS[0], "Clicking", default=False))
+    return _is_on(_TRACKPADS[0], "Clicking", False)
 
 
 def set_tap_to_click(on: bool = True) -> None:
@@ -57,7 +62,7 @@ def set_tap_to_click(on: bool = True) -> None:
 
 def natural_scrolling() -> bool:
     """Whether content follows the fingers ("natural" scrolling, the default), for the trackpad and mice."""
-    return bool(defaults.read(defaults.GLOBAL, "com.apple.swipescrolldirection", default=True))
+    return _is_on(defaults.GLOBAL, "com.apple.swipescrolldirection", True)
 
 
 def set_natural_scrolling(on: bool = True) -> None:
@@ -67,9 +72,15 @@ def set_natural_scrolling(on: bool = True) -> None:
 
 
 def tracking_speed() -> float:
-    """The pointer speed with the trackpad, from 0.0 (slowest) to 1.0 (fastest)."""
+    """
+    The pointer speed with the trackpad, from 0.0 (slowest) to 1.0 (fastest).
+
+    A speed set by hand past the slider's ends (``defaults write -g
+    com.apple.trackpad.scaling 5``, or ``-1``) reads as 1.0 or 0.0, so it can
+    be passed back to :func:`set_tracking_speed`.
+    """
     scaling = defaults._as_float(defaults.read(defaults.GLOBAL, "com.apple.trackpad.scaling", default=1.0), 1.0)
-    return round(scaling / _SPEED_MAX, 3)
+    return round(min(max(scaling / _SPEED_MAX, 0.0), 1.0), 3)
 
 
 def set_tracking_speed(speed: float) -> None:
@@ -86,7 +97,7 @@ def set_tracking_speed(speed: float) -> None:
 
 def three_finger_drag() -> bool:
     """Whether dragging with three fingers moves windows and selects text, without pressing."""
-    return bool(defaults.read(_TRACKPADS[0], "TrackpadThreeFingerDrag", default=False))
+    return _is_on(_TRACKPADS[0], "TrackpadThreeFingerDrag", False)
 
 
 def set_three_finger_drag(on: bool = True) -> None:
@@ -109,7 +120,7 @@ def secondary_click() -> Optional[str]:
     """
     How the trackpad right-clicks: ``'two_fingers'``, ``'bottom_right'`` or ``'bottom_left'`` (a corner), or ``None``.
     """
-    if defaults.read(_TRACKPADS[0], "TrackpadRightClick", default=True):
+    if _is_on(_TRACKPADS[0], "TrackpadRightClick", True):
         return "two_fingers"
     corner = defaults._as_int(defaults.read(_TRACKPADS[0], "TrackpadCornerSecondaryClick", default=0), 0)
     return {1: "bottom_left", 2: "bottom_right"}.get(corner)
@@ -122,9 +133,8 @@ def set_secondary_click(how: Optional[str]) -> None:
     if how not in _SECONDARY_CLICKS:
         raise ValueError("how must be 'two_fingers', 'bottom_right', 'bottom_left' or None, not {!r}".format(how))
     two_fingers, corner = _SECONDARY_CLICKS[how]
-    for domain in _TRACKPADS:
-        defaults.write(domain, "TrackpadRightClick", two_fingers)
-        defaults.write(domain, "TrackpadCornerSecondaryClick", corner)
+    _write("TrackpadRightClick", two_fingers)
+    _write("TrackpadCornerSecondaryClick", corner)
     apply_input_settings()
 
 
@@ -132,9 +142,11 @@ def set_secondary_click(how: Optional[str]) -> None:
 _HOST_COPIES = {
     "Clicking": None,  # tap to click keeps com.apple.mouse.tapBehavior instead
     "TrackpadThreeFingerDrag": "com.apple.trackpad.threeFingerDragGesture",
+    "TrackpadRightClick": "com.apple.trackpad.enableSecondaryClick",
     "TrackpadPinch": "com.apple.trackpad.pinchGesture",
     "TrackpadRotate": "com.apple.trackpad.rotateGesture",
     "TrackpadTwoFingerDoubleTapGesture": "com.apple.trackpad.twoFingerDoubleTapGesture",
+    "TrackpadTwoFingerFromRightEdgeSwipeGesture": "com.apple.trackpad.twoFingerFromRightEdgeSwipeGesture",
     "TrackpadThreeFingerHorizSwipeGesture": "com.apple.trackpad.threeFingerHorizSwipeGesture",
     "TrackpadFourFingerHorizSwipeGesture": "com.apple.trackpad.fourFingerHorizSwipeGesture",
     "TrackpadThreeFingerVertSwipeGesture": "com.apple.trackpad.threeFingerVertSwipeGesture",
@@ -215,12 +227,12 @@ def gestures() -> Dict[str, Union[bool, int]]:
     or ``False`` when they're off.
     """
     found: Dict[str, Union[bool, int]] = {
-        "swipe_between_pages": bool(defaults.read(defaults.GLOBAL, "AppleEnableSwipeNavigateWithScrolls", default=True)),
+        "swipe_between_pages": _is_on(defaults.GLOBAL, "AppleEnableSwipeNavigateWithScrolls", True),
     }
     for name, (key, on) in _SWITCHES.items():
-        found[name] = bool(_read(key, on))  # off is False or 0
+        found[name] = _is_on(_TRACKPADS[0], key, bool(on))  # off is False or 0
     for name, (three, four, dock_switch) in _SWIPES.items():
-        if dock_switch and not defaults.read("com.apple.dock", dock_switch, default=True):
+        if dock_switch and not _is_on("com.apple.dock", dock_switch, True):
             found[name] = False
         elif _read(three, _GESTURE) == _GESTURE:
             found[name] = 3
@@ -229,8 +241,16 @@ def gestures() -> Dict[str, Union[bool, int]]:
         else:
             found[name] = False
     for name, dock_switch in _DOCK_GESTURES.items():
-        found[name] = bool(defaults.read("com.apple.dock", dock_switch, default=True))
+        found[name] = _is_on("com.apple.dock", dock_switch, True)
+    if not _vertical_swipe():
+        found["app_expose"] = False  # it swipes down on Mission Control's swipe
     return found
+
+
+def _vertical_swipe() -> bool:
+    """Whether a swipe up or down with three or four fingers is a system gesture, for Mission Control and App Exposé."""
+    three, four, _ = _SWIPES["mission_control"]
+    return _read(three, _GESTURE) == _GESTURE or _read(four, 0) == _GESTURE
 
 
 def set_gesture(name: str, on: Union[bool, int]) -> None:
@@ -246,6 +266,11 @@ def set_gesture(name: str, on: Union[bool, int]) -> None:
     ``name`` is one of :data:`GESTURES`. ``"swipe_between_full_screen_apps"``
     and ``"mission_control"`` take the number of fingers, ``3`` or ``4``
     (``True`` is 3), freeing the other number for three-finger drag, say.
+    App Exposé swipes down with as many fingers as Mission Control swipes
+    up, as in System Settings: moving one moves the other, and the swipe
+    stays while either is on. Putting the full-screen apps on three fingers
+    takes three fingers from "swipe between pages"; putting them elsewhere
+    leaves a three-finger page swipe alone.
     Changes to the Dock's gestures (Mission Control, App Exposé, Launchpad,
     Show Desktop) restart the Dock.
     """
@@ -268,18 +293,32 @@ def set_gesture(name: str, on: Union[bool, int]) -> None:
         _write(key, value if on else (False if isinstance(value, bool) else 0))
     elif name in _SWIPES:
         three, four, dock_switch = _SWIPES[name]
-        # As System Settings writes it: three fingers turns on the four-finger swipe too.
-        _write(three, _GESTURE if fingers == 3 else 0)
-        _write(four, _GESTURE if fingers else 0)
+        if fingers or not dock_switch or not _is_on("com.apple.dock", _DOCK_GESTURES["app_expose"], True):
+            # As System Settings writes it: three fingers turns on the four-finger swipe too. The
+            # horizontal three-finger key's 1 is "swipe between pages" with three fingers: keep it (unset is 2).
+            if fingers == 3 or dock_switch or _read(three, _GESTURE) == _GESTURE:
+                _write(three, _GESTURE if fingers == 3 else 0)
+            _write(four, _GESTURE if fingers else 0)
+        # else Mission Control is off but App Exposé is on: keep their swipe, and only turn off the Dock's switch.
         if dock_switch:
             defaults.write("com.apple.dock", dock_switch, bool(fingers))
             restart_dock = True
     else:
         defaults.write("com.apple.dock", _DOCK_GESTURES[name], bool(on))
-        if name in ("launchpad", "show_desktop"):
+        if name == "app_expose":
+            # It swipes down on Mission Control's swipe: give it one (three fingers) if there is none, and
+            # drop it when Mission Control is off too.
+            three, four, _ = _SWIPES["mission_control"]
+            if on and not _vertical_swipe():
+                _write(three, _GESTURE)
+                _write(four, _GESTURE)
+            elif not on and not _is_on("com.apple.dock", "showMissionControlGestureEnabled", True):
+                _write(three, 0)
+                _write(four, 0)
+        elif name in ("launchpad", "show_desktop"):
             # Both are a pinch with the thumb and three fingers: keep it while either is on.
             other = _DOCK_GESTURES["show_desktop" if name == "launchpad" else "launchpad"]
-            pinch = bool(on) or bool(defaults.read("com.apple.dock", other, default=True))
+            pinch = bool(on) or _is_on("com.apple.dock", other, True)
             for key in _PINCHES:
                 _write(key, _GESTURE if pinch else 0)
         restart_dock = True

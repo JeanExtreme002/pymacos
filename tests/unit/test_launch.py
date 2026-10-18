@@ -41,3 +41,39 @@ def test_a_url_checked_against_the_schemes_stays_a_url(fake_run, tmp_path, monke
     monkeypatch.setattr(launch, "_scheme", then_a_file_appears)
     macos.open("https:payload.command", schemes={"https"})
     assert fake_run.args == ["open", "-u", "https:payload.command"]
+
+
+def test_an_empty_target_is_refused_rather_than_the_current_directory(fake_run):
+    with pytest.raises(ValueError, match="empty target"):
+        macos.open("")
+    with pytest.raises(ValueError, match="empty target"):
+        macos.open("", schemes={"file", "https"})
+    with pytest.raises(ValueError, match="empty target"):
+        macos.open_with("", "TextEdit")
+    assert fake_run.calls == []
+
+
+def test_a_name_with_a_colon_is_a_url_unless_given_as_a_path(fake_run, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.chdir(tmp_path)
+    macos.open("Report:Q3.pdf")  # no such file: taken as a URL, as documented
+    assert fake_run.args == ["open", "-u", "Report:Q3.pdf"]
+    for path in (Path("Report:Q3.pdf"), "./Report:Q3.pdf"):
+        with pytest.raises(FileNotFoundError):
+            macos.open(path)
+    assert len(fake_run.calls) == 1
+
+
+def test_schemes_may_be_written_with_their_colon_and_slashes(fake_run):
+    macos.open("https://python.org", schemes={"https://", "HTTP:"})
+    assert fake_run.args == ["open", "-u", "https://python.org"]
+    with pytest.raises(ValueError, match="only http, https may be opened"):
+        macos.open("zoommtg://zoom.us/join", schemes={"https://", "http://"})
+
+    for wrong in ("https://python.org", "", "https:/", "*"):
+        with pytest.raises(ValueError, match="is not a URL scheme"):
+            macos.open("https://python.org", schemes={wrong})
+    with pytest.raises(TypeError, match="schemes must be names"):
+        macos.open("https://python.org", schemes=[None])  # type: ignore[list-item]
+    assert len(fake_run.calls) == 1

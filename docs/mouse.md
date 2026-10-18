@@ -54,7 +54,8 @@ It raises {class}`~macos.MacOSError` when the text isn't on the screen. It needs
 the [Screen Recording permission](permissions.md#screen-recording) too.
 `button` and `count` work as in {func}`~macos.mouse.click`; `region`, `display`
 and `languages` as in {func}`macos.screen.find_text`, which tells how the text
-is found.
+is found; `languages` is a list, such as `["en-US"]`, and a single string raises
+`TypeError`.
 
 ## Dragging
 
@@ -66,7 +67,8 @@ macos.mouse.move(100, 100)
 macos.mouse.drag(500, 100, duration=0.5)
 ```
 
-The button is always released at the end, even if the drag is interrupted.
+The button is always released at the end. If the drag is interrupted (Ctrl-C),
+it is released where the pointer stopped, so nothing is dropped at the target.
 
 ## Scrolling
 
@@ -77,6 +79,13 @@ lines. Positive values scroll down, towards the end, and negative values up;
 ```python
 macos.mouse.scroll(10)
 macos.mouse.scroll(-3, horizontal=True)
+```
+
+Keys held with {func}`macos.keyboard.hold` apply, as they do to clicks:
+
+```python
+with macos.keyboard.hold("cmd"):
+    macos.mouse.scroll(-3)                   # Cmd-scroll: zooms in many apps
 ```
 
 ## Watching clicks
@@ -91,13 +100,18 @@ for click in macos.mouse.watch():
 ```
 
 It only listens: the clicks still reach the apps. It needs the [Input Monitoring
-permission](permissions.md#input-monitoring).
+permission](permissions.md#input-monitoring). It goes on until you `break` out of
+the loop or `timeout` seconds pass (a negative or NaN `timeout` raises
+`ValueError`); another thread can stop it by calling `close()` on what
+`watch()` returned.
 
 ## Mouse settings
 
 {func}`~macos.mouse.set_tracking_speed` sets how fast the pointer moves with a
 mouse, from 0.0 to 1.0, like the slider in System Settings › Mouse; it takes
-effect at the next login. For the trackpad, see [Trackpad](trackpad.md).
+effect at the next login. A speed set by hand beyond the slider (such as `-1`
+with `defaults write`) reads as the nearer end, 0.0 or 1.0. For the trackpad,
+see [Trackpad](trackpad.md).
 
 ```python
 macos.mouse.tracking_speed()        # 0.333

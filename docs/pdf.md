@@ -11,6 +11,11 @@ macos.pdf.text("report.pdf")                  # all the text
 macos.pdf.text("report.pdf", pages=[1, 2])    # only some pages
 ```
 
+A file macOS doesn't let you read (its permissions, or a folder such as
+Desktop or Documents that privacy settings guard) raises
+{class}`PermissionError`, not `ValueError`: that's for a file that isn't a
+PDF.
+
 ## Document details
 
 {func}`~macos.pdf.metadata` returns what the PDF records about itself:
@@ -37,6 +42,11 @@ macos.pdf.extract("report.pdf", "reordered.pdf", [3, 1, 2])
 {func}`~macos.pdf.extract` keeps the pages in the order you give, so it also
 reorders pages.
 
+{func}`~macos.pdf.merge` takes a list, even of one PDF: a single path raises
+`TypeError`. A form's fields come along into the new PDF and still fill in
+Preview, but the new PDF lacks the entry that Acrobat (and other apps that
+build the form from it) reads: they see no form there.
+
 ## Rotating pages
 
 ```python
@@ -55,7 +65,9 @@ The output can be the input itself: it's replaced only once the new file is
 written. Every function here writes that way: the new file goes beside the
 output (its folder is made if missing) and is moved in place when complete,
 so a failure leaves nothing half-written. A file it replaces keeps its
-permissions; a new one gets the usual ones, as any file you save.
+permissions, Finder tags, other extended attributes and access list; a new
+one gets the usual ones, as any file you save. It is a new file all the
+same: a hard link to the old one keeps the old content.
 
 ## Watermarks
 
@@ -139,10 +151,13 @@ macos.pdf.text("scan-searchable.pdf")   # the scan's text
 
 The pages look the same, and their text can be selected, copied and searched,
 in Preview and Spotlight too. Pages that already have text aren't read again,
-unless `redo=True`. Every page is redrawn into the new PDF: filled form fields,
+unless `redo=True`, which replaces their text (a scanner's poor OCR, say)
+with what Vision reads: those pages become pictures of what they show, so the
+old text isn't there twice, and they may take more room and lose the
+sharpness of their drawing. Every page is redrawn into the new PDF: filled form fields,
 notes and stamps stay as they look but can't be edited any more, and links go.
-`languages` (`["fr-FR", "en-US"]`) helps Vision with
-accents and words. To only read a page, render it and use OCR:
+`languages`, a list (`["fr-FR", "en-US"]`, never a bare string, which raises
+`TypeError`), helps Vision with accents and words. To only read a page, render it and use OCR:
 
 ```python
 macos.vision.text(macos.pdf.render("scan.pdf", page=1, size=2048))
@@ -162,7 +177,9 @@ macos.pdf.merge(["statement.pdf", "cover.pdf"], "all.pdf", password="1234")
 must share it. The files the functions write are never encrypted, whatever they
 did to the PDF (rotating, filling a form, adding bookmarks, redacting...): its
 pages, metadata and bookmarks are copied into a new, unencrypted PDF. Only
-{func}`~macos.pdf.encrypt` writes encrypted PDFs.
+{func}`~macos.pdf.encrypt` writes encrypted PDFs. An encrypted form keeps its
+fields in the new PDF, and they fill in Preview, but, as with
+{func}`~macos.pdf.merge`, Acrobat sees no form there.
 
 To encrypt a PDF, {func}`~macos.pdf.encrypt` saves a copy that asks for a
 password to open, in Preview, Acrobat and browsers alike:
@@ -175,13 +192,16 @@ macos.pdf.encrypt("statement.pdf", "locked.pdf", "1234", owner_password="only-fo
 
 A PDF has two passwords: the one that opens it, and the owner's, meant to
 guard its permissions (printing, copying, editing). By default both are
-`password`; `owner_password` gives the owner's its own.
+`password`; `owner_password` gives the owner's its own. Both take ASCII
+characters only (no accents, other alphabets or emoji): PDFKit encrypts with
+no others, so `"pässwort"` raises `ValueError` before anything is written.
 
 ## Forms
 
 {func}`~macos.pdf.form_fields` lists a PDF form's fields and what's filled
 in, and {func}`~macos.pdf.fill_form` fills them in by name; the fields stay
-editable:
+editable (in Acrobat too, unless the form was encrypted: see
+[Encrypted PDFs](#encrypted-pdfs)):
 
 ```python
 for field in macos.pdf.form_fields("application.pdf"):
@@ -219,7 +239,7 @@ and `gap` the room between them, in points.
 
 Without `near`, `position` is a corner (`"bottom_right"`, `"bottom_left"`,
 `"top_right"`, `"top_left"`, `margin` points from the edges, 36 by default)
-or the `(x, y)` of the image's bottom-left
+or the `(x, y)` (a tuple or a list) of the image's bottom-left
 corner, in points from the page's bottom-left (72 points make an inch,
 2.54 cm). `width` is in points too. A PNG with a transparent background
 looks best; a photo is turned upright, as its EXIF orientation says.
@@ -266,7 +286,12 @@ macos.pdf.set_bookmarks("book.pdf", "book-with-contents.pdf", [
 ])
 ```
 
-An empty list takes the table of contents away.
+An empty list takes the table of contents away. An entry that opens nothing in
+the PDF (a web link, another file, a heading) reads as page 0, and a
+{class}`~macos.pdf.Bookmark` of page 0 is written back as a heading that opens
+nothing, so the table of contents read can be edited and saved again. Its link
+isn't kept. A `(title, 0)` tuple raises `ValueError`, since page numbers start
+at 1.
 
 ## Embedded images
 

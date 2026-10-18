@@ -25,6 +25,17 @@ def test_camera_argument_checks(tmp_path):
         macos.camera.record(tmp_path / "out.mp4", 1)
     with pytest.raises(ValueError, match="positive"):
         macos.camera.record(tmp_path / "out.mov", 0)
+    # NaN passes "<= 0" and inf never ends: either would record for good.
+    for seconds in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="positive"):
+            macos.camera.record(tmp_path / "out.mov", seconds)
+
+
+def test_a_tif_photo_is_a_tiff(tmp_path):
+    from macos import camera
+
+    assert camera._output_path(tmp_path / "scan.tif", ".jpg", camera._PHOTO_FORMATS) == (tmp_path / "scan.tif", False)
+    assert camera._output_path(tmp_path / "scan.TIF", ".jpg", camera._PHOTO_FORMATS)[0].name == "scan.TIF"
 
 
 def test_the_camera_works_only_on_the_main_thread(monkeypatch, tmp_path):
@@ -55,8 +66,9 @@ def test_a_capture_that_timed_out_is_forgotten(monkeypatch):
     monkeypatch.setattr(camera._objc, "new", lambda name: 0xC0FFEE)
     monkeypatch.setattr(camera._objc, "define_class", lambda *args, **kwargs: None)
     delegate = camera._delegate("photo")
-    with pytest.raises(macos.MacOSError, match="didn't finish the photo"):
+    with pytest.raises(TimeoutError, match="didn't finish the photo") as caught:
         camera._wait(delegate, "photo")
+    assert isinstance(caught.value, macos.WaitTimeoutError)
     # Its callback, arriving late, is dropped: the next delegate at the same address doesn't read it.
     camera._store(delegate, {"done": True, "data": b"old photo"})
     camera._movie_started(delegate, 0, 0, 0, 0)
@@ -258,6 +270,11 @@ def test_ctrl_c_then_a_movie_that_wont_close_is_still_a_ctrl_c(capture_stubs, mo
         second = error
     assert isinstance(second, UnfinishedInterrupt)
     monkeypatch.setattr(camera, "_wait", wait)
+
+    # A recording that never starts is a timeout, like the photo that never comes.
+    monkeypatch.setattr(camera._objc, "run_until", lambda done, timeout: False)
+    with pytest.raises(macos.WaitTimeoutError, match="didn't start recording"):
+        camera._record(tmp_path / "clip.mov", 60, None, False)
 
     # Without a Ctrl-C, the same failure is the camera's error, as before.
     waits.clear()

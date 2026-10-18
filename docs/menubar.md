@@ -98,7 +98,13 @@ macos.menubar.run()
 ```
 
 {func}`~macos.menubar.every` returns a {class}`~macos.menubar.Timer`, whose
-`cancel()` stops it. Timers pause while a menu is open. Work that takes long belongs in a thread, so
+`cancel()` stops it. Timers pause while a menu is open, and between runs: a
+later {func}`~macos.menubar.run` goes on with the time that was left when the
+last one returned. If a timer's function raises, the other timers due at the
+same moment are still called when {func}`~macos.menubar.run` is called again.
+Work that takes long belongs in a thread, so
 the menu stays responsive: titles and entries can be changed from any thread,
 and the change shows when {func}`~macos.menubar.run` next turns, within a
-tenth of a second.
+tenth of a second. A text that can't be shown (one with a lone surrogate, as
+`os.fsdecode` makes from a name that isn't UTF-8) raises `UnicodeEncodeError`
+at the call, on whichever thread made it, and the item keeps its old text.

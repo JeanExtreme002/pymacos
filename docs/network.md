@@ -26,18 +26,25 @@ if not macos.network.is_online():
 
 ## Address
 
-{func}`~macos.network.ip` returns the Mac's IPv4 address on the local network,
-and {func}`~macos.network.interface` the interface internet traffic goes
-through (`'en0'` is usually Wi-Fi). Both return `None` when offline.
+{func}`~macos.network.interface` returns the interface internet traffic goes
+through (`'en0'` is usually Wi-Fi), and {func}`~macos.network.ip` the Mac's
+IPv4 address on it: its address on the local network. Both return `None`
+when offline. While a VPN that carries all traffic is connected, that
+interface is the VPN's tunnel, and `ip()` its address (such as
+`'10.8.0.2'`), which other devices on the Wi-Fi can't reach.
 
 To open a local server from your phone, show its address as a QR code and
-point the phone's camera at it:
+point the phone's camera at it. The phone needs the address on the Wi-Fi
+itself, so it's taken from {func}`~macos.network.interfaces`, which a VPN
+doesn't change:
 
 ```python
 from pathlib import Path
 
+# Wi-Fi and Ethernet are the en interfaces; VPN tunnels are utun or ppp.
+lan = next(found.ipv4[0] for found in macos.network.interfaces() if found.name.startswith("en") and found.ipv4)
 code = Path("server.png")
-code.write_bytes(macos.image.qr_code("http://{}:8000".format(macos.network.ip())))
+code.write_bytes(macos.image.qr_code("http://{}:8000".format(lan)))
 macos.open(code)
 ```
 
@@ -70,7 +77,11 @@ metered connection. `sequential=True` measures download and upload one
 after the other, which reads each more exactly (and takes about twice as
 long). It goes through `networkQuality`, which comes with macOS; past
 `timeout` seconds (3 minutes by default) it's stopped and
-{class}`~macos.CommandTimeoutError` raised.
+{class}`~macos.CommandTimeoutError` raised. A test that can't run, offline
+or with Apple's servers out of reach (a firewall, a Wi-Fi login page),
+raises {class}`~macos.MacOSError` with `networkQuality`'s error, such as
+`not connected to the internet (NSURLErrorDomain -1009)`, rather than
+reading as 0 Mbps.
 
 ## Wi-Fi signal
 
@@ -104,7 +115,9 @@ macos.network.proxies()       # Proxies(http=None, https='proxy.example.com:8080
 Thunderbolt, VPN tunnels) with its addresses; an interface is `active` when
 it has an address to talk with. {func}`~macos.network.dns_servers` and
 {func}`~macos.network.proxies` are the ones in use now, whether set in
-System Settings, by the network or by a VPN or a profile.
+System Settings, by the network or by a VPN or a profile. Each proxy is
+`'host:port'`, an IPv6 host in brackets (`'[fd00::1]:3128'`), so it can go
+straight after `http://`.
 
 ## Bandwidth
 
@@ -149,9 +162,11 @@ with their `status`: `'connected'`, `'connecting'`, `'disconnecting'` or
 `id`, and waits until it's connected, up to `timeout` seconds (30 by
 default), raising {class}`~macos.MacOSError` if it fails
 ({class}`~macos.WaitTimeoutError`, a `TimeoutError`, when time runs out); `wait=False`
-returns at once. It uses the password saved with the VPN: one that asks each
+returns once the connect is sent. A VPN still disconnecting is waited out
+first, within `timeout` (even with `wait=False`): macOS ignores a connect sent
+before it's done. It uses the password saved with the VPN: one that asks each
 time may show its prompt. {func}`~macos.network.disconnect_vpn` disconnects it,
-waiting the same way. A `scutil` that doesn't answer within 30 seconds raises
+waiting the same way; one still connecting is stopped at once. A `scutil` that doesn't answer within 30 seconds raises
 {class}`~macos.CommandTimeoutError`.
 
 A script that needs the office network can connect only while it runs:

@@ -58,6 +58,8 @@ fruit = macos.dialog.choose(
 ```
 
 {func}`~macos.dialog.choose` returns the chosen option, or `None` if cancelled.
+Options that aren't strings, such as numbers, are shown and returned as
+`str(option)`, and `default` is matched the same way.
 {func}`~macos.dialog.confirm` and {func}`~macos.dialog.prompt` take a `title`
 too.
 
@@ -80,7 +82,9 @@ cancelled.
 {func}`~macos.dialog.alert`, {func}`~macos.dialog.confirm` and
 {func}`~macos.dialog.prompt` accept a `timeout` in seconds. When it runs out,
 the dialog closes as if the user had cancelled. macOS counts whole seconds, so
-a fraction is rounded up (`timeout=1.5` waits 2 seconds):
+a fraction is rounded up (`timeout=1.5` waits 2 seconds). Leave `timeout` out
+for no limit: an infinite or NaN timeout raises `ValueError`, as does one
+longer than AppleScript's largest integer (2**29 - 1 seconds):
 
 ```python
 if macos.dialog.confirm("Restart now?", timeout=30):   # False after 30 s

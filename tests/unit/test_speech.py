@@ -89,3 +89,96 @@ def test_say_to_a_file(fake_run, tmp_path):
 def test_say_rejects_unknown_audio_formats(fake_run, tmp_path):
     with pytest.raises(ValueError, match="unsupported audio format"):
         macos.say("hi", output=tmp_path / "speech.mp3")
+
+
+def _fake_popen(monkeypatch, fail_write=None):
+    started = []
+
+    class FakeStdin:
+        def __init__(self):
+            self.data, self.closed = b"", False
+
+        def write(self, data):
+            if fail_write is not None:
+                raise fail_write
+            self.data += data
+
+        def close(self):
+            self.closed = True
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            self.args, self.stdin = args, FakeStdin()
+            self.killed = self.waited = False
+            started.append(self)
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self):
+            self.waited = True
+
+    monkeypatch.setattr(macos.speech.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(macos.speech.threading, "Thread", _ImmediateThread)
+    return started
+
+
+def test_say_without_waiting_replaces_unencodable_text(fake_run, monkeypatch):
+    # A file name decoded with surrogateescape: the blocking path speaks it
+    # with errors replaced, and so must this one.
+    started = _fake_popen(monkeypatch)
+
+    macos.say("caf\udce9", wait=False)
+
+    assert started[0].stdin.data == b"caf?" and started[0].stdin.closed
+
+
+def test_say_without_waiting_kills_say_when_interrupted(fake_run, monkeypatch):
+    started = _fake_popen(monkeypatch, fail_write=KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        macos.say("hi", wait=False)
+
+    process = started[0]
+    assert process.stdin.closed and process.killed and process.waited
+
+
+@pytest.mark.parametrize("wait", [True, False])
+@pytest.mark.parametrize("text", [None, b"hi", 5])
+def test_say_rejects_text_that_is_not_a_str(fake_run, monkeypatch, text, wait):
+    # With None, say would otherwise read the caller's own stdin.
+    started = _fake_popen(monkeypatch)
+
+    with pytest.raises(TypeError, match="text must be a str"):
+        macos.say(text, wait=wait)
+
+    assert not fake_run.calls and not started
+
+
+@pytest.mark.parametrize("output", [None, "speech.aiff"])
+def test_say_rejects_the_voice_listing_sentinel(fake_run, monkeypatch, tmp_path, output):
+    # "say -v ?" lists the voices and exits 0, speaking or saving nothing.
+    started = _fake_popen(monkeypatch)
+
+    with pytest.raises(ValueError, match="voices"):
+        macos.say("hi", voice="?", output=output and tmp_path / output)
+    with pytest.raises(ValueError, match="voices"):
+        macos.say("hi", voice="?", wait=False)
+
+    assert not fake_run.calls and not started
+
+
+@pytest.mark.parametrize(
+    "rate, error", [(True, TypeError), ("180", TypeError), (0, ValueError), (-5, ValueError), (float("nan"), ValueError)]
+)
+def test_say_rejects_rates_say_would_ignore(fake_run, rate, error):
+    with pytest.raises(error, match="rate must be"):
+        macos.say("hi", rate=rate)
+
+    assert not fake_run.calls
+
+
+def test_say_accepts_a_fractional_rate(fake_run):
+    macos.say("hi", rate=180.5)
+
+    assert fake_run.args == ["say", "-r", "180.5", "-f", "-"]

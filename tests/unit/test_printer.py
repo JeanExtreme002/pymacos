@@ -26,10 +26,11 @@ class FakeCups:
         if not self.printers:
             return 0
         array = (printer._Dest * len(self.printers))()
-        for index, (name, options, is_default) in enumerate(self.printers):
+        for index, (name, options, is_default, *instance) in enumerate(self.printers):
             pairs = (printer._Option * len(options))(*[printer._Option(k.encode(), v.encode()) for k, v in options.items()])
             self._keep.append(pairs)
-            array[index] = printer._Dest(name.encode(), None, int(is_default), len(options), pairs)
+            saved = instance[0].encode() if instance else None
+            array[index] = printer._Dest(name.encode(), saved, int(is_default), len(options), pairs)
         self._keep.append(array)
         pointer._obj.contents = array[0]
         return len(self.printers)
@@ -168,3 +169,36 @@ def test_printers_named_by_queue_first_and_ambiguous_descriptions_refused(cups, 
     cups.printers = cups.printers[:2]
     with pytest.raises(ValueError, match="several printers are named 'Office': use one of their queue names, Office_1, Office_2"):
         printer.print_file(report, "Office")
+
+
+@pytest.mark.parametrize("instance_first", [False, True])
+def test_default_when_it_is_an_instance(cups, tmp_path, instance_first):
+    # `lpoptions -d Home/duplex`: CUPS flags the instance, not the printer.
+    base = ("Home", {"printer-info": "Home Inkjet"}, False)
+    instance = ("Home", {"printer-info": "Home Inkjet"}, True, "duplex")
+    cups.printers = [("Office_LaserJet", {}, False)] + ([instance, base] if instance_first else [base, instance])
+    assert [(p.name, p.is_default) for p in printer.printers()] == [("Home", True), ("Office_LaserJet", False)]
+    assert printer.default().name == "Home"
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    printer.print_file(report)
+    assert cups.printed[-1][0] == "Home"
+
+
+@pytest.mark.parametrize("copies", [True, 2.5, 2.0, "2"])
+def test_print_file_refuses_copies_that_are_not_whole_numbers(cups, tmp_path, copies):
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    with pytest.raises(TypeError, match="copies must be a whole number"):
+        printer.print_file(report, copies=copies)
+    assert cups.printed == []
+
+
+@pytest.mark.parametrize("job", [0, -1, -5])
+def test_cancel_refuses_ids_cups_reads_as_several_jobs(cups, job):
+    # 0 is the job printing now and -1 every job on the printer, in <cups/cups.h>.
+    with pytest.raises(ValueError, match="a print job id is 1 or more"):
+        printer.cancel(job, "Home")
+    with pytest.raises(TypeError):
+        printer.cancel(True)
+    assert cups.canceled == []

@@ -1,5 +1,7 @@
 """Unit tests for :mod:`macos.vision`. They run on any platform."""
 
+import os
+
 import pytest
 
 import macos
@@ -110,3 +112,127 @@ def test_scan_document_says_it_needs_macos_12_where_vision_cant(monkeypatch):
     monkeypatch.setattr(_objc, "cls", cls)
     with pytest.raises(macos.NotSupportedError, match=r"scan_document\(\) needs macOS 12 or later"):
         macos.vision.scan_document(b"\x89PNG\r\n\x1a\n")
+
+
+def _recording_send(monkeypatch, responds=True):
+    """Fake ``_objc.send`` for :func:`macos.vision._request`: records each selector and the value sent with it."""
+    from macos import vision
+
+    sent = []
+
+    def send(receiver, selector, *args, **kwargs):
+        sent.append((selector, args))
+        return responds if selector == "respondsToSelector:" else "request"
+
+    monkeypatch.setattr(vision._objc, "send", send)
+    monkeypatch.setattr(vision._objc, "cls", lambda name: name)
+    monkeypatch.setattr(vision._objc, "sel", lambda name: name)
+    monkeypatch.setattr(vision._objc, "nsstring", lambda value: value)
+    monkeypatch.setattr(vision._objc, "nsarray_of", lambda values: values)
+    return sent
+
+
+def test_text_recognition_detects_the_language_unless_told(monkeypatch):
+    from macos import vision
+
+    sent = _recording_send(monkeypatch)
+    vision._request(None, False)
+    assert ("setAutomaticallyDetectsLanguage:", (True,)) in sent  # off by default: CJK would read as English
+
+    sent = _recording_send(monkeypatch)
+    vision._request(["zh-Hans"], False)
+    assert ("setRecognitionLanguages:", (["zh-Hans"],)) in sent
+    assert "setAutomaticallyDetectsLanguage:" not in [selector for selector, _ in sent]  # the caller's list holds
+
+    sent = _recording_send(monkeypatch, responds=False)  # macOS 12: no such property
+    vision._request(None, False)
+    assert "setAutomaticallyDetectsLanguage:" not in [selector for selector, _ in sent]
+
+
+def test_languages_as_a_string_is_refused(monkeypatch):
+    from macos import vision
+
+    sent = _recording_send(monkeypatch)
+    with pytest.raises(TypeError, match=r"\['zh-Hans'\]"):
+        vision._request("zh-Hans", False)  # not seven one-letter codes Vision would ignore
+    monkeypatch.setattr(vision, "_load", lambda: None)
+    with pytest.raises(TypeError):
+        macos.vision.text(b"image", languages="en-US")
+    assert sent == []
+
+
+def test_image_distance_releases_the_first_print_when_the_second_fails(monkeypatch):
+    from macos import vision
+
+    released = []
+
+    def feature_print(image):
+        if image == "missing.png":
+            raise FileNotFoundError(image)
+        return "print of " + image
+
+    monkeypatch.setattr(vision, "_load", lambda: None)
+    monkeypatch.setattr(vision, "_feature_print", feature_print)
+    monkeypatch.setattr(vision, "_distance", lambda first, second: 0.5)
+    monkeypatch.setattr(vision._objc, "send", lambda receiver, selector, **kwargs: released.append(receiver))
+
+    with pytest.raises(FileNotFoundError):
+        vision.image_distance("photo.jpg", "missing.png")
+    assert released == ["print of photo.jpg"]
+
+    released.clear()
+    with pytest.raises(FileNotFoundError):
+        vision.image_distance("missing.png", "photo.jpg")
+    assert released == []  # nothing was made
+
+    released.clear()
+    assert vision.image_distance("photo.jpg", "copy.jpg") == 0.5
+    assert sorted(released) == ["print of copy.jpg", "print of photo.jpg"]
+
+
+def test_an_input_that_isnt_an_image_raises_value_error(monkeypatch, tmp_path):
+    import ctypes
+
+    from macos import vision
+
+    def failure(domain, code, message="CRImage Reader Detector was given zero-dimensioned image (0 x 0)"):
+        answers = {"domain": domain, "code": code, "localizedDescription": message}
+        monkeypatch.setattr(vision._objc, "send", lambda receiver, selector, **kwargs: answers[selector])
+        monkeypatch.setattr(vision._objc, "pystring", lambda value: value)
+        return ctypes.c_void_p(1)
+
+    def ciimage(image):
+        # Stands for _objc.ciimage: only b"png" and the folder's own files decode.
+        if image == b"png":
+            return 1
+        path = str(image)
+        if os.path.isdir(path):
+            raise IsADirectoryError(path)
+        label = "the image" if isinstance(image, bytes) else path
+        raise ValueError("{} is not an image macOS can read".format(label))
+
+    monkeypatch.setattr(vision._objc, "ciimage", ciimage)
+
+    # What Vision answers for empty bytes, a text file or a folder: the same errors as scan_document's.
+    error = failure("com.apple.Vision", 13)
+    with pytest.raises(ValueError, match="the image is not an image macOS can read"):
+        raise vision._read_error(b"", error)
+    text = tmp_path / "notes.txt"
+    text.write_text("hello")
+    with pytest.raises(ValueError, match="notes.txt is not an image macOS can read"):
+        raise vision._read_error(str(text), error)
+    with pytest.raises(IsADirectoryError):
+        raise vision._read_error(tmp_path, error)
+
+    # Vision gives the same code to a real image too small to analyze: that one keeps Vision's message.
+    small = "The image is too small in at least one dimension 600 x 2 (each dimension has to be more than 2 pixels)"
+    error = failure("com.apple.Vision", 13, small)
+    with pytest.raises(macos.MacOSError, match="the image could not be read: The image is too small"):
+        raise vision._read_error(b"png", error)
+
+    # Any other failure is Vision's own: still MacOSError, with its message.
+    error = failure("com.apple.Vision", 9, "internal error")
+    with pytest.raises(macos.MacOSError, match="the image could not be read: internal error"):
+        raise vision._read_error(b"image", error)
+    with pytest.raises(macos.MacOSError, match="the image could not be read"):
+        raise vision._read_error(b"image", ctypes.c_void_p())

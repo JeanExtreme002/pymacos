@@ -10,8 +10,9 @@ import macos
 for window in macos.windows.list("Safari"):
     print(window.title, window.frame)   # GitHub (0, 25, 1440, 875)
 
-window = macos.windows.focused()       # the window in front
-window.set_frame(0, 25, 1280, 800)
+window = macos.windows.focused()       # the window in front, or None
+if window is not None:
+    window.set_frame(0, 25, 1280, 800)
 ```
 
 It needs the [Accessibility permission](permissions.md#accessibility), the same
@@ -21,8 +22,10 @@ one {mod}`macos.keyboard` and {mod}`macos.mouse` need.
 
 {func}`~macos.windows.list` returns the windows of every app, or of one app
 given by name or as an {class}`~macos.apps.App`, menu bar apps and minimized
-windows included. `title` keeps the windows whose title contains it, ignoring
-case:
+windows included. A name covers every running app that goes by it (several
+copies of one app, or several Python processes); an `App` only that one.
+`title` keeps the windows whose title contains it, ignoring case, and leaves
+out a window that closes while it's read:
 
 ```python
 macos.windows.list()                              # every app's windows
@@ -60,7 +63,8 @@ window.center()
 ```
 
 Apps may refuse a size below their minimum and keep the closest one they
-accept. {attr}`~macos.windows.Window.title`,
+accept. Sizes must be positive, and sizes and positions finite (not `nan` or
+`inf`), or they raise `ValueError` before the window changes. {attr}`~macos.windows.Window.title`,
 {attr}`~macos.windows.Window.frame` and the other attributes are read fresh
 each time, so they follow the user moving the window.
 
@@ -70,7 +74,7 @@ each time, so they follow the user moving the window.
 display, like Rectangle, leaving out the menu bar and the Dock:
 
 ```python
-window = macos.windows.focused()
+window = macos.windows.list("Safari")[0]
 window.snap("left")               # the left half
 window.snap("top_right")          # a quarter
 window.snap("right_third")
@@ -85,8 +89,13 @@ the window goes to another display. Combined with [Hotkeys](hotkeys.md), it
 makes a window manager in a few lines:
 
 ```python
+def snap(layout):
+    window = macos.windows.focused()
+    if window is not None:   # the app in front may have no window
+        window.snap(layout)
+
 for keys, layout in {"ctrl+option+left": "left", "ctrl+option+right": "right"}.items():
-    macos.hotkeys.register(keys, lambda layout=layout: macos.windows.focused().snap(layout))
+    macos.hotkeys.register(keys, lambda layout=layout: snap(layout))
 
 macos.hotkeys.run()
 ```
@@ -109,7 +118,9 @@ as it can be (two windows side by side, four in a 2×2 grid), and the last
 row's windows widen to fill it. Tiling keeps the order the windows are in,
 top to bottom then left to right, so tiling again changes nothing. A `gap`
 too large to leave room for the windows raises `ValueError` before any window
-moves.
+moves. A window that closes while they're arranged, or whose app stops
+answering, is left out and the others still go in place: `tile_all` returns
+the windows it moved.
 
 {func}`~macos.windows.tile` does the same with the windows you pick:
 
@@ -138,7 +149,8 @@ window.set_fullscreen(False)
 ```
 
 macOS animates it into a Space of its own; {meth}`~macos.windows.Window.set_fullscreen`
-returns once that's done, after a second or two.
+returns once that's done, after a second or two, and at once for a window
+already in that state.
 Windows whose app doesn't allow full screen raise {class}`~macos.MacOSError`,
 and a change that doesn't happen within a few seconds
 {class}`~macos.WaitTimeoutError` (a `MacOSError` too).
@@ -159,7 +171,7 @@ It needs the [Screen Recording permission](permissions.md#screen-recording).
 
 {func}`~macos.windows.wait_for` waits until a window shows up, after an action
 that opens one, and returns `None` if `timeout` seconds (10 by default) pass
-first:
+first; `timeout=None` waits until one shows up:
 
 ```python
 macos.keyboard.press("cmd+s")

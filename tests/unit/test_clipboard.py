@@ -193,3 +193,226 @@ def test_clipboard_watch_warns_until_told_about_concealed_copies(monkeypatch):
     monkeypatch.setattr(macos.clipboard, "change_count", lambda: 1)
     with pytest.warns(DeprecationWarning, match="include_sensitive"):
         assert list(macos.clipboard.watch(timeout=0.001, interval=0.001)) == []
+
+
+@pytest.mark.parametrize("text", [None, 123, b"bytes", "\ud800"])
+@pytest.mark.parametrize("sensitive", [False, True])
+def test_copy_refuses_bad_text_before_clearing_the_clipboard(pasteboard, monkeypatch, text, sensitive):
+    from macos import _objc
+
+    # The real nsstring encodes as UTF-8: a lone surrogate fails there.
+    monkeypatch.setattr(_objc, "nsstring", lambda value: value.encode("utf-8").decode("utf-8"))
+    macos.clipboard.copy("before")
+
+    with pytest.raises((TypeError, UnicodeEncodeError)):
+        macos.clipboard.copy(text, sensitive=sensitive)
+    assert pasteboard == [("public.utf8-plain-text", "before")]  # what it held, and no stray markers
+
+
+def test_copy_sensitive_leaves_no_markers_when_the_text_is_refused(pasteboard, monkeypatch):
+    from macos import _objc
+
+    send = _objc.send
+
+    def refuse_text(receiver, selector, *args, **kwargs):
+        if selector == "setString:forType:":
+            return False
+        return send(receiver, selector, *args, **kwargs)
+
+    monkeypatch.setattr(_objc, "send", refuse_text)
+    with pytest.raises(macos.MacOSError, match="refused the text"):
+        macos.clipboard.copy("s3cret", sensitive=True)
+    assert pasteboard == []  # not the markers alone, which watchers would take for a copy
+
+
+@pytest.mark.parametrize("paths", ["/etc/hosts", b"/etc/hosts", __import__("pathlib").Path("/etc/hosts")])
+def test_copy_files_refuses_a_single_path(monkeypatch, paths):
+    from macos import clipboard
+
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: pytest.fail("the clipboard was touched"))
+    with pytest.raises(TypeError, match=r"use \["):
+        clipboard.copy_files(paths)
+
+
+def test_copy_files_refuses_an_empty_path(monkeypatch):
+    from macos import clipboard
+
+    # Path("") is the current folder: it must not be copied in its place.
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: pytest.fail("the clipboard was touched"))
+    with pytest.raises(FileNotFoundError):
+        clipboard.copy_files([""])
+
+
+def test_copy_files_reports_a_missing_file(monkeypatch, tmp_path):
+    from macos import clipboard
+
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: pytest.fail("the clipboard was touched"))
+    with pytest.raises(FileNotFoundError, match="nothing.txt"):
+        clipboard.copy_files([tmp_path / "nothing.txt"])
+    with pytest.raises(FileNotFoundError):  # a "folder" that is a file
+        clipboard.copy_files([__file__ + "/inside"])
+
+
+def test_copy_files_reports_a_permission_problem_as_one(monkeypatch, tmp_path):
+    from macos import clipboard
+
+    def denied(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(clipboard.os, "lstat", denied)
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: pytest.fail("the clipboard was touched"))
+    with pytest.raises(PermissionError):
+        clipboard.copy_files([tmp_path / "locked.txt"])
+
+
+def test_copy_files_takes_a_generator_and_a_broken_link(monkeypatch, tmp_path):
+    from macos import clipboard
+
+    link = tmp_path / "broken"
+    link.symlink_to(tmp_path / "gone")
+    written = []
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: 1)
+    monkeypatch.setattr(clipboard._objc, "autorelease_pool", __import__("contextlib").nullcontext)
+    monkeypatch.setattr(clipboard._objc, "file_url", lambda path: path)
+    monkeypatch.setattr(clipboard._objc, "nsarray_of", lambda items: list(items))
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "writeObjects:":
+            written.extend(args[0])
+        return True
+
+    monkeypatch.setattr(clipboard._objc, "send", send)
+    clipboard.copy_files(path for path in [link, __file__])
+    assert written == [link, __import__("pathlib").Path(__file__).absolute()]
+
+
+class _Clock:
+    """A fake time.monotonic and time.sleep: time only passes when slept, or when the test says so."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_watch_stops_at_the_timeout_while_copies_keep_coming(monkeypatch):
+    clipboard = macos.clipboard
+    clock = _Clock()
+    copies = {"count": 1}
+
+    def change_count():
+        return copies["count"]
+
+    monkeypatch.setattr(clipboard.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(clipboard.time, "sleep", clock.sleep)
+    monkeypatch.setattr(clipboard, "change_count", change_count)
+    monkeypatch.setattr(clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(clipboard, "paste", lambda: "copy {}".format(copies["count"]))
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        copies["count"] += 1  # the first copy lands while it waits
+
+    monkeypatch.setattr(clipboard.time, "sleep", sleep)
+    yielded = []
+    for text in clipboard.watch(timeout=2, interval=0.1, include_sensitive=True):
+        yielded.append(text)
+        assert len(yielded) < 100, "watch() ignored its timeout"
+        clock.now += 0.5  # a slow loop body, while another copy lands
+        copies["count"] += 1
+    assert 2 <= clock.now <= 2.5 and len(yielded) == 4
+
+
+def test_wait_for_change_stops_at_the_timeout_while_concealed_copies_keep_coming(monkeypatch):
+    clipboard = macos.clipboard
+    clock = _Clock()
+    copies = {"count": 1}
+
+    def change_count():
+        copies["count"] += 1  # a new concealed copy at every look
+        clock.now += 0.1
+        return copies["count"]
+
+    monkeypatch.setattr(clipboard.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(clipboard.time, "sleep", clock.sleep)
+    monkeypatch.setattr(clipboard, "change_count", change_count)
+    monkeypatch.setattr(clipboard, "_is_empty", lambda: False)
+    monkeypatch.setattr(clipboard, "_is_sensitive", lambda: True)
+    monkeypatch.setattr(clipboard, "paste", lambda: "s3cret")
+
+    with pytest.raises(macos.WaitTimeoutError):
+        clipboard.wait_for_change(timeout=2, interval=0.1, include_sensitive=False)
+    assert clock.now < 3
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"interval": float("nan")},
+        {"interval": float("inf")},  # no deadline: time.sleep would overflow
+        {"interval": 0},
+        {"timeout": float("nan")},
+    ],
+)
+def test_wait_for_change_and_watch_refuse_values_that_would_hang(monkeypatch, kwargs):
+    clipboard = macos.clipboard
+    monkeypatch.setattr(clipboard, "change_count", lambda: pytest.fail("the clipboard was read"))
+
+    with pytest.raises(ValueError):
+        clipboard.wait_for_change(**kwargs)
+    with pytest.raises(ValueError):
+        clipboard.watch(include_sensitive=True, **kwargs)  # at the call, not at the first next()
+
+
+def test_wait_for_change_still_takes_an_infinite_interval_with_a_timeout(monkeypatch):
+    monkeypatch.setattr(macos.clipboard, "change_count", lambda: 1)
+    with pytest.raises(macos.WaitTimeoutError):
+        macos.clipboard.wait_for_change(timeout=0.01, interval=float("inf"))
+
+
+@pytest.fixture
+def images(monkeypatch):
+    """A fake pasteboard holding ``images["public.png"]`` / ``images["public.tiff"]`` bytes (``None``: not there)."""
+    from contextlib import nullcontext
+
+    from macos import _objc, clipboard
+
+    held = {"public.png": None, "public.tiff": None, "rep": None}
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "dataForType:":
+            data = held[args[0]]
+            return None if data is None else ("NSData", data)  # an object, even for no bytes
+        if selector == "imageRepWithData:":
+            return held["rep"]
+        return None
+
+    monkeypatch.setattr(clipboard, "_pasteboard", lambda: "pasteboard")
+    monkeypatch.setattr(_objc, "send", send)
+    monkeypatch.setattr(_objc, "autorelease_pool", nullcontext)
+    monkeypatch.setattr(_objc, "nsstring", lambda text: text)
+    monkeypatch.setattr(_objc, "cls", lambda name: name)
+    monkeypatch.setattr(_objc, "pybytes", lambda data: data[1] if data else None)
+    return held
+
+
+def test_paste_image_returns_none_only_without_an_image(images):
+    assert macos.clipboard.paste_image() is None
+    images["public.png"] = b"\x89PNG"
+    assert macos.clipboard.paste_image() == b"\x89PNG"
+
+
+def test_paste_image_refuses_an_empty_png(images):
+    images["public.png"] = b""  # an entry, with no bytes
+    with pytest.raises(macos.MacOSError):
+        macos.clipboard.paste_image()
+
+
+def test_paste_image_refuses_tiff_macos_cant_decode(images):
+    images["public.tiff"] = b"garbage"  # imageRepWithData: gives nil
+    with pytest.raises(macos.MacOSError):
+        macos.clipboard.paste_image()

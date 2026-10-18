@@ -216,3 +216,94 @@ def test_spotlight_keeps_a_path_that_is_not_utf8(monkeypatch):
 
     records = io.BytesIO(b"/a/caf\xe9.txt\0")
     assert list(macos.spotlight._records(records)) == ["/a/caf\udce9.txt"]  # opens the same file
+
+
+def test_spotlight_rejects_a_limit_that_isnt_an_int_before_mdfind_starts(mdfind, monkeypatch):
+    fake = mdfind(["/a", "/b", "/c"])
+
+    class Integer:  # an integer of numpy's, say
+        def __index__(self):
+            return 2
+
+    assert macos.spotlight.search("x", limit=Integer()) == [Path("/a"), Path("/b")]
+
+    def no_mdfind(args, **kwargs):
+        raise AssertionError("mdfind started")
+
+    monkeypatch.setattr(macos.spotlight.subprocess, "Popen", no_mdfind)
+    for odd in (2.5, 2.0, True, "2"):
+        with pytest.raises(TypeError, match="limit must be an int"):
+            macos.spotlight.search("x", limit=odd)
+    assert fake.killed
+
+
+def test_spotlight_timeout_that_isnt_a_number_of_seconds(mdfind, monkeypatch):
+    def no_mdfind(args, **kwargs):
+        raise AssertionError("mdfind started")
+
+    monkeypatch.setattr(macos.spotlight.subprocess, "Popen", no_mdfind)
+    for odd in (float("nan"), float("-inf"), -1, True):
+        with pytest.raises(ValueError, match="timeout must be positive"):
+            macos.spotlight.search("x", timeout=odd)
+
+
+def test_spotlight_timeout_past_what_a_timer_takes_waits(mdfind, monkeypatch):
+    import threading
+
+    def no_timer(*args, **kwargs):
+        raise AssertionError("a timer started")  # it would die of an OverflowError in its thread
+
+    monkeypatch.setattr(macos.spotlight.threading, "Timer", no_timer)
+    for long in (float("inf"), threading.TIMEOUT_MAX * 2):
+        mdfind(["/a"])
+        assert macos.spotlight.search("x", timeout=long) == [Path("/a")]
+
+
+def test_spotlight_metadata_of_what_isnt_there(monkeypatch, tmp_path):
+    def no_mdls(args, **kwargs):
+        raise AssertionError("mdls ran")
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    monkeypatch.setattr(_system.subprocess, "run", no_mdls)
+    with pytest.raises(FileNotFoundError):
+        macos.spotlight.metadata("")  # not the current folder's
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "missing")
+    with pytest.raises(FileNotFoundError, match="link"):
+        macos.spotlight.metadata(link)
+    with pytest.raises(FileNotFoundError):
+        macos.spotlight.metadata(Path(__file__) / "inside")
+
+
+def test_spotlight_metadata_in_a_folder_you_cant_open(monkeypatch, tmp_path):
+    import errno
+
+    def denied(path, *args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    monkeypatch.setattr(macos.spotlight.os, "stat", denied)
+    with pytest.raises(PermissionError) as info:
+        macos.spotlight.metadata(tmp_path / "f.txt")
+    assert not isinstance(info.value, FileNotFoundError)
+
+
+def test_spotlight_metadata_mdls_cant_read_names_the_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    target = tmp_path / "TCC.db"
+    target.touch()
+
+    def protected(args, **kwargs):  # its "could not find" goes to stdout, which a failure drops
+        return subprocess.CompletedProcess(args, 1, b"could not find", b"")
+
+    monkeypatch.setattr(_system.subprocess, "run", protected)
+    with pytest.raises(macos.CommandError, match="couldn't read the metadata of .*TCC.db") as info:
+        macos.spotlight.metadata(target)
+    assert info.value.returncode == 1
+
+    def failed(args, **kwargs):
+        return subprocess.CompletedProcess(args, 2, b"", b"boom")
+
+    monkeypatch.setattr(_system.subprocess, "run", failed)
+    with pytest.raises(macos.CommandError, match="boom"):
+        macos.spotlight.metadata(target)

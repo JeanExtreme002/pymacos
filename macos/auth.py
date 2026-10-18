@@ -16,6 +16,7 @@ sensitive action, not encryption: a Keychain item isn't locked behind it.
 import ctypes
 import functools
 import inspect
+import math
 import threading
 from functools import lru_cache
 from typing import Any, Callable, List, NamedTuple, Optional, TypeVar
@@ -138,7 +139,14 @@ def _answered() -> bool:
         return bool(_answers)
 
 
-def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0) -> bool:
+def _check_reason(reason: str) -> None:
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a str, not {}".format(type(reason).__name__))
+    if not reason.strip():
+        raise ValueError("reason must not be empty: macOS shows it in the prompt")
+
+
+def confirm(reason: str, *, only_touch_id: bool = False, timeout: Optional[float] = 120.0) -> bool:
     """
     Show macOS's prompt to confirm it's the Mac's owner, and return whether they did.
 
@@ -146,8 +154,9 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     The user can place their finger on Touch ID, or type their login password
     (or approve on their Apple Watch); ``only_touch_id=True`` accepts only the
     fingerprint. Cancelling, failing, or ``timeout`` seconds without an answer
-    return ``False``, as does macOS taking the prompt away (another app came
-    to the front, the Mac slept). Raises :class:`~macos.errors.NotSupportedError` when
+    (``None`` waits for one however long it takes) return ``False``, as does
+    macOS taking the prompt away (another app came to the front, the Mac
+    slept). Raises :class:`~macos.errors.NotSupportedError` when
     ``only_touch_id=True`` and Touch ID isn't available, and when macOS can't
     ask at all: no password set, biometry locked out, or no user session to
     show the prompt in (over SSH, in a service), so a "no" always means the
@@ -158,8 +167,9 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
     bar item or a hotkey's callback, which run during that wait) raises
     :class:`~macos.errors.MacOSError` instead of waiting forever.
     """
-    if not reason.strip():
-        raise ValueError("reason must not be empty: macOS shows it in the prompt")
+    _check_reason(reason)
+    if timeout is not None and (math.isnan(timeout) or timeout <= 0):  # before the prompt shows, not after
+        raise ValueError("timeout must be positive, or None, not {}".format(timeout))
     framework("LocalAuthentication")  # before the reply block: NotSupportedError outside macOS
     if only_touch_id and not is_available(only_touch_id=True):
         raise NotSupportedError("Touch ID isn't set up on this Mac (or is locked after failed tries)")
@@ -187,7 +197,7 @@ def confirm(reason: str, *, only_touch_id: bool = False, timeout: float = 120.0)
                         argtypes=(_objc.NSInteger, _objc.id, ctypes.c_void_p),
                         restype=None,
                     )
-                if not _objc.run_until(_answered, timeout):
+                if not _objc.run_until(_answered, math.inf if timeout is None else timeout):
                     _objc.send(context, "invalidate", restype=None)  # takes the prompt away
                     # Its reply still comes, once: wait for it here, or retire the
                     # block, so that reply can't answer the next prompt.
@@ -235,21 +245,43 @@ def required(reason: str, *, only_touch_id: bool = False) -> Callable[[_Function
     When the user doesn't confirm, the call raises
     :class:`~macos.errors.PermissionDeniedError` and the function doesn't run.
 
+    An ``async def`` function stays one: the prompt shows when the call is
+    awaited, not when the coroutine is made, and blocks the event loop until
+    it's answered, as any blocking call does. An async generator function
+    raises :class:`TypeError`: it can't be guarded before it runs.
+
     It's a check that the user is present, within this process; not a
     security boundary against code running in it, which can always call
     the original function some other way. The wrapper keeps the function's
     name and docstring but not ``__wrapped__``, so at least
     :func:`inspect.unwrap` doesn't skip the prompt by accident.
     """
-    if not reason.strip():
-        raise ValueError("reason must not be empty: macOS shows it in the prompt")
+    _check_reason(reason)
+
+    def check() -> None:
+        if not confirm(reason, only_touch_id=only_touch_id):
+            raise PermissionDeniedError("{} wasn't confirmed".format(reason))
 
     def decorate(function: _Function) -> _Function:
-        @functools.wraps(function)
-        def guarded(*args: Any, **kwargs: Any) -> Any:
-            if not confirm(reason, only_touch_id=only_touch_id):
-                raise PermissionDeniedError("{} wasn't confirmed".format(reason))
-            return function(*args, **kwargs)
+        if inspect.isasyncgenfunction(function):
+            # A plain or async def wrapper would either ask when the generator
+            # is made, or not be one (asend(), athrow() lost): refuse it.
+            raise TypeError("required() can't guard an async generator function: guard the code that iterates it")
+        guarded: Callable[..., Any]
+        if inspect.iscoroutinefunction(function):
+            # An async wrapper, so callers that check iscoroutinefunction()
+            # (web frameworks, schedulers) await it, and the prompt waits for that.
+            @functools.wraps(function)
+            async def guarded(*args: Any, **kwargs: Any) -> Any:
+                check()
+                return await function(*args, **kwargs)
+
+        else:
+
+            @functools.wraps(function)
+            def guarded(*args: Any, **kwargs: Any) -> Any:
+                check()
+                return function(*args, **kwargs)
 
         # functools.wraps sets __wrapped__, which inspect.unwrap() and
         # signature() follow straight to the unguarded function. The signature

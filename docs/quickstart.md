@@ -36,8 +36,10 @@ macos.keyboard.press("cmd+s")
 macos.mouse.click(300, 400)
 macos.mouse.click_text("Submit")                     # wherever it shows on the screen
 
-macos.windows.focused().set_frame(0, 25, 1280, 800)
-macos.windows.focused().snap("left")                 # the left half, like Rectangle
+window = macos.windows.focused()                     # None when the app in front has no window
+if window is not None:
+    window.set_frame(0, 25, 1280, 800)
+    window.snap("left")                              # the left half, like Rectangle
 
 macos.shortcuts.run("Translate", input="Hola")       # 'Hello'
 macos.music.now_playing()                            # Track(title='Imagine', artist='John Lennon', ...)

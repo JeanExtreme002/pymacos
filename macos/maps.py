@@ -15,6 +15,7 @@ requests an app makes in a short time: space out large batches.
 """
 
 import ctypes
+import math
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
@@ -65,6 +66,14 @@ class Place:
 _lock = threading.Lock()
 _CANCELED = 10  # kCLErrorGeocodeCanceled: only a request that was canceled answers so
 _DRAIN = 5.0  # seconds to wait for a canceled request's answer, to discard it
+# Requests given up on (timed out, or interrupted) whose one answer hasn't come yet. The block is
+# shared, so their answers can't be told apart from a new request's: the next answers are theirs.
+_abandoned = [0]
+
+
+def _check_point(latitude: float, longitude: float) -> None:
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("latitude must be from -90 to 90 and longitude from -180 to 180, not {}, {}".format(latitude, longitude))
 
 
 def _text(placemark: int, key: str) -> Optional[str]:
@@ -109,6 +118,9 @@ def _handler() -> int:
     """The completion block, ``void (^)(NSArray<CLPlacemark *> *, NSError *)``, made once: blocks live for good."""
 
     def done(placemarks: Optional[int], error: Optional[int]) -> None:
+        if _abandoned[0]:
+            _abandoned[0] -= 1  # a request given up on: canceled or not, nobody waits for it
+            return
         try:
             failure = None
             if error:
@@ -136,16 +148,26 @@ def _ask(selector: str, argument: int, timeout: float) -> List[Place]:
     # as camera and the other main-thread APIs check: not Python's idea of it, which can differ.
     _files.require_main_thread("Geocoding")
     with _lock:
+        if _abandoned[0]:
+            # An interrupted request's answer, still to come: let it land before this request is sent.
+            # macOS answers a canceled request at once; one that never answers is given up on.
+            _objc.run_until(lambda: not _abandoned[0], _DRAIN)
+            _abandoned[0] = 0
         del _answers[:]
         geocoder = _objc.send(_objc.send(_objc.cls("CLGeocoder"), "alloc"), "init")
         try:
             _objc.send(geocoder, selector, argument, _handler(), argtypes=(_objc.id, ctypes.c_void_p), restype=None)
-            if not _objc.run_until(lambda: bool(_answers), timeout):
-                # A request answers once, even canceled: wait for that answer here, so it can't
-                # pass for the next request's. A "canceled" one is dropped by _answer anyway.
-                _objc.send(geocoder, "cancelGeocode", restype=None)
-                _objc.run_until(lambda: bool(_answers), _DRAIN)
-                del _answers[:]
+            try:
+                answered = _objc.run_until(lambda: bool(_answers), timeout)
+            except BaseException:  # Ctrl-C while waiting: the answer must not pass for the next request's
+                if not _answers:
+                    _abandon(geocoder)
+                raise
+            if not answered:
+                # A request answers once, even canceled: wait for that answer here (it comes at once),
+                # so it can't pass for the next request's.
+                _abandon(geocoder)
+                _objc.run_until(lambda: not _abandoned[0], _DRAIN)
                 raise WaitTimeoutError("Apple's geocoding service didn't answer within {} seconds".format(timeout))
         finally:
             _objc.send(geocoder, "release", restype=None)
@@ -154,6 +176,18 @@ def _ask(selector: str, argument: int, timeout: float) -> List[Place]:
         raise answer
     found, failure = answer
     return _result(found, failure)
+
+
+def _abandon(geocoder: int) -> None:
+    """Cancel ``geocoder``'s request, whose answer, when it comes, is then dropped."""
+    _abandoned[0] += 1
+    _objc.send(geocoder, "cancelGeocode", restype=None)
+
+
+def _check_timeout(timeout: float) -> None:
+    # NaN passes "<= 0", and would make the wait endless.
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a positive number of seconds, not {}".format(timeout))
 
 
 def _result(found: List[Place], failure: Optional[Tuple[int, str]]) -> List[Place]:
@@ -179,10 +213,11 @@ def geocode(address: str, *, timeout: float = 15) -> List[Place]:
     in the system's language. The service guesses rather than give up, so
     check the place's ``country_code`` or ``city`` for vague addresses.
     Raises :class:`~macos.WaitTimeoutError` (a ``TimeoutError``) if the
-    service doesn't answer within ``timeout`` seconds.
+    service doesn't answer within ``timeout`` seconds, a positive number.
     """
     if not address.strip():
         raise ValueError("address must not be empty")
+    _check_timeout(timeout)
     _frameworks()
     with _objc.autorelease_pool():
         return _ask("geocodeAddressString:completionHandler:", _objc.nsstring(address), timeout)
@@ -199,8 +234,8 @@ def reverse_geocode(latitude: float, longitude: float, *, timeout: float = 15) -
 
         macos.maps.reverse_geocode(37.8199, -122.4783).city   # 'San Francisco'
     """
-    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-        raise ValueError("latitude must be from -90 to 90 and longitude from -180 to 180, not {}, {}".format(latitude, longitude))
+    _check_point(latitude, longitude)
+    _check_timeout(timeout)
     _frameworks()
     with _objc.autorelease_pool():
         location = _objc.send(
@@ -225,14 +260,19 @@ _MODES = {"car": "d", "walk": "w", "transit": "r"}  # Maps' dirflg
 
 def _where(place: Where) -> str:
     """An address, a :class:`Place` or ``(latitude, longitude)``, as Maps' URLs write a place."""
-    if isinstance(place, Place):
-        return "{},{}".format(place.latitude, place.longitude)
-    if isinstance(place, tuple):
-        latitude, longitude = place
-        return "{},{}".format(float(latitude), float(longitude))
+    if isinstance(place, (Place, tuple)):
+        latitude, longitude = (place.latitude, place.longitude) if isinstance(place, Place) else place
+        _check_point(latitude, longitude)
+        return "{},{}".format(_degrees(latitude), _degrees(longitude))
     if not place.strip():
         raise ValueError("the place must not be empty")
     return place
+
+
+def _degrees(value: float) -> str:
+    """``value`` in plain decimals, as Maps reads them: ``'0.00001'``, not ``'1e-05'``; ``'2'`` for 2.0."""
+    text = "{:.6f}".format(float(value)).rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
 
 
 def _show(query: Dict[str, str]) -> None:

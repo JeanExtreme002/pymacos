@@ -303,6 +303,123 @@ def test_process_checks():
         macos.system.process(0)
 
 
+def test_pids_past_pid_t_are_refused_rather_than_wrapped(fake_run, monkeypatch):
+    system = macos.system
+    read = []
+    monkeypatch.setattr(system, "_read_process", lambda pid: read.append(pid))
+    monkeypatch.setattr(system, "_libproc", lambda: (None, 1.0))
+    monkeypatch.setattr(system, "_files", lambda lib, pid: read.append(pid) or [])
+    killed = []
+    monkeypatch.setattr(system.os, "kill", lambda pid, sig: killed.append(pid))
+
+    for pid in (2**31, 2**32 + 1):  # libproc's int would read 2**32 + 1 as pid 1
+        with pytest.raises(ValueError, match="fit a pid_t"):
+            system.process(pid)
+        with pytest.raises(ValueError, match="fit a pid_t"):
+            system.open_files(pid)
+        with pytest.raises(ValueError, match="pid must be a process's"):
+            system.kill(pid)
+    for pid in (0, -1):
+        with pytest.raises(ValueError):
+            system.open_files(pid)
+    assert read == [] and killed == []
+    system.kill(2**31 - 1)
+    assert killed == [2**31 - 1]
+
+
+def test_memory_usage_counts_in_the_kernel_pages(monkeypatch):
+    system = macos.system
+
+    class Mach:
+        def mach_host_self(self):
+            return 1
+
+        def host_statistics64(self, host, flavor, stats, count):
+            found = stats._obj
+            found.internal_page_count, found.purgeable_count, found.wire_count = 1000, 100, 200
+            found.compressor_page_count, found.external_page_count = 300, 400
+            return 0
+
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(system._libc, "lib", lambda: Mach())
+    monkeypatch.setattr(system, "memory", lambda: 2**34)
+    monkeypatch.setattr(system, "_kernel_page", lambda: 16384)  # Apple silicon's, also under Rosetta
+    monkeypatch.setattr(system, "_sysctl", lambda name: (4096).to_bytes(8, "little"))  # what Rosetta says hw.pagesize is
+
+    usage = system.memory_usage()
+    assert usage.used == (900 + 200 + 300) * 16384
+    assert (usage.wired, usage.compressed, usage.cached) == (200 * 16384, 300 * 16384, 500 * 16384)
+
+
+def test_cpu_times_tick_at_the_kernel_timebase(monkeypatch):
+    system = macos.system
+    frequencies = {"hw.tbfrequency": 24000000}
+
+    def sysctl(name):
+        if name not in frequencies:
+            raise macos.MacOSError("sysctl {} is not available".format(name))
+        return frequencies[name].to_bytes(8, "little")
+
+    monkeypatch.setattr(system, "_sysctl", sysctl)
+    monkeypatch.setattr(system._libc, "tick", lambda: 1.0)  # what mach_timebase_info tells a Python under Rosetta
+    system._kernel_tick.cache_clear()
+    try:
+        assert system._kernel_tick() == pytest.approx(125 / 3)  # Apple silicon's 24 MHz
+        system._kernel_tick.cache_clear()
+        frequencies["hw.tbfrequency"] = 10**9
+        assert system._kernel_tick() == 1.0  # an Intel Mac's
+        system._kernel_tick.cache_clear()
+        del frequencies["hw.tbfrequency"]
+        assert system._kernel_tick() == 1.0  # no sysctl: mach_timebase_info's
+    finally:
+        system._kernel_tick.cache_clear()
+
+
+def test_gatekeeper_off_is_read_despite_spctl_exiting_1(fake_run):
+    state = macos.system._state
+    args = ["spctl", "--status"]
+
+    fake_run.returncode, fake_run.stdout = 1, "assessments disabled\n"
+    assert state(args, "assessments enabled", "assessments disabled", off_status=1) is False
+    assert state(args, "assessments enabled", "assessments disabled") is None  # without off_status, a failure is a failure
+
+    fake_run.returncode, fake_run.stdout = 0, "assessments enabled\n"
+    assert state(args, "assessments enabled", "assessments disabled", off_status=1) is True
+
+    fake_run.returncode, fake_run.stdout, fake_run.stderr = 1, "", "spctl: unrecognized option\n"
+    assert state(args, "assessments enabled", "assessments disabled", off_status=1) is None
+    fake_run.returncode, fake_run.stdout = 2, "assessments disabled\n"
+    assert state(args, "assessments enabled", "assessments disabled", off_status=1) is None
+
+
+def test_who_uses_matches_a_folder_given_in_another_case(tmp_path, monkeypatch):
+    system = macos.system
+    folder = tmp_path / "project"
+    folder.mkdir()
+    opened = {7: [system._Opened("/Disk/Project/notes.txt", (1, 2))], 8: [system._Opened("/Disk/Other/a.txt", (1, 3))]}
+    monkeypatch.setattr(system, "require_macos", lambda: None)
+    monkeypatch.setattr(system, "_libproc", lambda: (None, 1.0))
+    monkeypatch.setattr(system, "_pids", lambda: [7, 8])
+    monkeypatch.setattr(system, "_files", lambda lib, pid: opened[pid])
+    monkeypatch.setattr(system, "_read_process", lambda pid: pid)
+    monkeypatch.setattr(system.os.path, "realpath", lambda path: str(path))
+    spelled = []
+    # As F_GETPATH spells the folder: the case the disk keeps, not the case it was typed in.
+    monkeypatch.setattr(macos.finder, "_as_on_disk", lambda path: spelled.append(path) or Path("/Disk/Project"))
+
+    assert system.who_uses(folder) == [7]
+    assert spelled == [str(folder)]
+
+
+def test_eject_finds_a_mount_path_typed_in_another_case(fake_run, tmp_path, monkeypatch):
+    backup = macos.system.Volume("Backup", Path("/Volumes/Backup"), 10, 5, False, True, True)
+    monkeypatch.setattr(macos.system, "volumes", lambda: [backup])
+    monkeypatch.setattr(macos.finder, "_as_on_disk", lambda path: Path("/Volumes/Backup"))
+
+    macos.system.eject(str(tmp_path))  # stands for "/volumes/backup", which the disk spells "/Volumes/Backup"
+    assert fake_run.args == ["diskutil", "eject", "/Volumes/Backup"]
+
+
 def test_process_names_cut_by_the_kernel():
     from pathlib import Path
 
@@ -562,12 +679,13 @@ def _vinfo_stat(device=0, inode=0):
     return struct.pack("=IHHQII8qqqiIIIqq", device, 0, 0, inode, 0, 0, *([0] * 8), 0, 0, 0, 0, 0, 0, 0, 0)
 
 
-def _socket_fdinfo(family, kind, socket_type, local, remote, state=0):
+def _socket_fdinfo(family, kind, socket_type, local, remote, state=0, versions=0):
     """
     A ``socket_fdinfo`` as ``proc_pidfdinfo`` fills it, field by field after <sys/proc_info.h>.
 
     ``local`` and ``remote`` are ``(address bytes, port)``: 4 bytes for IPv4, which the kernel keeps at the
     end of its 16, 16 for IPv6. The ports are in network order, as ``in_sockinfo`` holds them.
+    ``versions`` is ``insi_vflag``: 1 for IPv4, 2 for IPv6.
     """
     import socket
     import struct
@@ -585,7 +703,7 @@ def _socket_fdinfo(family, kind, socket_type, local, remote, state=0):
     )
     in_sockinfo = struct.pack(
         "=iiQiiBBxxI16s16sBBxxiHhxxxx",
-        socket.htons(remote[1]), socket.htons(local[1]), 0, 0, 0, 0, 0, 0, in4in6(remote[0]), in4in6(local[0]),
+        socket.htons(remote[1]), socket.htons(local[1]), 0, 0, 0, versions, 0, 0, in4in6(remote[0]), in4in6(local[0]),
         0, 0, 0, 0, 0,
     )  # fmt: skip
     tcp_sockinfo = in_sockinfo + struct.pack("=i", state)
@@ -631,6 +749,22 @@ def test_socket_fields_are_read_where_the_kernel_puts_them():
     assert system._socket(lib, 1, 3) == system._Socket("udp", "0.0.0.0", 5353, "0.0.0.0", 0, None)
     assert system._socket(lib, 1, 4) == system._Socket("udp", "fe80::1", 65535, "2001:db8::443", 1, None)
     assert [system._socket(lib, 1, fd) for fd in (5, 6, 7, 8)] == [None] * 4
+
+
+def test_an_ipv6_socket_carrying_ipv4_shows_ipv4_addresses():
+    import socket
+
+    system = macos.system
+    loopback, wildcard = socket.inet_pton(socket.AF_INET, "127.0.0.1"), b"\x00" * 16
+    tcp = (system._SOCKINFO_TCP, system._SOCK_STREAM)
+    lib = _Proc(
+        {
+            1: _socket_fdinfo(30, *tcp, (loopback, 8000), (loopback, 50000), state=4, versions=1),  # an IPv4 client
+            2: _socket_fdinfo(30, *tcp, (wildcard, 8000), (wildcard, 0), state=1, versions=3),  # dual-stack listener
+        }
+    )
+    assert system._socket(lib, 1, 1) == system._Socket("tcp", "127.0.0.1", 8000, "127.0.0.1", 50000, "established")
+    assert system._socket(lib, 1, 2) == system._Socket("tcp", "::", 8000, "::", 0, "listen")
 
 
 def test_vnode_paths_are_read_after_the_vnode_info():
@@ -957,3 +1091,62 @@ def test_mount_image_without_entities_detaches_nothing(fake_run, tmp_path):
     with pytest.raises(macos.MacOSError, match=r"no volume to mount$"):
         macos.system.mount_image(image)
     assert [call["args"][1] for call in fake_run.calls] == ["attach"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0, -1])
+def test_intervals_and_timeouts_must_be_positive_and_finite(fake_run, monkeypatch, tmp_path, value):
+    """NaN passes ``<= 0``, and a NaN or inf wait never ends: each is refused before anything runs."""
+    image = tmp_path / "Tool.dmg"
+    image.write_bytes(b"dmg")
+    for call in (
+        lambda: macos.system.cpu_usage(value),
+        lambda: macos.system.energy_usage(value),
+        lambda: macos.system.network_usage(value),
+        lambda: macos.system.wait_for_activity(interval=value),
+        lambda: macos.system.logs(timeout=value),
+        lambda: macos.system.mount_image(image, timeout=value),
+        lambda: macos.system.available_updates(timeout=value),
+    ):
+        with pytest.raises(ValueError, match="interval|timeout"):
+            call()
+    assert fake_run.calls == []
+
+
+def test_waits_refuse_a_nan_but_take_an_endless_timeout(monkeypatch):
+    nan = float("nan")
+    with pytest.raises(ValueError, match="seconds"):
+        macos.system.wait_for_idle(nan)
+    with pytest.raises(ValueError, match="timeout"):
+        macos.system.wait_for_idle(10, timeout=nan)
+    with pytest.raises(ValueError, match="timeout"):
+        macos.system.wait_for_activity(timeout=nan)
+    monkeypatch.setattr(macos.system, "idle_time", lambda: macos.system.timedelta(seconds=20))
+    assert macos.system.wait_for_idle(10, timeout=float("inf")) is True  # inf is "no limit", as None is
+
+
+@pytest.mark.parametrize("text", ["NO", "no", "false", "FALSE", "0", 0])
+def test_yes_or_no_preferences_read_no_written_as_text_as_false(monkeypatch, text):
+    """``defaults write ... Key NO`` stores the text "NO", which bool() would take for true."""
+    from macos import system
+
+    monkeypatch.setattr(system.defaults, "read", lambda domain, key, default=None, **kwargs: text)
+    assert system.keep_windows_on_quit() is False
+    assert system.battery_percentage_shown() is False
+    assert system.save_to_icloud_by_default() is False
+    assert system.expanded_save_dialog() is False
+    assert system.ds_store_on_network() is True and system.ds_store_on_usb() is True  # the keys say "don't write"
+    assert system.open_photos_on_device_connect() is True  # disableHotPlug
+    assert set(system.menu_bar_items().values()) == {False}
+    assert {system.clock_format()[name] for name in system._CLOCK_OPTIONS} == {False}
+    assert system.measurement_units() == "us"
+
+
+def test_yes_or_no_preferences_fall_back_on_unreadable_values(monkeypatch):
+    from macos import system
+
+    monkeypatch.setattr(system.defaults, "read", lambda domain, key, default=None, **kwargs: "maybe")
+    monkeypatch.setattr(system, "_locale_measurement", lambda: "metric")
+    assert system.save_to_icloud_by_default() is True  # its default
+    assert system.keep_windows_on_quit() is False
+    assert system.clock_format()["day_of_week"] is True and system.clock_format()["seconds"] is False
+    assert system.measurement_units() == "metric"  # as if unset: the region decides

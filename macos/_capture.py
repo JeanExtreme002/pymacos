@@ -59,11 +59,12 @@ def _handler(media: str) -> int:
         if media not in _handlers:
 
             def answered(granted: bool) -> None:
+                # Under the lock, so a call that gives up at that moment still sees the answer.
                 with _lock:
                     waiting, _waiting[media] = _waiting[media], []
-                for answer in waiting:
-                    answer.granted = bool(granted)
-                    answer.done.set()
+                    for answer in waiting:
+                        answer.granted = bool(granted)
+                        answer.done.set()
 
             _handlers[media] = _objc.block(answered, b"v@?B", ctypes.c_bool)
         return _handlers[media]
@@ -101,14 +102,24 @@ def request_permission(media: str, timeout: float = 120.0) -> bool:
 
 
 def require_permission(media: str) -> None:
-    """Ask for the permission the first time; raise when it's denied, or the prompt goes unanswered."""
+    """
+    Ask for the permission the first time; raise when it's denied or restricted, or the prompt goes unanswered.
+    """
     if request_permission(media):
         return
     name = _NAMES[media]
-    if _status(media) == _NOT_DETERMINED:
+    status = _status(media)
+    if status == _AUTHORIZED:  # allowed just as the wait ended
+        return
+    if status == _NOT_DETERMINED:
         raise PromptTimeoutError(
             "no answer to the {} permission prompt: run it again and click Allow, or allow the app running "
             "Python (your terminal or IDE) in System Settings › Privacy & Security › {}".format(name, name)
+        )
+    if status == _RESTRICTED:
+        raise PermissionDeniedError(
+            "{} is restricted on this Mac by a configuration profile or Screen Time, and only an administrator "
+            "can allow it".format(name)
         )
     raise PermissionDeniedError(
         "{} permission is missing: allow the app running Python (your terminal or IDE) in System Settings › "

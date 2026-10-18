@@ -73,6 +73,7 @@ def test_what_appkit_does_only_on_the_main_thread_says_so(fake_run, monkeypatch,
         lambda: macos.document.convert(notes, tmp_path / "notes.pdf"),
         lambda: macos.document.convert(page, tmp_path / "page.txt"),
         lambda: macos.document.text(page),
+        lambda: macos.document.convert(notes, tmp_path / "notes.webarchive"),  # WebKit writes it, on the main thread
     ):
         error = _in_a_thread(work)
         assert isinstance(error, macos.MacOSError) and "must run on the main thread" in str(error)
@@ -197,3 +198,85 @@ def test_every_html_extension_is_read_as_utf8(tmp_path, name):
     if source.suffix != ".txt":  # a page may also name it in an XML declaration (XHTML)
         source.write_bytes(b'<?xml version="1.0" encoding="ISO-8859-1"?><p>\xc3\xa9</p>')  # valid UTF-8 too
         assert not document._reads_as_utf8(source)
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        b'<script src="a.js" charset="utf-8"></script><p>caf\xc3\xa9</p>',
+        b'<link rel="stylesheet" href="a.css" charset="utf-8"><p>caf\xc3\xa9</p>',
+        b"<p>Use charset=utf-8 in headers. caf\xc3\xa9</p>",
+        b'<!-- <meta charset="latin-1"> --><p>caf\xc3\xa9</p>',
+        b'<p>caf\xc3\xa9 <?xml version="1.0" encoding="ISO-8859-1"?></p>',  # not the file's declaration
+    ],
+)
+def test_a_charset_that_names_no_encoding_of_the_page_is_ignored(tmp_path, page):
+    from macos import document
+
+    source = tmp_path / "page.html"
+    source.write_bytes(page)
+    assert document._reads_as_utf8(source)
+    source.write_bytes(b'<meta http-equiv="Content-Type" content="text/html; charset=latin-1">' + page)
+    assert not document._reads_as_utf8(source)
+    source.write_bytes(b'\xef\xbb\xbf\n<?xml version="1.0" encoding="ISO-8859-1"?>' + page)
+    assert not document._reads_as_utf8(source)
+
+
+@pytest.mark.parametrize(
+    "paper, margin, error",
+    [
+        (None, float("nan"), ValueError),  # passes the check against the paper, and the printing never returns
+        (None, float("inf"), ValueError),
+        (None, -1, ValueError),
+        (None, True, TypeError),
+        (None, "36", TypeError),
+        (3, 72.0, ValueError),
+        (b"a4", 72.0, ValueError),
+        ("bogus", 72.0, ValueError),
+    ],
+)
+def test_pdf_layout_is_checked_before_reading(fake_run, monkeypatch, tmp_path, paper, margin, error):
+    from macos import document
+
+    def loading(*args, **kwargs):
+        raise AssertionError("read before the arguments were checked")
+
+    monkeypatch.setattr(document, "_load", loading)
+    monkeypatch.setattr(document._files, "on_main_thread", lambda: False)  # and before the thread check
+    source = tmp_path / "notes.rtf"
+    source.write_text("{\\rtf1 hi}")
+    with pytest.raises(error):
+        macos.document.convert(source, tmp_path / "notes.pdf", paper=paper, margin=margin)
+
+
+@pytest.mark.parametrize(
+    "kind, utf8, stripped",
+    [("NSPlainText", True, True), ("NSHTML", False, True), ("NSOfficeOpenXML", False, True), ("NSWebArchive", False, False)],
+)
+def test_save_writes_text_as_utf8_and_drops_pictures_the_format_cant_hold(monkeypatch, tmp_path, kind, utf8, stripped):
+    from macos import document
+
+    made = {}
+    written = []
+
+    def send(receiver, selector, *args, **kwargs):
+        if selector == "length":
+            return 3
+        if selector == "dataFromRange:documentAttributes:error:":
+            written.append(receiver)
+        return (selector, args)
+
+    monkeypatch.setattr(document._objc, "send", send)
+    monkeypatch.setattr(document._objc, "nsstring", lambda value: value)
+    monkeypatch.setattr(document._objc, "nsdictionary_of", lambda options: made.update(options) or 7)
+    monkeypatch.setattr(document._objc, "pybytes", lambda data: b"x")
+    monkeypatch.setattr(document, "_without_attachments", lambda document: "stripped")
+    monkeypatch.setattr(document._files, "write_atomically", lambda target, write: write(str(target)))
+
+    document._save("doc", tmp_path / "out", kind)
+    assert made["DocumentType"] == kind
+    assert ("CharacterEncoding" in made) is utf8
+    if utf8:  # NSUTF8StringEncoding, not AppKit's MacRoman
+        assert made["CharacterEncoding"] == ("numberWithUnsignedInteger:", (4,))
+    assert written == ["stripped" if stripped else "doc"]
+    assert (tmp_path / "out").read_bytes() == b"x"

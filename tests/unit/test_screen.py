@@ -52,6 +52,11 @@ def test_screenshot_rejects_unknown_format(fake_run, tmp_path):
         macos.screenshot(tmp_path / "shot.bmp", check_permission=False)
 
 
+def test_screenshot_takes_tif_as_tiff(capture, tmp_path):
+    macos.screenshot(tmp_path / "shot.tif", check_permission=False)
+    assert capture.args[:4] == ["screencapture", "-x", "-t", "tiff"]
+
+
 def test_screenshot_raises_without_permission(fake_run, monkeypatch, tmp_path):
     monkeypatch.setattr(screen, "has_permission", lambda: False)
 
@@ -135,12 +140,6 @@ def test_is_locked_reads_the_session(monkeypatch, session, locked):
     assert macos.screen.is_locked() is locked
 
 
-@pytest.fixture(autouse=True)
-def _no_terminal(monkeypatch):
-    """No terminal sent a Ctrl-C here, whether the tests run in one or not (CI): the tests that need one say so."""
-    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: False)
-
-
 class _FakeRecording:
     """``subprocess.Popen`` for screencapture: ``record(args, timeout)`` plays what it does while recording."""
 
@@ -152,7 +151,9 @@ class _FakeRecording:
         self.made = []
 
     def __call__(self, args, **kwargs):
-        assert not kwargs.get("start_new_session")  # in Python's group: it ends with it, never left recording
+        # In a process group of its own: the only SIGINT it gets is the one record() sends.
+        assert kwargs.get("process_group") == 0 or kwargs.get("start_new_session") is True
+        assert isinstance(kwargs.get("stdin"), int)  # a pipe of its own, never the terminal
         recording = self
 
         class Process:
@@ -221,9 +222,11 @@ def test_screen_record_gives_up_on_a_stuck_screencapture(fake_run, monkeypatch, 
     recording = _FakeRecording(stuck)
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
-    with pytest.raises(macos.MacOSError, match="didn't finish recording"):
+    # A TimeoutError, as for screenshots, so that `except TimeoutError` catches it.
+    with pytest.raises(macos.CommandTimeoutError, match="didn't finish within 62 seconds"):
         macos.screen.record(tmp_path / "clip.mov", 2)
     assert recording.made[0][1].signals == ["kill"]
+    assert list(tmp_path.iterdir()) == []  # nothing saved
 
 
 @pytest.mark.parametrize("finished", [True, False])
@@ -250,7 +253,9 @@ def test_ctrl_c_lets_screencapture_finish_the_movie_and_keeps_it(fake_run, monke
     assert [path.name for path in tmp_path.iterdir()] == ["demo.mov"]
 
 
-def test_a_ctrl_c_from_the_terminal_isnt_sent_to_screencapture_twice(fake_run, monkeypatch, tmp_path):
+def test_a_ctrl_c_is_sent_to_screencapture_once(fake_run, monkeypatch, tmp_path):
+    import signal
+
     def interrupted(args, timeout):
         Path(args[-1]).write_bytes(b"movie so far")
         raise KeyboardInterrupt
@@ -258,10 +263,10 @@ def test_a_ctrl_c_from_the_terminal_isnt_sent_to_screencapture_twice(fake_run, m
     recording = _FakeRecording(interrupted)
     monkeypatch.setattr(macos.screen, "has_permission", lambda: True)
     monkeypatch.setattr(_system.subprocess, "Popen", recording)
-    monkeypatch.setattr(_system, "_terminal_interrupted_us", lambda: True)  # it got the terminal's SIGINT too
     with pytest.raises(KeyboardInterrupt):
         macos.screen.record(tmp_path / "demo.mov", 60)
-    assert recording.made[0][1].signals == []  # only waited for: a second SIGINT may cut its finishing short
+    # Out of the terminal's group, the terminal's SIGINT never reached it: this one, once, and a second can't cut it short.
+    assert recording.made[0][1].signals == [signal.SIGINT]
 
 
 @pytest.mark.parametrize(
@@ -318,6 +323,138 @@ def test_screen_argument_checks(tmp_path):
         macos.screen.record(tmp_path / "out.mov", 0)
     with pytest.raises(ValueError, match=".mov"):
         macos.screen.record(tmp_path / "out.mp4", 1)
+    # Checked before the permissions, and named, rather than an OverflowError from round().
+    for seconds in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="positive finite"):
+            macos.screen.record(tmp_path / "out.mov", seconds)
+        with pytest.raises(ValueError, match="positive finite"):
+            macos.screen.set_screensaver_delay(seconds)
+
+
+_MAIN = screen.Display(1, "Main", 1000, 800, 0, 0, 2000, 1600, 2.0, 60.0, True, False)
+
+
+def test_display_positions_are_checked(capture, tmp_path):
+    # A Display, or its id, isn't the position screencapture counts from 1: said, not passed on as "-DDisplay(...)".
+    with pytest.raises(TypeError, match="not a Display"):
+        macos.screenshot(tmp_path / "shot.png", display=_MAIN, check_permission=False)
+    with pytest.raises(TypeError, match="not a Display"):
+        macos.screen.record(tmp_path / "out.mov", 1, display=_MAIN)
+    with pytest.raises(TypeError, match="not a Display"):
+        screen.find_text("x", display=_MAIN)
+    with pytest.raises(TypeError, match="position"):
+        macos.screenshot(tmp_path / "shot.png", display=True, check_permission=False)
+    with pytest.raises(TypeError, match="position"):
+        macos.screenshot(tmp_path / "shot.png", display="2", check_permission=False)
+    with pytest.raises(ValueError, match="no display 0"):
+        macos.screenshot(tmp_path / "shot.png", display=0, check_permission=False)
+    assert capture.calls == []
+
+
+def test_color_at_floors_fractional_points(monkeypatch, tmp_path):
+    from macos import image
+
+    regions = []
+
+    def shoot(region):
+        regions.append(region)
+        shot = tmp_path / "pixel.png"
+        shot.write_bytes(b"png")
+        return shot
+
+    monkeypatch.setattr(screen, "screenshot", shoot)
+    monkeypatch.setattr(image, "dominant_colors", lambda path, count: ["#34c759"])
+    assert screen.color_at(-0.5, 10.7) == "#34c759"
+    screen.color_at(5.9, 3.1)
+    # -0.5 is in the point left of 0, on a display left of the main one; positive points as before.
+    assert regions == [(-1, 10, 1, 1), (5, 3, 1, 1)]
+
+
+def test_is_asleep_raises_for_a_display_that_isnt_connected(monkeypatch):
+    from types import SimpleNamespace
+
+    asked = []
+    cg = SimpleNamespace(CGMainDisplayID=lambda: 1, CGDisplayIsAsleep=lambda display: asked.append(display) or True)
+    monkeypatch.setattr(screen, "_display_api", lambda: cg)
+    monkeypatch.setattr(screen, "_online", lambda: [1, 5])  # 5 asleep: still online
+
+    assert screen.is_asleep() is True
+    assert screen.is_asleep(5) is True
+    assert screen.is_asleep(screen.Display(5, "Side", 500, 400, 1000, 0, 500, 400, 1.0, 60.0, False, False)) is True
+    for unknown in (999, -1):
+        with pytest.raises(ValueError, match="no connected display"):
+            screen.is_asleep(unknown)
+    for wrong in ("1", True):
+        with pytest.raises(TypeError, match="Display or its id"):
+            screen.is_asleep(wrong)
+    assert asked == [1, 5, 5]
+
+
+class _FakeModes:
+    """The CoreGraphics calls set_display_mode makes, over modes given as (width, height, pixel width, rate)."""
+
+    def __init__(self, modes):
+        self.modes = modes
+        self.chosen = None
+
+    def install(self, monkeypatch):
+        from types import SimpleNamespace
+
+        def mode(ref):
+            width, height, pixel_width, rate = self.modes[ref]
+            return screen.DisplayMode(width, height, pixel_width, height * pixel_width // width, rate)
+
+        monkeypatch.setattr(screen, "_arrangement_api", lambda: SimpleNamespace(
+            CGDisplayModeIsUsableForDesktopGUI=lambda ref: True,
+        ))
+        monkeypatch.setattr(screen, "_display_id", lambda display: 1)
+        monkeypatch.setattr(screen, "_all_modes", lambda cg, display_id: 0)
+        monkeypatch.setattr(screen._cf, "owned", lambda ref: __import__("contextlib").nullcontext(ref))
+        monkeypatch.setattr(screen._cf, "items", lambda array: range(len(self.modes)))
+        monkeypatch.setattr(screen, "_mode", lambda cg, ref: mode(ref))
+        monkeypatch.setattr(screen, "_configure", lambda change: self._apply(change))
+
+    def _apply(self, change):
+        from types import SimpleNamespace
+
+        def configure(config, display, ref, options):
+            self.chosen = ref
+            return 0
+
+        api = SimpleNamespace(CGConfigureDisplayWithDisplayMode=configure)
+        assert change(api, 7) == 0
+
+
+@pytest.mark.parametrize("asked, expected", [
+    (100, 120.0),     # far from them all: the closest, not an error
+    (90, 120.0),      # halfway between 60 and 120: the higher
+    (60, 60.0),       # the Retina one, also at 60 Hz
+    (59.94, 59.94),
+    (144, 120.0),
+    (None, 120.0),    # the highest
+])
+def test_set_display_mode_picks_the_closest_refresh_rate(monkeypatch, asked, expected):
+    fake = _FakeModes([
+        (1512, 982, 3024, 47.95), (1512, 982, 3024, 48.0), (1512, 982, 3024, 59.94),
+        (1512, 982, 1512, 60.0), (1512, 982, 3024, 60.0), (1512, 982, 3024, 120.0), (1800, 1169, 3600, 120.0),
+    ])
+    fake.install(monkeypatch)
+    chosen = screen.set_display_mode(1512, 982, refresh_rate=asked)
+    assert chosen.refresh_rate == expected and fake.modes[fake.chosen][3] == expected
+    if asked == 60:
+        assert chosen.hidpi  # 3024 pixels wide, rather than the 1512 at the same rate
+
+
+def test_set_display_mode_ranks_close_rates_as_one_and_retina_first(monkeypatch):
+    # 143.86 Hz for 144, as monitors report it; a Retina one within 0.5 Hz beats a closer plain one.
+    fake = _FakeModes([(2560, 1440, 2560, 144.0), (2560, 1440, 5120, 143.86), (2560, 1440, 5120, 60.0)])
+    fake.install(monkeypatch)
+    assert screen.set_display_mode(2560, 1440, refresh_rate=144).refresh_rate == 143.86
+    # A display that reports no rate (0) still gets its mode.
+    fake.modes = [(1920, 1080, 1920, 0.0)]
+    assert screen.set_display_mode(1920, 1080, refresh_rate=60).refresh_rate == 0.0
+    with pytest.raises(ValueError, match="no 1280×720 mode"):
+        screen.set_display_mode(1280, 720, refresh_rate=60)
 
 
 def test_find_text_maps_the_boxes_to_the_screen(monkeypatch, tmp_path):
@@ -374,6 +511,28 @@ def test_find_text_argument_checks():
         screen.find_text("  ")
     with pytest.raises(ValueError, match="interval"):
         screen.wait_for_text("ok", interval=0)
+    for interval in (float("nan"), float("inf")):  # sleep() would raise, or wait forever
+        with pytest.raises(ValueError, match="interval"):
+            screen.wait_for_text("ok", interval=interval)
+    with pytest.raises(ValueError, match="timeout"):  # never past its deadline, it would look forever
+        screen.wait_for_text("ok", timeout=float("nan"))
+
+
+@pytest.mark.parametrize("written", ["NO", "false", "0", 0, False])
+def test_yes_or_no_screenshot_settings_read_no_as_no(monkeypatch, written):
+    from macos import defaults
+
+    # Written without -bool, they are text, and bool("NO") is True.
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, default=None: written)
+    assert screen.screenshot_thumbnail() is False
+    assert screen.screenshot_shadow() is True  # disable-shadow is NO: the shadow stays
+
+
+def test_unreadable_yes_or_no_screenshot_settings_fall_back(monkeypatch):
+    from macos import defaults
+
+    monkeypatch.setattr(defaults, "read", lambda domain, key=None, default=None: ["junk"])
+    assert screen.screenshot_thumbnail() is True and screen.screenshot_shadow() is True
 
 
 def test_screenshot_settings(monkeypatch, tmp_path):

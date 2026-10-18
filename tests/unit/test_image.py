@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.image`. They run on any platform."""
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -216,3 +217,213 @@ def test_written_images_get_the_usual_permissions(tmp_path):
         assert os.listdir(str(photo.parent)) == ["photo.jpg"]
     finally:
         os.umask(old)
+
+
+class _FakeIO:
+    """ImageIO's functions as :mod:`macos.image` calls them, for one file of type ``kind``."""
+
+    def __init__(self):
+        self.kind, self.count, self.readable, self.loops = "public.png", 1, True, None
+        self.calls = []
+
+    def CGImageSourceCreateWithURL(self, url, options):
+        return "source" if self.readable else None
+
+    def CGImageSourceGetCount(self, source):
+        return self.count
+
+    def CGImageSourceGetType(self, source):
+        return self.kind
+
+    def CGImageSourceCopyProperties(self, source, options):
+        return {"{GIF}": {"LoopCount": self.loops}} if self.loops is not None else {"FileSize": 10}
+
+    def CGImageDestinationCopyTypeIdentifiers(self):
+        return ["public.jpeg", "public.png", "public.tiff", "com.compuserve.gif"]
+
+    def CGImageDestinationSetProperties(self, destination, properties):
+        self.calls.append(("properties", properties))
+
+    def CGImageDestinationAddImageFromSource(self, destination, source, index, options):
+        self.calls.append(("frame", index))
+
+
+@pytest.fixture
+def fake_io(monkeypatch, tmp_path):
+    import contextlib
+    import types
+
+    io = _FakeIO()
+    fake_cf = types.SimpleNamespace(
+        lib=lambda: None,
+        owned=contextlib.nullcontext,
+        release=lambda ref: None,
+        file_url=lambda path: path,
+        string=lambda text: text,
+        to_str=lambda ref: ref,
+        to_int=lambda ref: ref,
+        to_python=lambda ref: ref,
+        from_python=lambda value: value,
+        lookup=lambda ref, key: (ref or {}).get(key),
+    )
+    monkeypatch.setattr(macos.image, "_io", lambda: io)
+    monkeypatch.setattr(macos.image, "_cf", fake_cf)
+    macos.image._writable.cache_clear()
+    (tmp_path / "source.png").write_bytes(b"not looked at")
+    yield io
+    macos.image._writable.cache_clear()
+
+
+def test_convert_keeps_a_gifs_loop_count(fake_io, monkeypatch, tmp_path):
+    monkeypatch.setattr(macos.image, "_write", lambda target, kind, add, frames: add("destination") or target)
+    fake_io.kind, fake_io.count, fake_io.loops = "com.compuserve.gif", 3, 0
+
+    macos.image.convert(tmp_path / "source.png", tmp_path / "out.gif")
+    # Set before the frames: without it, ImageIO writes no loop block and the GIF plays once.
+    assert fake_io.calls == [("properties", {"{GIF}": {"LoopCount": 0}}), ("frame", 0), ("frame", 1), ("frame", 2)]
+
+    fake_io.calls, fake_io.loops = [], None  # a GIF that records none is left that way
+    macos.image.convert(tmp_path / "source.png", tmp_path / "out.gif")
+    assert fake_io.calls == [("frame", 0), ("frame", 1), ("frame", 2)]
+
+    fake_io.calls, fake_io.loops = [], 0  # TIFF has nowhere for it
+    macos.image.convert(tmp_path / "source.png", tmp_path / "out.tiff")
+    assert fake_io.calls == [("frame", 0), ("frame", 1), ("frame", 2)]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda source, output: macos.image.strip_metadata(source, output),
+        lambda source, output: macos.image.resize(source, output, width=10),
+        lambda source, output: macos.image.rotate(source, output, 90),
+        lambda source, output: macos.image.crop(source, output, (0, 0, 4, 4)),
+        lambda source, output: macos.image.effect(source, output, "noir"),
+    ],
+)
+@pytest.mark.parametrize("name", ["out.gif", "out.tiff"])
+def test_edits_refuse_to_drop_frames(fake_io, tmp_path, edit, name):
+    fake_io.kind, fake_io.count = "com.compuserve.gif", 2
+    # An animated GIF saved as a GIF with its first frame only would stop moving, silently.
+    with pytest.raises(ValueError, match="several frames"):
+        edit(tmp_path / "source.png", tmp_path / name)
+    assert not (tmp_path / name).exists()
+
+
+def test_a_single_frame_is_never_refused(fake_io):
+    macos.image._single_frame("source", "public.png", "anim.gif")  # a one-image format: the first frame
+    fake_io.count = 1
+    macos.image._single_frame("source", "com.compuserve.gif", "still.gif")
+
+
+def test_metadata_of_a_format_macos_cannot_write_is_refused_clearly(fake_io, tmp_path):
+    photo = tmp_path / "photo.webp"
+    photo.write_bytes(b"not looked at")
+    fake_io.kind = "org.webmproject.webp"
+    # Was a MacOSError naming a temporary file already gone.
+    with pytest.raises(ValueError, match="reads webp images but can't write them"):
+        macos.image.set_location(photo, 10, 20)
+    with pytest.raises(ValueError, match="reads webp images but can't write them"):
+        macos.image.set_taken_at(photo, datetime(2024, 5, 1), output=tmp_path / "copy.webp")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.webp", "source.png"]
+
+
+def test_an_unreadable_image_raises_permission_error(fake_io, monkeypatch, tmp_path):
+    fake_io.readable = False
+    with pytest.raises(ValueError, match="not an image macOS can read"):
+        macos.image.info(tmp_path / "source.png")
+    # A folder raises what open() would for one, as macos.pdf and macos.menubar do.
+    with pytest.raises(IsADirectoryError):
+        macos.image.info(tmp_path)
+
+    def denied(path, mode="r"):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(macos._objc, "open", denied, raising=False)
+    with pytest.raises(PermissionError):
+        macos.image.info(tmp_path / "source.png")
+
+
+def test_a_fifo_is_not_opened_to_check_it(fake_io, tmp_path):
+    # Opening a FIFO waits for a writer: one that isn't an image is a ValueError, at once.
+    fake_io.readable = False
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(str(fifo))
+    with pytest.raises(ValueError, match="not an image macOS can read"):
+        macos.image.info(fifo)
+
+
+def test_pdfs_are_refused(fake_io, tmp_path):
+    fake_io.kind = "com.adobe.pdf"
+    # ImageIO opens them as 0 x 0 images.
+    with pytest.raises(ValueError, match=r"is a PDF.*macos\.pdf\.render"):
+        macos.image.info(tmp_path / "source.png")
+    with pytest.raises(ValueError, match="is a PDF"):
+        macos.image.dominant_colors(tmp_path / "source.png")
+    with pytest.raises(ValueError, match="is a PDF"):
+        macos.image.replace_background(__file__, tmp_path / "source.png", tmp_path / "out.png")
+
+
+def test_crop_rounds_a_fractional_box_to_whole_pixels(monkeypatch):
+    import types
+
+    from macos import _objc
+
+    rects = []
+    monkeypatch.setattr(macos.image, "_edit", lambda source, output, change, quality: change("picture"))
+    monkeypatch.setattr(macos.image, "_to_origin", lambda picture: picture)
+    monkeypatch.setattr(
+        macos.image, "_extent", lambda picture: _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(100, 50))
+    )
+    fake_objc = types.SimpleNamespace(
+        CGRect=_objc.CGRect,
+        CGPoint=_objc.CGPoint,
+        CGSize=_objc.CGSize,
+        send=lambda picture, selector, rect, argtypes: rects.append(rect),
+    )
+    monkeypatch.setattr(macos.image, "_objc", fake_objc)
+
+    def cropped(box):
+        macos.image.crop("in.png", "out.png", box)
+        rect = rects.pop()
+        return (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)
+
+    # Was an 11 x 11 image with see-through edges. Core Image measures from the bottom-left.
+    assert cropped((0.5, 0.5, 10, 10)) == (1, 39, 10, 10)
+    assert cropped((10, 20, 30, 15)) == (10, 15, 30, 15)
+    assert cropped((0.4, 0, 100, 50)) == (0, 0, 100, 50)  # rounded, it fits
+    with pytest.raises(ValueError, match="less than a pixel"):
+        macos.image.crop("in.png", "out.png", (0, 0, 0.3, 10))
+    with pytest.raises(ValueError, match="finite"):
+        macos.image.crop("in.png", "out.png", (float("nan"), 0, 10, 10))
+    with pytest.raises(ValueError, match="doesn't fit"):
+        macos.image.crop("in.png", "out.png", (0, 0, 101, 50))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes images with ImageIO")
+def test_a_converted_gif_still_loops(tmp_path):
+    from macos import _cf
+    from tests.helpers import rgb_png
+
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(rgb_png(8, 8, lambda x, y: (200, 30, 30)))
+    io = macos.image._io()
+
+    def loops(path):
+        with _cf.owned(macos.image._source(path)) as source:
+            with _cf.owned(io.CGImageSourceCopyProperties(source, None)) as properties:
+                return _cf.to_int(_cf.lookup(_cf.lookup(properties, "{GIF}"), "LoopCount"))
+
+    with _cf.owned(macos.image._source(frame)) as image_source, _cf.owned(
+        _cf.from_python({"{GIF}": {"LoopCount": 0}})
+    ) as forever:
+
+        def add(destination):
+            io.CGImageDestinationSetProperties(destination, forever)
+            for _ in range(2):
+                io.CGImageDestinationAddImageFromSource(destination, image_source, 0, None)
+
+        macos.image._write(tmp_path / "anim.gif", "com.compuserve.gif", add, 2)
+    assert loops(tmp_path / "anim.gif") == 0
+    assert loops(macos.image.convert(tmp_path / "anim.gif", tmp_path / "copy.gif")) == 0
+    assert loops(macos.image.convert(tmp_path / "anim.gif", tmp_path / "anim.gif")) == 0  # in place too

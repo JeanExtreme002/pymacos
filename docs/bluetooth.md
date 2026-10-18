@@ -39,7 +39,10 @@ for device in macos.bluetooth.devices():
 
 {func}`~macos.bluetooth.connect` and {func}`~macos.bluetooth.disconnect` take
 a {class}`~macos.bluetooth.Device`, its address, its full name, or part of its
-name when only one device matches:
+name when only one device matches. Names match whatever the case or the style
+of apostrophe (`"Jean's AirPods"` finds `Jean’s AirPods`). When two paired
+devices share a name, or part of a name matches several, they raise
+`ValueError` listing the matches with their addresses: pass the address then.
 
 ```python
 macos.bluetooth.connect("AirPods")

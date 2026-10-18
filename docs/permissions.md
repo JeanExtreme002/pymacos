@@ -19,7 +19,8 @@ itself, so a script can work in one terminal and not in another.
 | {func}`macos.keyboard.watch`, {func}`macos.mouse.watch` | Input Monitoring | System Settings › Privacy & Security › Input Monitoring |
 | {func}`macos.finder.selection`, {func}`~macos.finder.current_folder` | Automation of Finder (asked the first time) | System Settings › Privacy & Security › Automation |
 | {func}`macos.apps.login_items`, {func}`~macos.apps.add_login_item`, {func}`~macos.apps.remove_login_item` | Automation of *System Events* (asked the first time) | System Settings › Privacy & Security › Automation |
-| {func}`macos.time_machine.last_backup` | may need Full Disk Access | System Settings › Privacy & Security › Full Disk Access |
+| {func}`macos.time_machine.last_backup` | may need Full Disk Access; without it, a `PermissionDeniedError` | System Settings › Privacy & Security › Full Disk Access |
+| {func}`macos.time_machine.exclude`, {func}`~macos.time_machine.include`, {func}`~macos.time_machine.is_excluded` | Full Disk Access, in the folders macOS protects (Mail, Messages, the Trash); without it, a `PermissionDeniedError` | System Settings › Privacy & Security › Full Disk Access |
 | {func}`macos.apps.uninstall` | Full Disk Access, to look in the Library folders macOS protects (Cookies, HTTPStorages); without it, a `RuntimeWarning` names them | System Settings › Privacy & Security › Full Disk Access |
 | {mod}`macos.music` | Automation of Music or Spotify (asked the first time) | System Settings › Privacy & Security › Automation |
 | {mod}`macos.browser` | Automation of the browser (asked the first time); {func}`~macos.browser.run_js` also needs the browser's *Allow JavaScript from Apple Events* | System Settings › Privacy & Security › Automation |

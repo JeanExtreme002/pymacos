@@ -257,7 +257,11 @@ busiest.name, busiest.cpu_percent   # ('Xcode', 187.5)
 Each {class}`~macos.system.Process` has its `pid`, `name`, `path`, `user`,
 `parent_pid`, `started`, `memory` (in bytes) and `cpu_time`. Other users'
 processes, the system's included, come without their memory, processor
-time and start, which macOS keeps from this user. `kill(force=True)` ends a
+time and start, which macOS keeps from this user. Where macOS won't list the
+processes at all, as in some sandboxes, it and the other functions that go
+through them ({func}`~macos.system.ports`, {func}`~macos.system.connections`,
+{func}`~macos.system.who_uses`, {func}`~macos.system.energy_usage`) raise
+{class}`~macos.MacOSError` rather than answer with nothing. `kill(force=True)` ends a
 process at once, without letting it save; to quit an app, prefer
 {meth}`App.quit() <macos.apps.App.quit>`.
 
@@ -296,11 +300,16 @@ for connection in macos.system.connections():
     # Google Chrome 142.250.79.46 443 established
 ```
 
+An IPv4 client of a server listening on both IPv4 and IPv6 (bound to `::`)
+shows its IPv4 address, `127.0.0.1` rather than `::127.0.0.1`, as `lsof` shows
+it.
+
 ## Open files
 
 {func}`~macos.system.who_uses` finds the processes using a file, a folder or
 a disk: with it open, or something inside it, working in it, or run from
-it. It answers "the disk can't be ejected because it's in use":
+it. It answers "the disk can't be ejected because it's in use". The path
+can be typed in any case (`/volumes/backup`), since a Mac's disk ignores it:
 
 ```python
 for process in macos.system.who_uses("/Volumes/Backup"):

@@ -66,17 +66,32 @@ def _check(status: int) -> None:
         message = _cf.to_str(ref)
 
     if status in (errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed):
-        raise PermissionDeniedError("{} (OSStatus {})".format(message or "Keychain access was denied", status))
+        # Not a KeychainError (see the docs, "Limitations"), but with the same
+        # ``status`` to branch on.
+        error = PermissionDeniedError("{} (OSStatus {})".format(message or "Keychain access was denied", status))
+        error.status = status  # type: ignore[attr-defined]
+        raise error
     raise KeychainError(status, message)
+
+
+def _check_name(label: str, text: str) -> None:
+    """Refuse a service or account name before any ``CFString`` is made of it."""
+    if not isinstance(text, str):
+        raise TypeError("the keychain {} must be a str, not {}".format(label, type(text).__name__))
+    # The file-based keychain stores these attributes as C strings: "svc\0x"
+    # would silently address (and overwrite) the "svc" item.
+    if "\0" in text:
+        raise ValueError("the keychain {} must not contain NUL characters".format(label))
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("the keychain {} must be valid Unicode text (no lone surrogates)".format(label)) from None
 
 
 def _query(service: str, account: str, extra: Optional[Dict[str, int]] = None) -> int:
     """Build the ``CFDictionary`` identifying one generic-password item."""
-    # The file-based keychain stores these attributes as C strings: "svc\0x"
-    # would silently address (and overwrite) the "svc" item.
-    for label, text in (("service", service), ("account", account)):
-        if "\0" in text:
-            raise ValueError("the keychain {} must not contain NUL characters".format(label))
+    _check_name("service", service)
+    _check_name("account", account)
 
     sec = _security()
     service_ref = _cf.string(service)
@@ -96,7 +111,13 @@ def _query(service: str, account: str, extra: Optional[Dict[str, int]] = None) -
 
 
 def get(service: str, account: str) -> Optional[str]:
-    """Return the password stored for ``service``/``account``, or ``None`` if there is none."""
+    """
+    Return the password stored for ``service``/``account``, or ``None`` if there is none.
+
+    Raises :class:`~macos.errors.PermissionDeniedError` if the user denies
+    access or the keychain is locked and can't ask (SSH), and
+    :class:`~macos.errors.KeychainError` for any other failure.
+    """
     sec = _security()
     cf = _cf.lib()
     extra = {
@@ -121,7 +142,13 @@ def get(service: str, account: str) -> Optional[str]:
 
 
 def set(service: str, account: str, password: str) -> None:
-    """Store ``password`` for ``service``/``account``, replacing any existing one."""
+    """
+    Store ``password`` for ``service``/``account``, replacing any existing one.
+
+    ``password`` must be a ``str``. Raises like :func:`get`.
+    """
+    if not isinstance(password, str):
+        raise TypeError("the keychain password must be a str, not {}".format(type(password).__name__))
     sec = _security()
     secret = _cf.data(password.encode("utf-8"))
     with _cf.owned(secret):
@@ -137,7 +164,7 @@ def set(service: str, account: str, password: str) -> None:
 
 
 def delete(service: str, account: str) -> bool:
-    """Delete the item for ``service``/``account``. Return ``False`` if it didn't exist."""
+    """Delete the item for ``service``/``account``. Return ``False`` if it didn't exist. Raises like :func:`get`."""
     with _cf.owned(_query(service, account)) as query:
         status = _security().SecItemDelete(query)
 
@@ -152,10 +179,11 @@ def accounts(service: str) -> List[str]:
     Return the accounts that have a password stored for ``service``.
 
     Only the account names are read, never the passwords, so this doesn't
-    prompt even for items that other apps created.
+    prompt even for items that other apps created. An item with an empty
+    account (or none) is listed as ``""``, which :func:`get` and
+    :func:`delete` address. Raises like :func:`get`.
     """
-    if "\0" in service:
-        raise ValueError("the keychain service must not contain NUL characters")
+    _check_name("service", service)
     sec = _security()
     cf = _cf.lib()
     true = _cf.constant(cf, "kCFBooleanTrue")
@@ -177,6 +205,13 @@ def accounts(service: str) -> List[str]:
     _check(status)
 
     account_key = _cf.constant(sec, "kSecAttrAccount")
+    names = []
     with _cf.owned(result.value) as items:
-        names = [_cf.to_str(cf.CFDictionaryGetValue(item, account_key)) for item in _cf.items(items)]
-    return sorted(name for name in names if name is not None)
+        for item in _cf.items(items):
+            # The file-based keychain leaves an empty account out of the
+            # attributes: that item is the one account "" addresses.
+            value = cf.CFDictionaryGetValue(item, account_key)
+            name = _cf.to_str(value) if value else ""
+            if name is not None:
+                names.append(name)
+    return sorted(names)

@@ -36,7 +36,7 @@ videos, PDFs and language detection in one import, with no dependencies::
     macos.keyboard.press("cmd+c")
     macos.mouse.click(300, 400)
     macos.bluetooth.devices()
-    macos.windows.focused().set_frame(0, 25, 1280, 800)
+    macos.windows.tile_all(gap=8)
     macos.hotkeys.wait("ctrl+option+s")
     macos.video.convert("screen.mov", "screen.mp4", quality="medium")
     macos.music.now_playing()
@@ -55,6 +55,7 @@ import importlib
 from typing import TYPE_CHECKING, Any, List
 
 from .errors import (
+    AppLaunchTimeoutError,
     AppNotFoundError,
     CommandError,
     CommandTimeoutError,
@@ -131,18 +132,24 @@ _SHORTCUTS = {
 }
 
 
-def __getattr__(name: str) -> Any:
-    if name in _SHORTCUTS:
-        value = getattr(importlib.import_module("." + _SHORTCUTS[name], __name__), name)
-        globals()[name] = value  # resolved once
-        return value
-    # Any submodule, private ones included, as when they were all imported up front.
-    try:
-        return importlib.import_module("." + name, __name__)
-    except ModuleNotFoundError as error:
-        if error.name != "{}.{}".format(__name__, name):
-            raise  # a module that exists failed to import something else
-    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+# Hidden from type checkers: they would type every name the module lacks, a misspelled one
+# included, as what it returns (Any). The TYPE_CHECKING imports above are what they see instead.
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        if name in _SHORTCUTS:
+            value = getattr(importlib.import_module("." + _SHORTCUTS[name], __name__), name)
+            globals()[name] = value  # resolved once
+            return value
+        # Any submodule, private ones included, as when they were all imported up front. Only a
+        # name can be one: "", "..", or "pdf.x" would import the package, fail, or import pdf.
+        if name.isidentifier():
+            try:
+                return importlib.import_module("." + name, __name__)
+            except ModuleNotFoundError as error:
+                if error.name != "{}.{}".format(__name__, name):
+                    raise  # a module that exists failed to import something else
+        raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
 
 
 def __dir__() -> List[str]:
@@ -196,6 +203,7 @@ __all__ = [
     "open_with",
     "say",
     "screenshot",
+    "AppLaunchTimeoutError",
     "AppNotFoundError",
     "CommandError",
     "CommandTimeoutError",

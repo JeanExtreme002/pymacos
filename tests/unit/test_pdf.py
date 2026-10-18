@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.pdf`. They run on any platform."""
 
+import os
 import sys
 
 import pytest
@@ -744,3 +745,190 @@ def test_scrub_outline_blocks_out_titles_and_drops_links_that_hold_a_target(tmp_
         assert counts == [3]  # two titles and a link's address
         assert not _objc.send(links, "action")  # its address would lead nowhere once blocked out
         assert _objc.send(elsewhere, "action")
+
+
+def test_encrypt_refuses_passwords_pdfkit_cannot_write(tmp_path):
+    # Before anything opens or writes: PDFKit would refuse to save, and say only "could not write".
+    for password, owner, which in (("pässwort", None, "password"), ("密码", None, "password"), ("ok", "a😀b", "owner password")):
+        with pytest.raises(ValueError, match="the {} must be ASCII".format(which)):
+            macos.pdf.encrypt(tmp_path / "missing.pdf", tmp_path / "out.pdf", password, owner_password=owner)
+    assert not (tmp_path / "out.pdf").exists()
+
+
+def test_passwords_unlock_as_utf8_then_latin1():
+    from macos.pdf import _password_bytes
+
+    assert _password_bytes("s3cret") == [b"s3cret"]
+    assert _password_bytes("pässwort") == ["pässwort".encode("utf-8"), "pässwort".encode("latin-1")]
+    assert _password_bytes("密码") == ["密码".encode("utf-8")]  # no Latin-1 spelling
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 0)() == 0, reason="root reads any file, and Windows has no mode 000")
+def test_an_unreadable_file_is_a_permission_error_not_a_bad_pdf(tmp_path):
+    from macos.pdf import _not_a_pdf
+
+    junk = tmp_path / "junk.pdf"
+    junk.write_bytes(b"not a PDF")
+    assert str(_not_a_pdf(junk)) == "{} is not a PDF".format(junk)
+    locked = tmp_path / "locked.pdf"
+    locked.write_bytes(b"%PDF-1.4\n")
+    os.chmod(str(locked), 0)
+    try:
+        with pytest.raises(PermissionError):
+            _not_a_pdf(locked)
+        if sys.platform == "darwin":
+            for read in (macos.pdf.text, macos.pdf.page_count):
+                with pytest.raises(PermissionError):
+                    read(locked)
+            with pytest.raises(PermissionError):
+                macos.pdf.images(locked, tmp_path / "pictures")
+    finally:
+        os.chmod(str(locked), 0o600)
+    with pytest.raises(IsADirectoryError):
+        _not_a_pdf(tmp_path)
+
+
+def test_merge_and_from_images_take_a_list_not_a_single_path(tmp_path):
+    from pathlib import Path
+
+    for single in ("a.pdf", Path("a.pdf"), b"a.pdf"):
+        with pytest.raises(TypeError, match=r"inputs must be a list of paths, not a single one: use \["):
+            macos.pdf.merge(single, tmp_path / "out.pdf")
+    for single in ("photo.jpg", Path("photo.jpg"), b"\xff\xd8\xff", bytearray(b"\x89PNG")):
+        with pytest.raises(TypeError, match="images must be a list of images"):
+            macos.pdf.from_images(single, tmp_path / "out.pdf")
+    with pytest.raises(ValueError, match="at least one"):
+        macos.pdf.merge(iter([]), tmp_path / "out.pdf")
+    with pytest.raises(ValueError, match="at least one"):
+        macos.pdf.from_images(iter([]), tmp_path / "out.pdf")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes PDFs with PDFKit and Core Graphics")
+def test_merge_and_from_images_take_any_iterable(tmp_path):
+    from tests.helpers import pdf_with_text, small_png
+
+    picture = tmp_path / "page.png"
+    picture.write_bytes(small_png(100, 100))
+    made = macos.pdf.from_images((path for path in [picture, picture]), tmp_path / "pictures.pdf")
+    assert macos.pdf.page_count(made) == 2
+    page = tmp_path / "page.pdf"
+    page.write_bytes(pdf_with_text([("Hello", 72, 700)]))
+    assert macos.pdf.page_count(macos.pdf.merge((path for path in [page, made]), tmp_path / "both.pdf")) == 3
+
+
+def test_positions_are_corners_or_two_numbers():
+    from macos.pdf import _check_position, _origin
+
+    assert _check_position("top_left") == "top_left"
+    assert _check_position((72, 100)) == (72.0, 100.0)
+    assert _check_position([72, 100.5]) == (72.0, 100.5)  # a list, as json.loads gives it
+    for wrong in ("middle", (72,), (1, 2, 3), [72, "100"], (True, 1), (float("nan"), 1), (1, float("inf")), 72, None):
+        with pytest.raises(ValueError, match="position must be one of"):
+            _check_position(wrong)
+    assert _origin((72.0, 100.0), 10, 10, 612, 792, 36) == (72.0, 100.0)
+    assert _origin("bottom_left", 10, 10, 612, 792, 36) == (36, 36)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes PDFs with PDFKit")
+def test_sign_and_add_text_at_a_listed_point(tmp_path):
+    from macos import _objc
+    from tests.helpers import pdf_with_text, small_png
+
+    source = tmp_path / "page.pdf"
+    source.write_bytes(pdf_with_text([("Hello", 72, 700)]))
+    signature = tmp_path / "signature.png"
+    signature.write_bytes(small_png(40, 20))
+    assert macos.pdf.page_count(macos.pdf.sign(source, tmp_path / "signed.pdf", signature, position=[72, 100])) == 1
+    noted = macos.pdf.add_text(source, tmp_path / "noted.pdf", "Seen", position=[72, 100])
+    with macos.pdf._open(noted) as document:
+        (note,) = _objc.nsarray(_objc.send(macos.pdf._page(document, 1), "annotations"))
+        assert _objc.send(note, "bounds", restype=_objc.CGRect).origin.x == 72  # where the list says
+    with pytest.raises(ValueError, match="position must be one of"):
+        macos.pdf.add_text(source, tmp_path / "never.pdf", "Seen", position=[72])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes outlines with PDFKit")
+def test_bookmarks_that_open_nothing_are_written_back(tmp_path):
+    from macos.pdf import Bookmark
+    from tests.helpers import small_png
+
+    picture = tmp_path / "page.png"
+    picture.write_bytes(small_png(100, 100))
+    book = macos.pdf.from_images([picture] * 2, tmp_path / "book.pdf")
+    contents = [Bookmark("Online", 0), Bookmark("Chapter 1", 1, 1), Bookmark("Chapter 2", 2)]
+    marked = macos.pdf.set_bookmarks(book, tmp_path / "marked.pdf", contents)
+    read = macos.pdf.bookmarks(marked)
+    assert read == contents
+    # Read, edited and written back.
+    again = macos.pdf.set_bookmarks(marked, tmp_path / "again.pdf", [Bookmark("Links", 0)] + read[1:])
+    assert [(mark.title, mark.page) for mark in macos.pdf.bookmarks(again)] == [("Links", 0), ("Chapter 1", 1), ("Chapter 2", 2)]
+    # A tuple's 0 is more likely a page counted from 0 than a heading: refused, saying how to write one.
+    with pytest.raises(ValueError, match=r"page 0, out of range.*Bookmark\('Intro', 0\)"):
+        macos.pdf.set_bookmarks(book, tmp_path / "never.pdf", [("Intro", 0)])
+
+
+def test_file_strings_skip_an_annotations_date_only():
+    from macos.pdf import _strings
+
+    # The date PDFKit stamps on each annotation, which a digit pattern (a card number's) would match.
+    assert list(_strings(b"/Type /Annot /M (D:20261017233900Z00'00') /Contents (Note)")) == ["Note"]
+    assert list(_strings(b"/M <443A3230323631303137>")) == []  # D:20261017, written in hex
+    # Any other text after /M is read: nothing hides there from the read-back.
+    assert list(_strings(b"/M (Card 4111111111111111)")) == ["Card 4111111111111111"]
+    assert list(_strings(b"/MK << /CA (D:2026) >>")) == ["D:2026"]  # another key: read as it is
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="writes and redacts PDFs with PDFKit")
+def test_redact_a_number_from_an_annotated_pdf(tmp_path):
+    import re
+
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "card.pdf"
+    source.write_bytes(pdf_with_text([("Card 4111111111111111 on file", 72, 700)]))
+    blank = tmp_path / "blank.pdf"
+    blank.write_bytes(pdf_with_text([]))
+    both = macos.pdf.merge([source, blank], tmp_path / "both.pdf")
+    # A note on the page without the number: that page isn't flattened, and its note keeps its date.
+    noted = macos.pdf.add_text(both, tmp_path / "noted.pdf", "Checked", page=2)
+    assert re.search(rb"/M\s*\(D:\d{14}", noted.read_bytes())  # the annotation's date, 14 digits in a row
+    done = macos.pdf.redact(noted, tmp_path / "public.pdf", [re.compile(r"\d{12,19}")])
+    assert list(done.matches.values()) == [1]
+    assert "4111111111111111" not in macos.pdf.text(done.path)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads PDFs and draws pages")
+def test_ocr_redo_replaces_the_text_a_page_had(tmp_path, monkeypatch):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "text.pdf"
+    source.write_bytes(pdf_with_text([("Old scanner text", 72, 700)]))
+    blank = tmp_path / "blank.pdf"
+    blank.write_bytes(pdf_with_text([]))
+    both = macos.pdf.merge([source, blank], tmp_path / "both.pdf")
+    words = [("Vision", (0.1, 0.1, 0.3, 0.05))]
+    monkeypatch.setattr(macos.vision, "_picture_words", lambda picture, languages: words)
+
+    def pages(pdf):
+        return [part.strip() for part in macos.pdf.text(pdf).split("\n")]
+
+    redone = macos.pdf.ocr(both, tmp_path / "redone.pdf", redo=True)
+    assert pages(redone) == ["Vision", "Vision"]  # the old text gone, not there twice
+    kept = macos.pdf.ocr(both, tmp_path / "kept.pdf")
+    assert pages(kept) == ["Old scanner text", "Vision"]
+
+
+def test_sign_names_image_bytes_it_cannot_decode_without_repeating_them(tmp_path, monkeypatch):
+    class Info:
+        orientation = 1
+
+    class IO:
+        def CGImageSourceCreateImageAtIndex(self, source, index, options):
+            return None  # read as an image, but its pixels don't decode
+
+    monkeypatch.setattr(macos.pdf, "_image_source", lambda image: (0, "image bytes"))
+    monkeypatch.setattr(macos.image, "_describe", lambda source: Info())
+    monkeypatch.setattr(macos.image, "_io", lambda: IO())
+    with pytest.raises(ValueError, match="^image bytes is not an image macOS can read$"):
+        macos.pdf.sign(__file__, tmp_path / "out.pdf", b"\x89PNG" + b"x" * 100000)
+    assert not (tmp_path / "out.pdf").exists()
