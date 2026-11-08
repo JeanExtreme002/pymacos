@@ -2677,6 +2677,13 @@ def _chosen(
     return chosen
 
 
+def _same(boxes: Sequence[Box], others: Sequence[Box]) -> bool:
+    """Whether ``boxes`` are ``others``, give or take rounding."""
+    return len(boxes) == len(others) and all(
+        abs(side - other) < 0.5 for box, another in zip(boxes, others) for side, other in zip(box, another)
+    )
+
+
 def _around(boxes: Sequence[Box]) -> Box:
     """The smallest box holding every one of ``boxes``."""
     left = min(x for x, _, _, _ in boxes)
@@ -2777,17 +2784,33 @@ def _font_named(font: Optional[str]) -> str:
     return font
 
 
-def _write_over(graphics: ctypes.CDLL, core_text: ctypes.CDLL, context: int, text: str, box: Box, font: str) -> None:
-    """Write ``text`` in ``font`` over ``box``: from its left edge, on its baseline, sized to its height."""
+def _write_over(
+    graphics: ctypes.CDLL, core_text: ctypes.CDLL, context: int, text: str, box: Box, font: str, rotation: int
+) -> None:
+    """
+    Write ``text`` in ``font`` over ``box``, a line's box as the page is seen: from where the line starts, on
+    its baseline, sized to its height, running the way lines run on a page shown turned by ``rotation``
+    degrees (down on one turned 90, up on one turned 270).
+    """
     if not text.strip():
         return
+    x, y, width, height = box
+    turn = rotation % 360 if rotation % 360 in (90, 180, 270) else 0
+    tall = width if turn % 180 else height  # the height of a line seen turned on its side is its box's width
     probe, _, ascent, descent = _typeset(text, 1.0, font)
     _cf.release(probe)
-    size = box[3] / max(ascent + descent, 1e-6)
+    size = tall / max(ascent + descent, 1e-6)
     line, _, _, descent = _typeset(text, size, font)
+    # Where the line starts, as seen, its baseline ``descent`` in from the bottom of the letters.
+    starts = {0: (x, y + descent), 90: (x + descent, y + height), 180: (x + width, y + height - descent)}
+    left, bottom = starts.get(turn, (x + width - descent, y))
     try:
-        graphics.CGContextSetTextPosition(context, box[0], box[1] + descent)
+        graphics.CGContextSaveGState(context)
+        graphics.CGContextTranslateCTM(context, left, bottom)
+        graphics.CGContextRotateCTM(context, math.radians(-turn))  # a page turned clockwise: its lines too
+        graphics.CGContextSetTextPosition(context, 0.0, 0.0)
         core_text.CTLineDraw(line, context)
+        graphics.CGContextRestoreGState(context)
     finally:
         _cf.release(line)
 
@@ -2813,6 +2836,7 @@ def _repaint(
     graphics, core_text = _graphics(), _core_text()
     page = _page(document, number)
     width, height = _shown_size(page)
+    rotation = int(_objc.send(page, "rotation", restype=ctypes.c_long))
     frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
     data = _objc.send(_objc.cls("NSMutableData"), "data")  # a CFMutableData, autoreleased
     picture = _painted(page, number, boxes, paint)
@@ -2831,7 +2855,7 @@ def _repaint(
             graphics.CGContextDrawImage(context, frame, picture)  # embedded as the JPEG it is
             graphics.CGContextSetRGBFillColor(context, ink[0], ink[1], ink[2], 1.0)
             for text, box in labels:
-                _write_over(graphics, core_text, context, text, box, font)
+                _write_over(graphics, core_text, context, text, box, font, rotation)
             graphics.CGContextEndPage(context)
             graphics.CGPDFContextClose(context)
         finally:
@@ -2870,7 +2894,7 @@ def _edited(
     and ``font``.
 
     What :func:`erase` and :func:`replace` share. A pattern without a match, or a :class:`Match` the PDF
-    doesn't hold where it says, raises, writing nothing.
+    doesn't hold where it says (one of another PDF, or made stale by an edit or a turn), raises, writing nothing.
     """
     searched = [(index, label, target) for index, (label, target) in enumerate(targets) if isinstance(target, re.Pattern)]
     given = [(index, target) for index, (_, target) in enumerate(targets) if isinstance(target, Match)]
@@ -2891,14 +2915,17 @@ def _edited(
                 if searched:
                     located = _located(page, number, [(label, pattern) for _, label, pattern in searched])
                     found += [(searched[which][0], match, lines) for which, match, lines in located]
-                for index, hit in given:
-                    if hit.page != number:
-                        continue
-                    if hit.text not in (_objc.pystring(_objc.send(page, "string")) or ""):
-                        raise ValueError(
-                            "page {} doesn't hold {!r} where the match says: find() it on this PDF".format(number, hit.text)
-                        )
-                    found.append((index, None, list(hit.lines)))
+                on_page = [(index, hit) for index, hit in given if hit.page == number]
+                if on_page:
+                    # Each match as the page holds it now: its text, placed where the match says it is.
+                    placed = _located(page, number, [(hit.text, re.compile(re.escape(hit.text))) for _, hit in on_page])
+                    for which, (index, hit) in enumerate(on_page):
+                        lines = next((boxes for i, _, boxes in placed if i == which and _same(boxes, hit.lines)), None)
+                        if lines is None:
+                            raise ValueError(
+                                "page {} doesn't hold {!r} where the match says: find() it on this PDF".format(number, hit.text)
+                            )
+                        found.append((index, None, lines))
             if not found:
                 continue
             boxes: List[Box] = []

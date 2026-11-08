@@ -944,6 +944,14 @@ def test_sign_names_image_bytes_it_cannot_decode_without_repeating_them(tmp_path
     assert not (tmp_path / "out.pdf").exists()
 
 
+def test_same_allows_rounding():
+    from macos.pdf import _same
+
+    assert _same([(72.0, 700.0, 40.0, 20.0)], [(72.3, 699.6, 40.0, 20.0)])
+    assert not _same([(72.0, 700.0, 40.0, 20.0)], [(72.0, 650.0, 40.0, 20.0)])
+    assert not _same([(72.0, 700.0, 40.0, 20.0)], [(72.0, 700.0, 40.0, 20.0), (72.0, 680.0, 40.0, 20.0)])
+
+
 def test_around_holds_every_box():
     from macos.pdf import _around
 
@@ -1100,7 +1108,7 @@ def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     first, second, other = tmp_path / "1.pdf", tmp_path / "2.pdf", tmp_path / "other.pdf"
     first.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700), ("Assinado por Ana Souza", 72, 650)]))
     second.write_bytes(pdf_with_text([("Anexo de Ana Souza", 72, 700)]))
-    other.write_bytes(pdf_with_text([("Maria Lima", 72, 700)]))
+    other.write_bytes(pdf_with_text([("Maria Lima", 72, 700), ("Ana Souza", 300, 400)]))
     source = macos.pdf.merge([first, second], tmp_path / "in.pdf")
     hits = macos.pdf.find(source, "Ana Souza")
     assert [hit.page for hit in hits] == [1, 1, 2]
@@ -1138,9 +1146,11 @@ def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     assert macos.pdf.text(done.path, [2]) == "Maria Lima" and "Assinado por Ana Souza" in seen(done.path, 1)
 
     (stale,) = macos.pdf.find(other, "Maria Lima")
+    (elsewhere,) = macos.pdf.find(other, "Ana Souza")  # a text page 1 holds, but not there
     for targets, message in (
         ([hits[0], hits[0]], "the match of 'Ana Souza' on page 1 is given more than once"),
         (stale, "page 1 doesn't hold 'Maria Lima' where the match says"),
+        (elsewhere, "page 1 doesn't hold 'Ana Souza' where the match says"),
         (dataclasses.replace(hits[0], page=3), "page 3 is out of range"),
         ([hits[0], 3], r"erase\(\) takes texts, compiled patterns and matches"),
     ):
@@ -1149,3 +1159,28 @@ def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     with pytest.raises(ValueError, match="the match of 'Ana Souza' on page 1 isn't among the pages given"):
         macos.pdf.erase(source, tmp_path / "never.pdf", hits[0], pages=[2])
     assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.parametrize("angle", [90, 180, 270])
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_replace_writes_along_a_turned_line(tmp_path, angle):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "turned.pdf"
+    source.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)], rotate=angle))
+    (old,) = macos.pdf.find(source, "Ana Souza")
+    x, y, width, height = old.box
+    assert (width < height) == (angle % 180 != 0)  # seen on its side when turned 90 or 270
+
+    done = macos.pdf.replace(source, tmp_path / "out.pdf", old, "Maria Lima")
+    assert macos.pdf.text(done.path) == "Maria Lima"
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    # The new text starts where the old line started, runs the same way, and is as tall as the old letters.
+    if angle == 90:
+        assert abs(new.box[0] - x) < 2 and abs(new.box[1] + new.box[3] - y - height) < 3 and abs(new.box[2] - width) < 3
+    elif angle == 180:
+        assert abs(new.box[0] + new.box[2] - x - width) < 3 and abs(new.box[1] + new.box[3] - y - height) < 2
+        assert abs(new.box[3] - height) < 3
+    else:
+        assert abs(new.box[0] + new.box[2] - x - width) < 2 and abs(new.box[1] - y) < 3 and abs(new.box[2] - width) < 3
+    assert "Souza" not in macos.vision.text(macos.pdf.render(done.path, 1, size=1600))
