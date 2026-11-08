@@ -1,7 +1,7 @@
 # PDF
 
-{mod}`macos.pdf` reads, merges, splits, rotates, encrypts and redacts PDFs, and
-makes them from images, with PDFKit, the framework behind Preview. Pages are numbered from 1, like in Preview.
+{mod}`macos.pdf` reads, merges, splits, rotates, encrypts, edits and redacts PDFs,
+and makes them from images, with PDFKit, the framework behind Preview. Pages are numbered from 1, like in Preview.
 
 ```python
 import macos
@@ -269,6 +269,69 @@ macos.pdf.add_text("form.pdf", "filled.pdf", "Jane Doe", near="Name:")
 `size` is in points; `font` a font's name, such as `"Helvetica-Bold"`;
 `color` a hex color. It adds to the page: its own text can't be edited.
 
+## Finding text
+
+{func}`~macos.pdf.find` tells where a text is: on which page, and in which box.
+
+```python
+import re
+
+for match in macos.pdf.find("contract.pdf", "Jane Doe"):
+    print(match.page, match.text, match.box)     # 1 'Jane Doe' (72.0, 695.2, 71.1, 20.3)
+
+macos.pdf.find("list.pdf", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), pages=[1])
+```
+
+The text is found as {func}`~macos.pdf.redact` finds its targets: as whole
+words, ignoring case and any spacing or line break between them (`"Ana"` isn't
+in "Banana"), or as a compiled {mod}`re` pattern. Each
+{class}`~macos.pdf.Match` has the `page`, the `text` as the page holds it, and
+its `box`: `(x, y, width, height)` in points from the page's bottom-left
+corner, as the page is seen, which is where {func}`~macos.pdf.sign` and
+{func}`~macos.pdf.add_text` take a `position`. A text split over two lines is
+one match, with the box of each line in `lines`. `pages` narrows the search,
+and a text that isn't there gives `[]`. Only what the PDF holds as text is
+found: run {func}`~macos.pdf.ocr` first on a scan.
+
+## Erasing and replacing text
+
+{func}`~macos.pdf.erase` takes a text out of the pages, and
+{func}`~macos.pdf.replace` writes another in its place:
+
+```python
+done = macos.pdf.erase("draft.pdf", "clean.pdf", ["DRAFT", "Internal use only"])
+done.matches     # {'DRAFT': 3, 'Internal use only': 1}
+done.pages       # {1: 2, 2: 2}: the pages redrawn
+
+macos.pdf.replace("offer.pdf", "offer-2027.pdf", "2026", "2027")
+macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\w+)"), r"Maria \1", font="Helvetica-Bold")
+macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})    # both at once
+```
+
+The targets are found as {func}`~macos.pdf.find` finds them. The new text goes
+where the old one was, from its left edge and at its size, in `font`
+(Helvetica by default, since a PDF's own fonts can't be written with) and
+`color`; `background` is the color painted where the old text was, white by
+default. A longer text runs past where the old one ended, so look over the
+result. The {class}`~macos.pdf.Edit` they return tells how many times each
+target was found, and on which pages.
+
+A PDF holds its text as drawing instructions, in fonts that carry only the
+letters the PDF uses, so a page's text can't be edited in place. Instead, as
+{func}`~macos.pdf.redact` does, each page with a match is redrawn as a picture
+of what it shows, with the matches painted over: the old text is gone, not
+covered, and the new one is written over the picture as text, which selects,
+searches and stays sharp. The rest of that page, annotations included, still
+shows but can't be selected or searched any more ({func}`~macos.pdf.ocr` gives
+it back); pages without a match, the metadata and the bookmarks don't change.
+When a target isn't found, they raise {class}`ValueError` and write nothing.
+Since a replaced page holds no text to find any more, the replacements a
+page needs go in one call, as a dict of old to new.
+
+These are for editing, and look at the pages' text only: the same text in a
+form field, a comment, the title or a bookmark stays. To make sure a text
+can't be recovered from the file at all, use {func}`~macos.pdf.redact`.
+
 ## Table of contents
 
 {func}`~macos.pdf.bookmarks` reads a PDF's table of contents (the sidebar's
@@ -417,3 +480,8 @@ which may be a little off the picture: check those pages closely.
 - {func}`macos.pdf.images`
 - {func}`macos.pdf.redact`
 - {class}`macos.pdf.Redaction`
+- {func}`macos.pdf.find`
+- {class}`macos.pdf.Match`
+- {func}`macos.pdf.erase`
+- {func}`macos.pdf.replace`
+- {class}`macos.pdf.Edit`

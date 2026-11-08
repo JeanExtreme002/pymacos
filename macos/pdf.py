@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Read, merge, split, rotate, encrypt and redact PDFs, or make them from images.
+Read, merge, split, rotate, encrypt, edit and redact PDFs, or make them from images.
 
 ::
 
@@ -12,6 +12,8 @@ Read, merge, split, rotate, encrypt and redact PDFs, or make them from images.
     macos.pdf.extract("report.pdf", "summary.pdf", [1, 3])
     macos.pdf.encrypt("report.pdf", "locked.pdf", password="1234")
     macos.pdf.redact("contract.pdf", "public.pdf", ["Jane Doe"])
+    macos.pdf.find("contract.pdf", "Jane Doe")      # [Match(page=1, text='Jane Doe', box=(...), ...)]
+    macos.pdf.replace("draft.pdf", "final.pdf", "DRAFT", "FINAL")
 
 Uses PDFKit, the framework behind Preview. Page numbers start at 1, like in
 Preview.
@@ -68,6 +70,11 @@ __all__ = [
     "images",
     "redact",
     "Redaction",
+    "find",
+    "Match",
+    "erase",
+    "replace",
+    "Edit",
 ]
 
 PathLike = Union[str, "os.PathLike[str]"]
@@ -484,25 +491,31 @@ def _core_text() -> ctypes.CDLL:
     return text_library
 
 
-def _line(text: str, size: float) -> Tuple[int, float, float]:
-    """An owned Core Text line of ``text`` in bold Helvetica, its width and its height (ascent + descent)."""
+def _typeset(text: str, size: float, font: str) -> Tuple[int, float, float, float]:
+    """An owned Core Text line of ``text`` in the font named ``font``, its width, its ascent and its descent."""
     core_text = _core_text()
-    with _cf.owned(_cf.string("Helvetica-Bold")) as name:
-        font = core_text.CTFontCreateWithName(name, size, None)
+    with _cf.owned(_cf.string(font)) as name:
+        typeface = core_text.CTFontCreateWithName(name, size, None)
     true = _cf.constant(_cf.lib(), "kCFBooleanTrue")
     attributes = _cf.dictionary(
         {
-            _cf.constant(core_text, "kCTFontAttributeName"): font,
+            _cf.constant(core_text, "kCTFontAttributeName"): typeface,
             # Take the color (and transparency) from the drawing context.
             _cf.constant(core_text, "kCTForegroundColorFromContextAttributeName"): true,
         }
     )
-    with _cf.owned(font), _cf.owned(attributes), _cf.owned(_cf.string(text)) as string:
+    with _cf.owned(typeface), _cf.owned(attributes), _cf.owned(_cf.string(text)) as string:
         with _cf.owned(_cf.lib().CFAttributedStringCreate(None, string, attributes)) as attributed:
             line = core_text.CTLineCreateWithAttributedString(attributed)
     ascent, descent, leading = ctypes.c_double(), ctypes.c_double(), ctypes.c_double()
     width = core_text.CTLineGetTypographicBounds(line, ctypes.byref(ascent), ctypes.byref(descent), ctypes.byref(leading))
-    return line, float(width), ascent.value + descent.value
+    return line, float(width), ascent.value, descent.value
+
+
+def _line(text: str, size: float) -> Tuple[int, float, float]:
+    """An owned Core Text line of ``text`` in bold Helvetica, its width and its height (ascent + descent)."""
+    line, width, ascent, descent = _typeset(text, size, "Helvetica-Bold")
+    return line, width, ascent + descent
 
 
 def _password_bytes(password: str) -> List[bytes]:
@@ -871,6 +884,9 @@ def _graphics() -> ctypes.CDLL:
     rect = ctypes.POINTER(_objc.CGRect)
     signatures = {
         "CGPDFContextCreateWithURL": ((pointer, rect, pointer), pointer),
+        "CGPDFContextCreate": ((pointer, rect, pointer), pointer),
+        "CGDataConsumerCreateWithCFData": ((pointer,), pointer),
+        "CGDataConsumerRelease": ((pointer,), None),
         "CGContextBeginPage": ((pointer, rect), None),
         "CGContextEndPage": ((pointer,), None),
         "CGPDFContextClose": ((pointer,), None),
@@ -1829,6 +1845,7 @@ def images(
 # --- Redaction --------------------------------------------------------------------
 
 Target = Union[str, "re.Pattern[str]"]
+Box = Tuple[float, float, float, float]
 
 
 _REDACTION_SCALE = 3.0  # 216 dots per inch: sharp enough to read and print the rest of the page
@@ -1837,16 +1854,17 @@ _BLOCK = "\u2588"  # █, what redacted text becomes in metadata and bookmarks
 _REDACTION_QUALITY = 0.9  # JPEG quality of a flattened page: crisp text, a fraction of the raw pixels
 
 
-def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.Pattern[str]"]]:
+def _patterns(targets: Union[Target, Sequence[Target]], *, caller: str = "redact()") -> List[Tuple[str, "re.Pattern[str]"]]:
     """
-    Each target as it was given (the text, or the pattern's source) and a pattern to find it.
+    Each target as it was given (the text, or the pattern's source) and a pattern to find it; ``caller`` names
+    the function refusing them.
 
     A text matches ignoring case and any spacing or line break between its words, and only
     as whole words: "Ana" doesn't match inside "Banana".
     """
     items = [targets] if isinstance(targets, (str, re.Pattern)) else list(targets)
     if not items:
-        raise ValueError("redact() needs at least one text or pattern")
+        raise ValueError("{} needs at least one text or pattern".format(caller))
     found = []
     for item in items:
         if isinstance(item, re.Pattern):
@@ -1864,7 +1882,7 @@ def _patterns(targets: Union[Target, Sequence[Target]]) -> List[Tuple[str, "re.P
             after = r"(?!\w)" if re.search(r"\w$", edges) else ""
             found.append((item, re.compile(before + words + after, re.IGNORECASE)))
         else:
-            raise ValueError("redact() takes texts and compiled patterns, not {!r}".format(item))
+            raise ValueError("{} takes texts and compiled patterns, not {!r}".format(caller, item))
     labels = [label for label, _ in found]
     repeated = sorted({label for label in labels if labels.count(label) > 1})
     if repeated:
@@ -2111,17 +2129,15 @@ def _redactions(
     return found, boxes
 
 
-def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> None:
+def _painted(page: int, number: int, boxes: Sequence[Tuple[float, ...]], paint: Tuple[float, float, float]) -> int:
     """
-    Replace page ``number`` with a picture of it, the ``boxes`` blacked out: its text is gone, not covered.
+    An owned ``CGImage`` of ``page`` (number ``number``, for the errors) as it's seen, the ``boxes`` painted
+    over in ``paint`` (red, green and blue, from 0 to 1), kept as a JPEG: crisp text, a fraction of the raw pixels.
 
-    The picture is of the page's visible part (its crop box), as it's seen: what was cropped away is gone
-    too, and the new page shows the same size. It's kept as a JPEG, as PDFKit would write it anyway:
-    the document holds every flattened page until it's saved, a few hundred kilobytes each this way,
-    not the tens of megabytes of their raw pixels.
+    The picture is of the page's visible part (its crop box), as it's seen: what was cropped away is left
+    out, and the page's annotations are drawn in.
     """
     graphics = _graphics()
-    page = _page(document, number)
     width, height = _shown_size(page)  # drawn as it's seen, so the picture needs no turning
     scale = min(_REDACTION_SCALE, _REDACTION_LONGEST / max(width, height, 1.0))
     pixels_wide, pixels_high = max(1, round(width * scale)), max(1, round(height * scale))
@@ -2136,7 +2152,7 @@ def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> 
         graphics.CGContextFillRect(context, _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height)))
         # Its annotations too (form fields, comments, stamps): the new page is a picture, it can't hold them.
         _draw_page(graphics, context, page)
-        graphics.CGContextSetRGBFillColor(context, 0.0, 0.0, 0.0, 1.0)
+        graphics.CGContextSetRGBFillColor(context, paint[0], paint[1], paint[2], 1.0)
         for x, y, wide, tall in boxes:
             margin = 1.0  # a point around it: no edge of a letter peeks out
             area = _objc.CGRect(_objc.CGPoint(x - margin, y - margin), _objc.CGSize(wide + 2 * margin, tall + 2 * margin))
@@ -2150,6 +2166,22 @@ def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> 
         picture = _jpeg(raw, _REDACTION_QUALITY)
     if not picture:
         raise MacOSError("could not draw page {}".format(number))
+    return picture
+
+
+def _flatten(document: int, number: int, boxes: Sequence[Tuple[float, ...]]) -> None:
+    """
+    Replace page ``number`` with a picture of it, the ``boxes`` blacked out: its text is gone, not covered.
+
+    The picture is of the page's visible part (its crop box), as it's seen: what was cropped away is gone
+    too, and the new page shows the same size. It's kept as a JPEG, as PDFKit would write it anyway:
+    the document holds every flattened page until it's saved, a few hundred kilobytes each this way,
+    not the tens of megabytes of their raw pixels.
+    """
+    graphics = _graphics()
+    page = _page(document, number)
+    width, height = _shown_size(page)
+    picture = _painted(page, number, boxes, (0.0, 0.0, 0.0))
     try:
         image = _objc.send(
             _objc.send(_objc.cls("NSImage"), "alloc"),
@@ -2573,3 +2605,380 @@ def redact(
         saved = _files.write_atomically(output, write)
     matches = {label: count for (label, _), count in zip(patterns, counts)}
     return Redaction(path=saved, matches=matches, pages=per_page)
+
+
+# --- Finding, erasing and replacing text ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class Match:
+    """Where :func:`find` saw a text."""
+
+    page: int
+    """The page it's on, from 1."""
+    text: str
+    """The text as the page holds it: ``"ANA SOUZA"`` for a search of ``"Ana Souza"``."""
+    box: Box
+    """
+    ``(x, y, width, height)`` around the text, in points from the bottom-left corner of the page as
+    it's seen: where :func:`sign` and :func:`add_text` take a ``position``. Text drawn hidden, as
+    :func:`ocr` adds it, has a box with no size.
+    """
+    lines: Tuple[Box, ...]
+    """The box of each line the text takes: one, unless a line break splits it."""
+
+
+@dataclass(frozen=True)
+class Edit:
+    """What :func:`erase` or :func:`replace` changed."""
+
+    path: Path
+    """The edited PDF."""
+    matches: Dict[str, int]
+    """How many times each target was found, by the target as given (a pattern by its source)."""
+    pages: Dict[int, int]
+    """The pages redrawn, with how many matches each had."""
+
+
+def _single(target: Any, caller: str) -> Tuple[str, "re.Pattern[str]"]:
+    """The one target of ``caller`` (a text or a compiled pattern), as :func:`_patterns` reads it."""
+    if not isinstance(target, (str, re.Pattern)):
+        raise TypeError("{} takes one text or compiled pattern, not {!r}".format(caller, target))
+    return _patterns(target, caller=caller)[0]
+
+
+def _around(boxes: Sequence[Box]) -> Box:
+    """The smallest box holding every one of ``boxes``."""
+    left = min(x for x, _, _, _ in boxes)
+    bottom = min(y for _, y, _, _ in boxes)
+    right = max(x + width for x, _, width, _ in boxes)
+    top = max(y + height for _, y, _, height in boxes)
+    return left, bottom, right - left, top - bottom
+
+
+def _located(
+    page: int, number: int, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]
+) -> List[Tuple[int, "re.Match[str]", List[Box]]]:
+    """
+    Each match of ``patterns`` in the text of ``page`` (number ``number``), pattern by pattern, in reading
+    order: the index of its pattern, the match, and its boxes as the page is seen, one per line it takes.
+
+    A match PDFKit can't place raises: :func:`find` would report it nowhere, and :func:`erase` leave it.
+    """
+    content = _objc.pystring(_objc.send(page, "string")) or ""
+    offsets = _utf16_offsets(content)  # once per page: per match, it would grow with the square of the page
+    found = []
+    for index, (label, pattern) in enumerate(patterns):
+        for match in pattern.finditer(content):
+            if not match.group():
+                continue
+            start, end = offsets[match.start()], offsets[match.end()]
+            selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
+            if not selection:
+                raise MacOSError("{!r} is on page {}, but where it's drawn can't be told".format(label, number))
+            lines = list(_objc.nsarray(_objc.send(selection, "selectionsByLine"))) or [selection]
+            boxes = []
+            for line in lines:
+                x, y, width, height = _seen_box(
+                    page, _objc.send(line, "boundsForPage:", page, argtypes=(_objc.id,), restype=_objc.CGRect)
+                )
+                boxes.append((x, y, width, height))
+            found.append((index, match, boxes))
+    return found
+
+
+def find(
+    path: PathLike,
+    text: Target,
+    *,
+    pages: Optional[Iterable[int]] = None,
+    password: Optional[str] = None,
+) -> List[Match]:
+    """
+    Find where ``text`` is in a PDF: a :class:`Match` for each place it shows, page by page, in reading order.
+
+    ::
+
+        for match in macos.pdf.find("contract.pdf", "Jane Doe"):
+            print(match.page, match.text, match.box)        # 1 'Jane Doe' (72.0, 695.2, 71.1, 20.3)
+
+        ssn = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
+        macos.pdf.find("list.pdf", ssn, pages=[1])             # only on the first page
+
+    ``text`` is found as :func:`redact` finds its targets: as whole words,
+    ignoring case and any spacing or line break between them ("Ana" isn't in
+    "Banana"), or as a compiled :mod:`re` pattern. ``pages`` (numbered from 1)
+    narrows the search; an empty ``pages`` (``[]``) looks nowhere. It returns
+    ``[]`` when the text isn't there. Each box is in points from the bottom-left
+    corner of its page, as the page is seen: what :func:`sign` and
+    :func:`add_text` take as a ``position``.
+
+    Only the text a PDF holds as text is found: not the words in a picture (a
+    scan, a screenshot), unless :func:`ocr` added them. ``password`` opens an
+    encrypted PDF.
+    """
+    label, pattern = _single(text, "find()")
+    with _open(path, password) as document:
+        numbers = list(pages) if pages is not None else range(1, _count(document) + 1)
+        found = []
+        for number in numbers:
+            # A pool per page: searching one makes strings and selections, all done with once it's searched.
+            with _objc.autorelease_pool():
+                for _, match, boxes in _located(_page(document, number), number, [(label, pattern)]):
+                    found.append(Match(page=number, text=match.group(), box=_around(boxes), lines=tuple(boxes)))
+        return found
+
+
+def _font_named(font: Optional[str]) -> str:
+    """The name of a font of this Mac: ``font`` checked, or Helvetica when none is given."""
+    if font is None:
+        return "Helvetica"
+    framework("AppKit")
+    typeface = _objc.send(
+        _objc.cls("NSFont"), "fontWithName:size:", _objc.nsstring(font), 12.0, argtypes=(_objc.id, ctypes.c_double)
+    )
+    if not typeface:
+        raise ValueError("no font is named {!r}; see macos.system.fonts()".format(font))
+    return font
+
+
+def _write_over(graphics: ctypes.CDLL, core_text: ctypes.CDLL, context: int, text: str, box: Box, font: str) -> None:
+    """Write ``text`` in ``font`` over ``box``: from its left edge, on its baseline, sized to its height."""
+    if not text.strip():
+        return
+    probe, _, ascent, descent = _typeset(text, 1.0, font)
+    _cf.release(probe)
+    size = box[3] / max(ascent + descent, 1e-6)
+    line, _, _, descent = _typeset(text, size, font)
+    try:
+        graphics.CGContextSetTextPosition(context, box[0], box[1] + descent)
+        core_text.CTLineDraw(line, context)
+    finally:
+        _cf.release(line)
+
+
+def _repaint(
+    document: int,
+    number: int,
+    boxes: Sequence[Box],
+    paint: Tuple[float, float, float],
+    labels: Sequence[Tuple[str, Box]],
+    ink: Tuple[float, float, float],
+    font: str,
+) -> None:
+    """
+    Replace page ``number`` with a picture of it, the ``boxes`` painted over in ``paint``, and each of
+    ``labels`` (a text, and the box it goes over) written over the picture as text, in ``ink`` and ``font``:
+    the old text is gone, not covered, and what's written selects and searches.
+
+    As :func:`_flatten` does, but through a one-page PDF drawn in memory, since a page made of a picture
+    can't hold the labels as text. That PDF is autoreleased: it lives as long as the pool around
+    ``document``, which its page, copied into ``document``, reads from until the document is saved.
+    """
+    graphics, core_text = _graphics(), _core_text()
+    page = _page(document, number)
+    width, height = _shown_size(page)
+    frame = _objc.CGRect(_objc.CGPoint(0, 0), _objc.CGSize(width, height))
+    data = _objc.send(_objc.cls("NSMutableData"), "data")  # a CFMutableData, autoreleased
+    picture = _painted(page, number, boxes, paint)
+    try:
+        consumer = graphics.CGDataConsumerCreateWithCFData(data)
+        if not consumer:
+            raise MacOSError("could not redraw page {}".format(number))
+        try:
+            context = graphics.CGPDFContextCreate(consumer, ctypes.byref(frame), None)
+        finally:
+            graphics.CGDataConsumerRelease(consumer)  # the context holds its own reference
+        if not context:
+            raise MacOSError("could not redraw page {}".format(number))
+        try:
+            graphics.CGContextBeginPage(context, ctypes.byref(frame))
+            graphics.CGContextDrawImage(context, frame, picture)  # embedded as the JPEG it is
+            graphics.CGContextSetRGBFillColor(context, ink[0], ink[1], ink[2], 1.0)
+            for text, box in labels:
+                _write_over(graphics, core_text, context, text, box, font)
+            graphics.CGContextEndPage(context)
+            graphics.CGPDFContextClose(context)
+        finally:
+            graphics.CGContextRelease(context)
+    finally:
+        graphics.CGImageRelease(picture)
+    drawn = _objc.send(_objc.send(_objc.cls("PDFDocument"), "alloc"), "initWithData:", data, argtypes=(_objc.id,))
+    if not drawn:
+        raise MacOSError("could not redraw page {}".format(number))
+    _objc.send(drawn, "autorelease")
+    if _count(drawn) != 1:
+        raise MacOSError("could not redraw page {}".format(number))
+    # Copied, as merge() copies pages: inserting the original would move it out of its document.
+    copy = _objc.send(_objc.send(_page(drawn, 1), "copy"), "autorelease")
+    _objc.send(document, "insertPage:atIndex:", copy, number - 1, argtypes=(_objc.id, NSUInteger), restype=None)
+    _objc.send(document, "removePageAtIndex:", number, argtypes=(NSUInteger,), restype=None)
+
+
+def _edited(
+    path: PathLike,
+    output: PathLike,
+    patterns: Sequence[Tuple[str, "re.Pattern[str]"]],
+    pages: Optional[Iterable[int]],
+    password: Optional[str],
+    *,
+    paint: Tuple[float, float, float],
+    written: Optional[Callable[[int, "re.Match[str]"], str]] = None,
+    ink: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    font: str = "Helvetica",
+) -> Edit:
+    """
+    Save to ``output`` the PDF at ``path`` with every page that holds a match of ``patterns`` (among
+    ``pages``, or all of them) redrawn, the matches painted over in ``paint`` and, with ``written``, what it
+    gives for each match written over the match's first line, in ``ink`` and ``font``.
+
+    What :func:`erase` and :func:`replace` share. A target without a match raises, writing nothing.
+    """
+    with _open(path, password) as document:
+        numbers = list(dict.fromkeys(pages)) if pages is not None else range(1, _count(document) + 1)
+        counts = [0] * len(patterns)
+        per_page: Dict[int, int] = {}
+        planned: Dict[int, Tuple[List[Box], List[Tuple[str, Box]]]] = {}
+        for number in numbers:
+            # A pool per page: searching one makes strings and selections, all done with once it's searched.
+            with _objc.autorelease_pool():
+                located = _located(_page(document, number), number, patterns)
+            if not located:
+                continue
+            boxes: List[Box] = []
+            labels: List[Tuple[str, Box]] = []
+            for index, match, lines in located:
+                counts[index] += 1
+                # A box with no size (text drawn hidden) has nothing to paint over: redrawing the page is
+                # what takes the text away.
+                boxes += [box for box in lines if box[2] > 0 and box[3] > 0]
+                if written is not None and lines[0][3] > 0:
+                    labels.append((written(index, match), lines[0]))
+            per_page[number] = len(located)
+            planned[number] = (boxes, labels)
+        missing = [repr(label) for (label, _), count in zip(patterns, counts) if not count]
+        if missing:
+            where = "the pages given" if pages is not None else "the PDF"
+            raise ValueError(
+                "{} isn't on {}, so nothing was written: see macos.pdf.find()".format(", ".join(missing), where)
+            )
+        # No pool per page here: each redrawn page reads from a PDF in memory that has to outlive the save.
+        for number, (boxes, labels) in planned.items():
+            _repaint(document, number, boxes, paint, labels, ink, font)
+        saved = _save(document, output)
+    return Edit(path=saved, matches={label: count for (label, _), count in zip(patterns, counts)}, pages=per_page)
+
+
+def erase(
+    path: PathLike,
+    output: PathLike,
+    targets: Union[Target, Sequence[Target]],
+    *,
+    background: str = "#ffffff",
+    pages: Optional[Iterable[int]] = None,
+    password: Optional[str] = None,
+) -> Edit:
+    """
+    Take text out of a PDF's pages, leaving the background where it was, and save the result to ``output``.
+
+    ::
+
+        done = macos.pdf.erase("draft.pdf", "clean.pdf", ["DRAFT", "Internal use only"])
+        done.matches   # {'DRAFT': 3, 'Internal use only': 1}
+        done.pages     # {1: 2, 2: 2}: the pages redrawn
+
+    ``targets`` are texts or compiled :mod:`re` patterns, found as :func:`find`
+    finds them: as whole words, ignoring case and any spacing or line break
+    between them. ``background`` is the hex color painted where the text was,
+    white by default; ``pages`` (from 1) limits the search to some pages.
+
+    Each page with a match is redrawn as a picture of what it shows, as
+    :func:`redact` does, with the matches painted over: there's no text left
+    under them, and the rest of that page, annotations included, still shows
+    but can't be selected or searched any more. Pages without a match don't
+    change, nor do the metadata and the bookmarks. It returns an :class:`Edit`
+    and, when a target isn't found at all, raises :class:`ValueError` without
+    writing anything.
+
+    This is for editing: it looks at the pages' text only. To make sure a text
+    can't be recovered from the file (its form fields, comments, metadata and
+    bookmarks included), use :func:`redact`. ``password`` opens an encrypted
+    PDF; the result isn't encrypted.
+    """
+    patterns = _patterns(targets, caller="erase()")
+    return _edited(path, output, patterns, pages, password, paint=_color(background))
+
+
+def replace(
+    path: PathLike,
+    output: PathLike,
+    old: Union[Target, Mapping[Target, str]],
+    new: Optional[str] = None,
+    *,
+    color: str = "#000000",
+    background: str = "#ffffff",
+    font: Optional[str] = None,
+    pages: Optional[Iterable[int]] = None,
+    password: Optional[str] = None,
+) -> Edit:
+    """
+    Write ``new`` where a PDF's pages say ``old``, and save the result to ``output``.
+
+    ::
+
+        macos.pdf.replace("draft.pdf", "final.pdf", "DRAFT", "FINAL")
+        macos.pdf.replace("offer.pdf", "offer-2027.pdf", "2026", "2027", pages=[1])
+        macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\\w+)"), r"Maria \\1")
+        macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})   # both at once
+
+    ``old`` is found as :func:`find` finds a text: as whole words, ignoring case
+    and any spacing or line break between them, or as a compiled :mod:`re`
+    pattern, whose groups ``new`` may refer to (``\\1``). ``new`` is written
+    where each match was, from its left edge and at its size, in ``font``
+    (Helvetica by default: a PDF's own fonts can't be written with) and
+    ``color``, a hex color; ``background`` is the hex color painted over the
+    match first, white by default. A longer ``new`` runs past where the old
+    text ended, so look over the result. A match split over two lines is
+    painted over on both, and ``new`` written on the first.
+
+    Several replacements go in one call, as a dict of ``old`` to ``new``
+    (with no ``new`` argument): a replaced page holds no text to find any
+    more, so a second call wouldn't find what a first one left on the page.
+
+    Each page with a match is redrawn as a picture of what it shows, as
+    :func:`erase` and :func:`redact` do: the old text is gone, not covered,
+    and what's written is text, which selects, searches and stays sharp,
+    while the rest of that page, annotations included, still shows but can't
+    be selected or searched any more. Pages without a match don't change, nor
+    do the metadata and the bookmarks. It returns an :class:`Edit` and, when
+    ``old`` isn't found, raises :class:`ValueError` without writing anything.
+    ``password`` opens an encrypted PDF; the result isn't encrypted.
+    """
+    if isinstance(old, Mapping):
+        if new is not None:
+            raise TypeError("with a dict of replacements, new goes in it: replace(path, output, {old: new})")
+        pairs = list(old.items())
+        if not pairs:
+            raise ValueError("replace() needs at least one replacement")
+    else:
+        if new is None:
+            raise TypeError("replace() needs the new text: replace(path, output, old, new)")
+        pairs = [(old, new)]
+    for _, text in pairs:
+        if not isinstance(text, str):
+            raise TypeError("new must be text, not {!r}".format(text))
+        if not text.strip():
+            raise ValueError("new must not be empty: erase() takes text out")
+    patterns = _patterns([target for target, _ in pairs], caller="replace()")
+    ink, paint, face = _color(color), _color(background), _font_named(font)
+
+    def written(index: int, match: "re.Match[str]") -> str:
+        target, text = pairs[index]
+        if not isinstance(target, re.Pattern):
+            return text
+        try:
+            return match.expand(text)
+        except re.error as error:
+            raise ValueError("new can't stand in for {!r}: {}".format(patterns[index][0], error)) from None
+
+    return _edited(path, output, patterns, pages, password, paint=paint, written=written, ink=ink, font=face)
