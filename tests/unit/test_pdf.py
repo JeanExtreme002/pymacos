@@ -1102,6 +1102,7 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
 @pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
 def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     import dataclasses
+    import re
 
     from tests.helpers import pdf_with_text
 
@@ -1144,6 +1145,13 @@ def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     done = macos.pdf.replace(source, tmp_path / "dict.pdf", {hits[2]: "Maria Lima", "Contrato": "Acordo"})
     assert done.matches == {"Ana Souza": 1, "Contrato": 1} and done.pages == {1: 1, 2: 1}
     assert macos.pdf.text(done.path, [2]) == "Maria Lima" and "Assinado por Ana Souza" in seen(done.path, 1)
+
+    # A match of a text that overlaps itself: the last "ana" of "banana" is a match, and no less chosen for it.
+    fruit = tmp_path / "fruit.pdf"
+    fruit.write_bytes(pdf_with_text([("banana", 72, 700)]))
+    (last,) = macos.pdf.find(fruit, re.compile(r"ana$"))
+    assert last.box[0] > 90 and macos.pdf.erase(fruit, tmp_path / "fruit-out.pdf", last).matches == {"ana": 1}
+    assert _dominant(tmp_path / "fruit-out.pdf", tmp_path, _pixels(last.box)) == "#ffffff"
 
     (stale,) = macos.pdf.find(other, "Maria Lima")
     (elsewhere,) = macos.pdf.find(other, "Ana Souza")  # a text page 1 holds, but not there

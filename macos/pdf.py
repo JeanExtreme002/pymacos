@@ -2709,19 +2709,45 @@ def _located(
         for match in pattern.finditer(content):
             if not match.group():
                 continue
-            start, end = offsets[match.start()], offsets[match.end()]
-            selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
-            if not selection:
-                raise MacOSError("{!r} is on page {}, but where it's drawn can't be told".format(label, number))
-            lines = list(_objc.nsarray(_objc.send(selection, "selectionsByLine"))) or [selection]
-            boxes = []
-            for line in lines:
-                x, y, width, height = _seen_box(
-                    page, _objc.send(line, "boundsForPage:", page, argtypes=(_objc.id,), restype=_objc.CGRect)
-                )
-                boxes.append((x, y, width, height))
-            found.append((index, match, boxes))
+            found.append((index, match, _drawn_at(page, number, label, offsets[match.start()], offsets[match.end()])))
     return found
+
+
+def _drawn_at(page: int, number: int, label: str, start: int, end: int) -> List[Box]:
+    """
+    The boxes, as the page is seen, of the text of ``page`` (number ``number``) from ``start`` to ``end``
+    (UTF-16 units, as PDFKit counts): one per line it takes. ``label`` names the text when PDFKit can't
+    place it, which raises.
+    """
+    selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
+    if not selection:
+        raise MacOSError("{!r} is on page {}, but where it's drawn can't be told".format(label, number))
+    lines = list(_objc.nsarray(_objc.send(selection, "selectionsByLine"))) or [selection]
+    boxes = []
+    for line in lines:
+        x, y, width, height = _seen_box(
+            page, _objc.send(line, "boundsForPage:", page, argtypes=(_objc.id,), restype=_objc.CGRect)
+        )
+        boxes.append((x, y, width, height))
+    return boxes
+
+
+def _placed(page: int, number: int, texts: Iterable[str]) -> Dict[str, List[List[Box]]]:
+    """
+    Where ``page`` (number ``number``) holds each of ``texts``, as it holds them (case and spacing
+    included): the boxes of every place, overlapping ones too ("ana" is twice in "banana"), as the page
+    is seen. Each text is searched once, however many matches of it are being checked.
+    """
+    content = _objc.pystring(_objc.send(page, "string")) or ""
+    offsets = _utf16_offsets(content)
+    placed: Dict[str, List[List[Box]]] = {}
+    for text in dict.fromkeys(texts):
+        places = placed[text] = []
+        start = content.find(text) if text else -1
+        while start >= 0:
+            places.append(_drawn_at(page, number, text, offsets[start], offsets[start + len(text)]))
+            start = content.find(text, start + 1)
+    return placed
 
 
 def find(
@@ -2918,9 +2944,9 @@ def _edited(
                 on_page = [(index, hit) for index, hit in given if hit.page == number]
                 if on_page:
                     # Each match as the page holds it now: its text, placed where the match says it is.
-                    placed = _located(page, number, [(hit.text, re.compile(re.escape(hit.text))) for _, hit in on_page])
-                    for which, (index, hit) in enumerate(on_page):
-                        lines = next((boxes for i, _, boxes in placed if i == which and _same(boxes, hit.lines)), None)
+                    placed = _placed(page, number, (hit.text for _, hit in on_page))
+                    for index, hit in on_page:
+                        lines = next((boxes for boxes in placed[hit.text] if _same(boxes, hit.lines)), None)
                         if lines is None:
                             raise ValueError(
                                 "page {} doesn't hold {!r} where the match says: find() it on this PDF".format(number, hit.text)
