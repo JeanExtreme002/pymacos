@@ -147,9 +147,10 @@ def pdf_with_images(images):
     return bytes(out)
 
 
-def pdf_with_text(lines, rotate=0, crop=None, invisible=(), annotations=(), title=None):
+def pdf_with_text(lines, rotate=0, crop=None, invisible=(), annotations=(), title=None, font="Helvetica"):
     """
-    A one-page Letter PDF, written by hand, with each ``(text, x, y)`` in 18-point Helvetica.
+    A one-page Letter PDF, written by hand, with each ``(text, x, y)`` in 18-point ``font``: Helvetica, or
+    another of the PDF standard 14 (``"Times-Bold"``) that a reader has without the PDF carrying it.
 
     ``crop`` is a CropBox, ``(left, bottom, right, top)``: the part of the page that shows.
     The lines whose index is in ``invisible`` are drawn invisibly, as OCR adds its text.
@@ -172,7 +173,7 @@ def pdf_with_text(lines, rotate=0, crop=None, invisible=(), annotations=(), titl
             cropped, rotate, " /Annots [{}]".format(listed) if annotations else ""
         ),
         "<< /Length {} >>\nstream\n{}\nendstream".format(len(drawing), drawing),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /{} >>".format(font),
         *("<< /Type /Annot {} >>".format(body) for body in annotations),
     ]
     if title is not None:

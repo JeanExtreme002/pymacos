@@ -974,6 +974,7 @@ def test_find_tells_where_a_text_is(tmp_path):
     assert [(match.page, match.text.split()) for match in name] == [(1, ["Ana", "Souza"]), (2, ["Ana", "Souza"])]
     split, whole = name
     assert len(split.lines) == 2 and whole.lines == (whole.box,)
+    assert (whole.font, whole.size) == ("Helvetica", 18.0)
     # "Ana" ends the first line (from x ≈ 170) and "Souza" starts the second (x = 72), in 18-point type: the box
     # around both starts at the margin, under the second line, and is two lines tall.
     assert 70 < split.box[0] < 75 and 672 < split.box[1] < 682 and 30 < split.box[3] < 45
@@ -1071,6 +1072,13 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
 
     renamed = macos.pdf.replace(source, tmp_path / "renamed.pdf", re.compile(r"Ana (\w+)"), r"Maria \1", font="Helvetica-Bold")
     assert macos.pdf.text(renamed.path) == "Maria Souza"
+    (bold,) = macos.pdf.find(renamed.path, "Maria Souza")
+    assert (bold.font, bold.size) == ("Helvetica-Bold", 18.0)
+
+    smaller = macos.pdf.replace(source, tmp_path / "smaller.pdf", "Ana Souza", "Maria Lima", size=9)
+    (small,) = macos.pdf.find(smaller.path, "Maria Lima")
+    assert small.size == 9.0 and abs(small.box[0] - old.box[0]) < 2 and abs(small.box[1] - old.box[1]) < 3
+    assert abs(small.box[3] - old.box[3] / 2) < 2
 
     # Several at once: a replaced page is a picture, so a second call would find nothing left on it.
     both = macos.pdf.replace(source, tmp_path / "both.pdf", {"Ana Souza": "Maria Lima", "Anexo": "Apêndice"})
@@ -1083,6 +1091,8 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
         ({"new": " "}, ValueError, "new must not be empty"),
         ({"new": 3}, TypeError, "new must be text"),
         ({"font": "NoSuchFont-Bold"}, ValueError, "no font is named"),
+        ({"size": 0}, ValueError, "size must be positive"),
+        ({"size": "big"}, ValueError, "size must be positive"),
         ({"color": "black"}, ValueError, "hex color"),
         ({"old": "Maria"}, ValueError, "isn't on the PDF, so nothing was written"),
         ({"old": re.compile("Ana"), "new": r"\2"}, ValueError, "can't stand in"),
@@ -1167,6 +1177,35 @@ def test_erase_and_replace_take_the_matches_chosen(tmp_path):
     with pytest.raises(ValueError, match="the match of 'Ana Souza' on page 1 isn't among the pages given"):
         macos.pdf.erase(source, tmp_path / "never.pdf", hits[0], pages=[2])
     assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_replace_writes_in_the_font_the_old_text_has(tmp_path, monkeypatch):
+    from tests.helpers import pdf_with_text
+
+    # A font the Mac has: the new text is written in it, so it's as wide as the old one was.
+    times = tmp_path / "times.pdf"
+    times.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)], font="Times-Bold"))
+    (old,) = macos.pdf.find(times, "Ana Souza")
+    assert (old.font, old.size) == ("Times-Bold", 18.0)
+    done = macos.pdf.replace(times, tmp_path / "times-out.pdf", "Ana Souza", "Ana Souza")
+    (new,) = macos.pdf.find(done.path, "Ana Souza")
+    assert (new.font, new.size) == ("Times-Bold", 18.0)
+    assert abs(new.box[2] - old.box[2]) < 1 and abs(new.box[0] - old.box[0]) < 1 and abs(new.box[1] - old.box[1]) < 1
+
+    # A font the Mac hasn't: Helvetica, at the old text's size.
+    monkeypatch.setattr(macos.pdf, "_installed", lambda font: font != "Times-Bold")
+    done = macos.pdf.replace(times, tmp_path / "missing-out.pdf", "Ana Souza", "Maria Lima")
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert (new.font, new.size) == ("Helvetica", 18.0) and abs(new.box[0] - old.box[0]) < 1
+
+    # A font PDFKit can't tell: Helvetica, sized to the old text's box.
+    monkeypatch.setattr(macos.pdf, "_face_of", lambda selection: None)
+    assert macos.pdf.find(times, "Ana Souza")[0].font is None
+    done = macos.pdf.replace(times, tmp_path / "untold-out.pdf", "Ana Souza", "Maria Lima")
+    monkeypatch.undo()
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert new.font == "Helvetica" and abs(new.box[3] - old.box[3]) < 3 and abs(new.box[1] - old.box[1]) < 3
 
 
 @pytest.mark.parametrize("angle", [90, 180, 270])

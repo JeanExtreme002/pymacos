@@ -289,7 +289,8 @@ in "Banana"), or as a compiled {mod}`re` pattern. Each
 its `box`: `(x, y, width, height)` in points from the page's bottom-left
 corner, as the page is seen, which is where {func}`~macos.pdf.sign` and
 {func}`~macos.pdf.add_text` take a `position`. A text split over two lines is
-one match, with the box of each line in `lines`. `pages` narrows the search,
+one match, with the box of each line in `lines`. `font` and `size` tell what
+the text is written in, when PDFKit can tell. `pages` narrows the search,
 and a text that isn't there gives `[]`. Only what the PDF holds as text is
 found: run {func}`~macos.pdf.ocr` first on a scan.
 
@@ -310,6 +311,8 @@ macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"}) 
 hits = macos.pdf.find("contract.pdf", "Ana Souza")                          # five of them
 macos.pdf.replace("contract.pdf", "renamed.pdf", hits[:2], "Maria Lima")    # the first two only
 macos.pdf.erase("contract.pdf", "trimmed.pdf", [hits[3]])                   # the fourth only
+
+macos.pdf.replace("note.pdf", "bold.pdf", "Note", "NOTE", font="Arial-BoldMT", size=10)
 ```
 
 The targets are found as {func}`~macos.pdf.find` finds them, and edited
@@ -317,12 +320,15 @@ wherever they show. To edit some of those places and not the others, pass the
 matches {func}`~macos.pdf.find` gave instead: one, a list of them, or the keys
 of the dict; they go along with texts and patterns. A match from another PDF,
 or one that an edit has since made stale, is refused. The new text goes
-where the old one was, from its left edge and at its size, in `font`
-(Helvetica by default, since a PDF's own fonts can't be written with) and
-`color`; `background` is the color painted where the old text was, white by
-default. A longer text runs past where the old one ended, so look over the
-result. The {class}`~macos.pdf.Edit` they return tells how many times each
-target was found, and on which pages.
+where the old one was, from its left edge, in the font and at the size the
+old text has (a match's `font` and `size`), as long as the Mac has that
+font: Helvetica otherwise, since a PDF's own fonts can't be written with. A
+`font` of the Mac, by its PostScript name (`"Arial-BoldMT"`; see
+{func}`~macos.system.fonts`), or a `size` in points is written in instead;
+`color` is the text's color, and `background` the color painted where the
+old text was, white by default. A longer or bigger text runs past where the
+old one was, so look over the result. The {class}`~macos.pdf.Edit` they
+return tells how many times each target was found, and on which pages.
 
 A PDF holds its text as drawing instructions, in fonts that carry only the
 letters the PDF uses, so a page's text can't be edited in place. Instead, as

@@ -1846,6 +1846,7 @@ def images(
 
 Target = Union[str, "re.Pattern[str]"]
 Box = Tuple[float, float, float, float]
+Face = Tuple[str, float]  # a font's PostScript name and its size in points
 
 
 _REDACTION_SCALE = 3.0  # 216 dots per inch: sharp enough to read and print the rest of the page
@@ -2626,6 +2627,13 @@ class Match:
     """
     lines: Tuple[Box, ...]
     """The box of each line the text takes: one, unless a line break splits it."""
+    font: Optional[str] = None
+    """
+    The PostScript name of the font the text is in (``"ArialMT"``, ``"Helvetica-Bold"``), when PDFKit
+    tells it: what :func:`replace` writes the new text in, when this Mac has that font.
+    """
+    size: Optional[float] = None
+    """The size of that font in points, when PDFKit tells it: what :func:`replace` writes the new text at."""
 
 
 @dataclass(frozen=True)
@@ -2695,10 +2703,11 @@ def _around(boxes: Sequence[Box]) -> Box:
 
 def _located(
     page: int, number: int, patterns: Sequence[Tuple[str, "re.Pattern[str]"]]
-) -> List[Tuple[int, "re.Match[str]", List[Box]]]:
+) -> List[Tuple[int, "re.Match[str]", List[Box], Optional[Face]]]:
     """
     Each match of ``patterns`` in the text of ``page`` (number ``number``), pattern by pattern, in reading
-    order: the index of its pattern, the match, and its boxes as the page is seen, one per line it takes.
+    order: the index of its pattern, the match, its boxes as the page is seen, one per line it takes, and
+    its font, when PDFKit tells it.
 
     A match PDFKit can't place raises: :func:`find` would report it nowhere, and :func:`erase` leave it.
     """
@@ -2709,15 +2718,17 @@ def _located(
         for match in pattern.finditer(content):
             if not match.group():
                 continue
-            found.append((index, match, _drawn_at(page, number, label, offsets[match.start()], offsets[match.end()])))
+            boxes, face = _drawn_at(page, number, label, offsets[match.start()], offsets[match.end()])
+            found.append((index, match, boxes, face))
     return found
 
 
-def _drawn_at(page: int, number: int, label: str, start: int, end: int) -> List[Box]:
+def _drawn_at(page: int, number: int, label: str, start: int, end: int) -> Tuple[List[Box], Optional[Face]]:
     """
     The boxes, as the page is seen, of the text of ``page`` (number ``number``) from ``start`` to ``end``
-    (UTF-16 units, as PDFKit counts): one per line it takes. ``label`` names the text when PDFKit can't
-    place it, which raises.
+    (UTF-16 units, as PDFKit counts), one per line it takes, and the font of its first letter (its
+    PostScript name and its size in points), when PDFKit tells it. ``label`` names the text when PDFKit
+    can't place it, which raises.
     """
     selection = _objc.send(page, "selectionForRange:", _files.NSRange(start, end - start), argtypes=(_files.NSRange,))
     if not selection:
@@ -2729,18 +2740,40 @@ def _drawn_at(page: int, number: int, label: str, start: int, end: int) -> List[
             page, _objc.send(line, "boundsForPage:", page, argtypes=(_objc.id,), restype=_objc.CGRect)
         )
         boxes.append((x, y, width, height))
-    return boxes
+    return boxes, _face_of(selection)
 
 
-def _placed(page: int, number: int, texts: Iterable[str]) -> Dict[str, List[List[Box]]]:
+def _face_of(selection: int) -> Optional[Face]:
+    """The font of the first letter of a ``PDFSelection``, when PDFKit tells it: a font the PDF names but
+    doesn't carry may come with none."""
+    attributed = _objc.send(selection, "attributedString")
+    if not attributed or not _objc.send(attributed, "length", restype=NSUInteger):
+        return None
+    effective = _files.NSRange(0, 0)
+    typeface = _objc.send(
+        attributed,
+        "attribute:atIndex:effectiveRange:",
+        _objc.nsstring("NSFont"),  # NSFontAttributeName
+        0,
+        ctypes.byref(effective),
+        argtypes=(_objc.id, NSUInteger, ctypes.c_void_p),
+    )
+    if not typeface:
+        return None
+    name = _objc.pystring(_objc.send(typeface, "fontName"))
+    size = float(_objc.send(typeface, "pointSize", restype=ctypes.c_double))
+    return (name, size) if name and size > 0 else None
+
+
+def _placed(page: int, number: int, texts: Iterable[str]) -> Dict[str, List[Tuple[List[Box], Optional[Face]]]]:
     """
     Where ``page`` (number ``number``) holds each of ``texts``, as it holds them (case and spacing
     included): the boxes of every place, overlapping ones too ("ana" is twice in "banana"), as the page
-    is seen. Each text is searched once, however many matches of it are being checked.
+    is seen, with the font of each. Each text is searched once, however many matches of it are being checked.
     """
     content = _objc.pystring(_objc.send(page, "string")) or ""
     offsets = _utf16_offsets(content)
-    placed: Dict[str, List[List[Box]]] = {}
+    placed: Dict[str, List[Tuple[List[Box], Optional[Face]]]] = {}
     for text in dict.fromkeys(texts):
         places = placed[text] = []
         start = content.find(text) if text else -1
@@ -2777,7 +2810,8 @@ def find(
     narrows the search; an empty ``pages`` (``[]``) looks nowhere. It returns
     ``[]`` when the text isn't there. Each box is in points from the bottom-left
     corner of its page, as the page is seen: what :func:`sign` and
-    :func:`add_text` take as a ``position``. The matches are what :func:`erase`
+    :func:`add_text` take as a ``position``. ``font`` and ``size`` tell what the
+    text is written in, when PDFKit can tell. The matches are what :func:`erase`
     and :func:`replace` take to edit some of the places a text shows, and not
     the others.
 
@@ -2792,41 +2826,64 @@ def find(
         for number in numbers:
             # A pool per page: searching one makes strings and selections, all done with once it's searched.
             with _objc.autorelease_pool():
-                for _, match, boxes in _located(_page(document, number), number, [(label, pattern)]):
-                    found.append(Match(page=number, text=match.group(), box=_around(boxes), lines=tuple(boxes)))
+                for _, match, boxes, face in _located(_page(document, number), number, [(label, pattern)]):
+                    name, size = face if face else (None, None)
+                    found.append(
+                        Match(page=number, text=match.group(), box=_around(boxes), lines=tuple(boxes), font=name, size=size)
+                    )
         return found
+
+
+@lru_cache(maxsize=None)
+def _installed(font: str) -> bool:
+    """Whether this Mac has a font named ``font``: a PostScript name ("Arial-BoldMT") or a family's ("Arial")."""
+    framework("AppKit")
+    typeface = _objc.send(
+        _objc.cls("NSFont"), "fontWithName:size:", _objc.nsstring(font), 12.0, argtypes=(_objc.id, ctypes.c_double)
+    )
+    return bool(typeface)
 
 
 def _font_named(font: Optional[str]) -> str:
     """The name of a font of this Mac: ``font`` checked, or Helvetica when none is given."""
     if font is None:
         return "Helvetica"
-    framework("AppKit")
-    typeface = _objc.send(
-        _objc.cls("NSFont"), "fontWithName:size:", _objc.nsstring(font), 12.0, argtypes=(_objc.id, ctypes.c_double)
-    )
-    if not typeface:
+    if not _installed(font):
         raise ValueError("no font is named {!r}; see macos.system.fonts()".format(font))
     return font
 
 
 def _write_over(
-    graphics: ctypes.CDLL, core_text: ctypes.CDLL, context: int, text: str, box: Box, font: str, rotation: int
+    graphics: ctypes.CDLL,
+    core_text: ctypes.CDLL,
+    context: int,
+    text: str,
+    box: Box,
+    rotation: int,
+    face: Optional[Face],
+    font: Optional[str],
+    size: Optional[float],
 ) -> None:
     """
-    Write ``text`` in ``font`` over ``box``, a line's box as the page is seen: from where the line starts, on
-    its baseline, sized to its height, running the way lines run on a page shown turned by ``rotation``
-    degrees (down on one turned 90, up on one turned 270).
+    Write ``text`` over ``box``, a line's box as the page is seen: from where the line starts, on its
+    baseline, running the way lines run on a page shown turned by ``rotation`` degrees (down on one turned
+    90, up on one turned 270). In ``font``, or else in the font of ``face`` (the old text's, when PDFKit
+    told it) when this Mac has it, or else Helvetica; at ``size`` points, or else the old text's, or else
+    as tall as the box.
     """
     if not text.strip():
         return
     x, y, width, height = box
     turn = rotation % 360 if rotation % 360 in (90, 180, 270) else 0
-    tall = width if turn % 180 else height  # the height of a line seen turned on its side is its box's width
-    probe, _, ascent, descent = _typeset(text, 1.0, font)
-    _cf.release(probe)
-    size = tall / max(ascent + descent, 1e-6)
-    line, _, _, descent = _typeset(text, size, font)
+    name = font or (face[0] if face and _installed(face[0]) else "Helvetica")
+    if size is None and face:
+        size = face[1]
+    if size is None:
+        tall = width if turn % 180 else height  # the height of a line seen turned on its side is its box's width
+        probe, _, ascent, descent = _typeset(text, 1.0, name)
+        _cf.release(probe)
+        size = tall / max(ascent + descent, 1e-6)
+    line, _, _, descent = _typeset(text, size, name)
     # Where the line starts, as seen, its baseline ``descent`` in from the bottom of the letters.
     starts = {0: (x, y + descent), 90: (x + descent, y + height), 180: (x + width, y + height - descent)}
     left, bottom = starts.get(turn, (x + width - descent, y))
@@ -2846,14 +2903,16 @@ def _repaint(
     number: int,
     boxes: Sequence[Box],
     paint: Tuple[float, float, float],
-    labels: Sequence[Tuple[str, Box]],
+    labels: Sequence[Tuple[str, Box, Optional[Face]]],
     ink: Tuple[float, float, float],
-    font: str,
+    font: Optional[str],
+    size: Optional[float],
 ) -> None:
     """
     Replace page ``number`` with a picture of it, the ``boxes`` painted over in ``paint``, and each of
-    ``labels`` (a text, and the box it goes over) written over the picture as text, in ``ink`` and ``font``:
-    the old text is gone, not covered, and what's written selects and searches.
+    ``labels`` (a text, the box it goes over, and the font of what was there) written over the picture as
+    text, in ``ink``, as :func:`_write_over` takes ``font`` and ``size``: the old text is gone, not covered,
+    and what's written selects and searches.
 
     As :func:`_flatten` does, but through a one-page PDF drawn in memory, since a page made of a picture
     can't hold the labels as text. That PDF is autoreleased: it lives as long as the pool around
@@ -2880,8 +2939,8 @@ def _repaint(
             graphics.CGContextBeginPage(context, ctypes.byref(frame))
             graphics.CGContextDrawImage(context, frame, picture)  # embedded as the JPEG it is
             graphics.CGContextSetRGBFillColor(context, ink[0], ink[1], ink[2], 1.0)
-            for text, box in labels:
-                _write_over(graphics, core_text, context, text, box, font, rotation)
+            for text, box, face in labels:
+                _write_over(graphics, core_text, context, text, box, rotation, face, font, size)
             graphics.CGContextEndPage(context)
             graphics.CGPDFContextClose(context)
         finally:
@@ -2910,14 +2969,15 @@ def _edited(
     paint: Tuple[float, float, float],
     written: Optional[Callable[[int, Optional["re.Match[str]"]], str]] = None,
     ink: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-    font: str = "Helvetica",
+    font: Optional[str] = None,
+    size: Optional[float] = None,
 ) -> Edit:
     """
     Save to ``output`` the PDF at ``path`` with every page that holds one of ``targets`` (each a label and
     a pattern, searched among ``pages`` or all of them, or a :class:`Match` of :func:`find`, on its own page)
     redrawn, the matches painted over in ``paint`` and, with ``written``, what it gives for each match (its
-    target's index, and the :class:`re.Match` of a pattern) written over the match's first line, in ``ink``
-    and ``font``.
+    target's index, and the :class:`re.Match` of a pattern) written over the match's first line, in ``ink``,
+    and in ``font`` and at ``size`` as :func:`_write_over` takes them (the old text's, by default).
 
     What :func:`erase` and :func:`replace` share. A pattern without a match, or a :class:`Match` the PDF
     doesn't hold where it says (one of another PDF, or made stale by an edit or a turn), raises, writing nothing.
@@ -2932,37 +2992,37 @@ def _edited(
                 raise ValueError("the match of {!r} on page {} isn't among the pages given".format(hit.text, hit.page))
         counts = [0] * len(targets)
         per_page: Dict[int, int] = {}
-        planned: Dict[int, Tuple[List[Box], List[Tuple[str, Box]]]] = {}
+        planned: Dict[int, Tuple[List[Box], List[Tuple[str, Box, Optional[Face]]]]] = {}
         for number in numbers:
-            found: List[Tuple[int, Optional["re.Match[str]"], List[Box]]] = []
+            found: List[Tuple[int, Optional["re.Match[str]"], List[Box], Optional[Face]]] = []
             # A pool per page: searching one makes strings and selections, all done with once it's searched.
             with _objc.autorelease_pool():
                 page = _page(document, number)
                 if searched:
                     located = _located(page, number, [(label, pattern) for _, label, pattern in searched])
-                    found += [(searched[which][0], match, lines) for which, match, lines in located]
+                    found += [(searched[which][0], match, lines, face) for which, match, lines, face in located]
                 on_page = [(index, hit) for index, hit in given if hit.page == number]
                 if on_page:
                     # Each match as the page holds it now: its text, placed where the match says it is.
                     placed = _placed(page, number, (hit.text for _, hit in on_page))
                     for index, hit in on_page:
-                        lines = next((boxes for boxes in placed[hit.text] if _same(boxes, hit.lines)), None)
-                        if lines is None:
+                        there = next((place for place in placed[hit.text] if _same(place[0], hit.lines)), None)
+                        if there is None:
                             raise ValueError(
                                 "page {} doesn't hold {!r} where the match says: find() it on this PDF".format(number, hit.text)
                             )
-                        found.append((index, None, lines))
+                        found.append((index, None, there[0], there[1]))
             if not found:
                 continue
             boxes: List[Box] = []
-            labels: List[Tuple[str, Box]] = []
-            for index, match, lines in found:
+            labels: List[Tuple[str, Box, Optional[Face]]] = []
+            for index, match, lines, face in found:
                 counts[index] += 1
                 # A box with no size (text drawn hidden) has nothing to paint over: redrawing the page is
                 # what takes the text away.
                 boxes += [box for box in lines if box[2] > 0 and box[3] > 0]
                 if written is not None and lines[0][3] > 0:
-                    labels.append((written(index, match), lines[0]))
+                    labels.append((written(index, match), lines[0], face))
             per_page[number] = len(found)
             planned[number] = (boxes, labels)
         missing = [repr(label) for (label, target), count in zip(targets, counts) if not count and not isinstance(target, Match)]
@@ -2973,7 +3033,7 @@ def _edited(
             )
         # No pool per page here: each redrawn page reads from a PDF in memory that has to outlive the save.
         for number, (boxes, labels) in planned.items():
-            _repaint(document, number, boxes, paint, labels, ink, font)
+            _repaint(document, number, boxes, paint, labels, ink, font, size)
         saved = _save(document, output)
     matches: Dict[str, int] = {}
     for (label, _), count in zip(targets, counts):
@@ -3035,6 +3095,7 @@ def replace(
     color: str = "#000000",
     background: str = "#ffffff",
     font: Optional[str] = None,
+    size: Optional[float] = None,
     pages: Optional[Iterable[int]] = None,
     password: Optional[str] = None,
 ) -> Edit:
@@ -3050,6 +3111,7 @@ def replace(
 
         hits = macos.pdf.find("list.pdf", "Ana Souza")                             # 5 of them
         macos.pdf.replace("list.pdf", "renamed.pdf", hits[:2], "Maria Lima")       # the first two only
+        macos.pdf.replace("note.pdf", "bold.pdf", "Note", "NOTE", font="Arial-BoldMT", size=10)
 
     ``old`` is found as :func:`find` finds a text: as whole words, ignoring case
     and any spacing or line break between them, or as a compiled :mod:`re`
@@ -3057,12 +3119,15 @@ def replace(
     wherever it shows. To replace some of those places and not the others,
     ``old`` is a match :func:`find` gave for this PDF, or a list of them (a
     list of texts and patterns is taken too), all replaced by ``new``. ``new``
-    is written where each match was, from its left edge and at its size, in ``font``
-    (Helvetica by default: a PDF's own fonts can't be written with) and
-    ``color``, a hex color; ``background`` is the hex color painted over the
-    match first, white by default. A longer ``new`` runs past where the old
-    text ended, so look over the result. A match split over two lines is
-    painted over on both, and ``new`` written on the first.
+    is written where each match was, from its left edge, in the font and at
+    the size the old text has (what :func:`find` reports as a match's ``font``
+    and ``size``), as long as this Mac has that font: Helvetica otherwise. A
+    ``font`` of this Mac (a PostScript name, ``"Arial-BoldMT"``; see
+    :func:`macos.system.fonts`) or a ``size`` in points is written in instead.
+    ``color`` is a hex color; ``background`` is the hex color painted over the
+    match first, white by default. A longer or bigger ``new`` runs past where
+    the old text was, so look over the result. A match split over two lines
+    is painted over on both, and ``new`` written on the first.
 
     Several replacements go in one call, as a dict of ``old`` (texts,
     patterns or matches) to ``new``, with no ``new`` argument: a replaced page
@@ -3094,7 +3159,11 @@ def replace(
         if not text.strip():
             raise ValueError("new must not be empty: erase() takes text out")
     targets = _chosen([target for target, _ in pairs], "replace()")
-    ink, paint, face = _color(color), _color(background), _font_named(font)
+    ink, paint = _color(color), _color(background)
+    if font is not None:
+        _font_named(font)
+    if size is not None and (isinstance(size, bool) or not isinstance(size, Real) or size <= 0):
+        raise ValueError("size must be positive, not {!r}".format(size))
 
     def written(index: int, match: Optional["re.Match[str]"]) -> str:
         target, text = pairs[index]
@@ -3105,4 +3174,4 @@ def replace(
         except re.error as error:
             raise ValueError("new can't stand in for {!r}: {}".format(targets[index][0], error)) from None
 
-    return _edited(path, output, targets, pages, password, paint=paint, written=written, ink=ink, font=face)
+    return _edited(path, output, targets, pages, password, paint=paint, written=written, ink=ink, font=font, size=size)
