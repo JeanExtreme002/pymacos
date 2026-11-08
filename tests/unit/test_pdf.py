@@ -1078,7 +1078,8 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
         ({"color": "black"}, ValueError, "hex color"),
         ({"old": "Maria"}, ValueError, "isn't on the PDF, so nothing was written"),
         ({"old": re.compile("Ana"), "new": r"\2"}, ValueError, "can't stand in"),
-        ({"old": ["Ana"]}, ValueError, r"replace\(\) takes texts"),
+        ({"old": [["Ana"]]}, ValueError, r"replace\(\) takes texts"),
+        ({"old": [], "new": "x"}, ValueError, "at least one text, pattern or match"),
         ({"old": {"Ana": "x"}}, TypeError, "new goes in it"),
         ({"old": {}, "new": None}, ValueError, "at least one replacement"),
         ({"old": {"Ana": ""}, "new": None}, ValueError, "new must not be empty"),
@@ -1087,4 +1088,64 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
         arguments = {"old": "Ana Souza", "new": "x", **wrong}
         with pytest.raises(error, match=message):
             macos.pdf.replace(source, tmp_path / "never.pdf", arguments.pop("old"), arguments.pop("new"), **arguments)
+    assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_erase_and_replace_take_the_matches_chosen(tmp_path):
+    import dataclasses
+
+    from tests.helpers import pdf_with_text
+
+    first, second, other = tmp_path / "1.pdf", tmp_path / "2.pdf", tmp_path / "other.pdf"
+    first.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700), ("Assinado por Ana Souza", 72, 650)]))
+    second.write_bytes(pdf_with_text([("Anexo de Ana Souza", 72, 700)]))
+    other.write_bytes(pdf_with_text([("Maria Lima", 72, 700)]))
+    source = macos.pdf.merge([first, second], tmp_path / "in.pdf")
+    hits = macos.pdf.find(source, "Ana Souza")
+    assert [hit.page for hit in hits] == [1, 1, 2]
+
+    def seen(path, page):
+        return macos.vision.text(macos.pdf.render(path, page, size=1600))
+
+    done = macos.pdf.erase(source, tmp_path / "first.pdf", hits[0])  # one match: the first of the three
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert seen(done.path, 1).count("Souza") == 1 and "Assinado por Ana Souza" in seen(done.path, 1)
+    assert macos.pdf.text(done.path, [2]) == "Anexo de Ana Souza"  # page 2 wasn't touched
+    assert _dominant(done.path, tmp_path, _pixels(hits[0].box)) == "#ffffff"
+
+    done = macos.pdf.erase(source, tmp_path / "last.pdf", hits[1:])  # a list: the second and the third
+    assert done.matches == {"Ana Souza": 2} and done.pages == {1: 1, 2: 1}
+    assert macos.pdf.text(done.path, [1]) == "" and "Contrato de Ana Souza" in seen(done.path, 1)
+    assert "Souza" not in seen(done.path, 2)
+
+    done = macos.pdf.erase(source, tmp_path / "mixed.pdf", ["Anexo", hits[1]])  # along with a text
+    assert done.matches == {"Anexo": 1, "Ana Souza": 1} and done.pages == {1: 1, 2: 1}
+    assert "Assinado por" in seen(done.path, 1) and seen(done.path, 1).count("Souza") == 1
+
+    done = macos.pdf.replace(source, tmp_path / "renamed.pdf", hits[1], "Maria Lima")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert macos.pdf.text(done.path, [1]) == "Maria Lima" and macos.pdf.text(done.path, [2]) == "Anexo de Ana Souza"
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert abs(new.box[0] - hits[1].box[0]) < 2 and abs(new.box[1] - hits[1].box[1]) < 3
+    assert "Contrato de Ana Souza" in seen(done.path, 1)
+
+    done = macos.pdf.replace(source, tmp_path / "two.pdf", hits[:2], "Maria Lima")  # a list, one new text
+    assert done.matches == {"Ana Souza": 2} and macos.pdf.text(done.path, [1]).split("\n") == ["Maria Lima", "Maria Lima"]
+
+    done = macos.pdf.replace(source, tmp_path / "dict.pdf", {hits[2]: "Maria Lima", "Contrato": "Acordo"})
+    assert done.matches == {"Ana Souza": 1, "Contrato": 1} and done.pages == {1: 1, 2: 1}
+    assert macos.pdf.text(done.path, [2]) == "Maria Lima" and "Assinado por Ana Souza" in seen(done.path, 1)
+
+    (stale,) = macos.pdf.find(other, "Maria Lima")
+    for targets, message in (
+        ([hits[0], hits[0]], "the match of 'Ana Souza' on page 1 is given more than once"),
+        (stale, "page 1 doesn't hold 'Maria Lima' where the match says"),
+        (dataclasses.replace(hits[0], page=3), "page 3 is out of range"),
+        ([hits[0], 3], r"erase\(\) takes texts, compiled patterns and matches"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            macos.pdf.erase(source, tmp_path / "never.pdf", targets)
+    with pytest.raises(ValueError, match="the match of 'Ana Souza' on page 1 isn't among the pages given"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", hits[0], pages=[2])
     assert not (tmp_path / "never.pdf").exists()

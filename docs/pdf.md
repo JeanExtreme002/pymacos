@@ -306,9 +306,17 @@ done.pages       # {1: 2, 2: 2}: the pages redrawn
 macos.pdf.replace("offer.pdf", "offer-2027.pdf", "2026", "2027")
 macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\w+)"), r"Maria \1", font="Helvetica-Bold")
 macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})    # both at once
+
+hits = macos.pdf.find("contract.pdf", "Ana Souza")                           # five of them
+macos.pdf.replace("contract.pdf", "renamed.pdf", hits[:2], "Maria Lima")    # the first two only
+macos.pdf.erase("contract.pdf", "trimmed.pdf", [hits[3]])                   # the fourth only
 ```
 
-The targets are found as {func}`~macos.pdf.find` finds them. The new text goes
+The targets are found as {func}`~macos.pdf.find` finds them, and edited
+wherever they show. To edit some of those places and not the others, pass the
+matches {func}`~macos.pdf.find` gave instead: one, a list of them, or the keys
+of the dict; they go along with texts and patterns. A match from another PDF,
+or one that an edit has since made stale, is refused. The new text goes
 where the old one was, from its left edge and at its size, in `font`
 (Helvetica by default, since a PDF's own fonts can't be written with) and
 `color`; `background` is the color painted where the old text was, white by

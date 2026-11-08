@@ -2635,7 +2635,10 @@ class Edit:
     path: Path
     """The edited PDF."""
     matches: Dict[str, int]
-    """How many times each target was found, by the target as given (a pattern by its source)."""
+    """
+    How many times each target was found, by the target as given: a pattern by its source, a
+    :class:`Match` by its text.
+    """
     pages: Dict[int, int]
     """The pages redrawn, with how many matches each had."""
 
@@ -2645,6 +2648,33 @@ def _single(target: Any, caller: str) -> Tuple[str, "re.Pattern[str]"]:
     if not isinstance(target, (str, re.Pattern)):
         raise TypeError("{} takes one text or compiled pattern, not {!r}".format(caller, target))
     return _patterns(target, caller=caller)[0]
+
+
+def _chosen(
+    targets: Union[Target, Match, Sequence[Union[Target, Match]]], caller: str
+) -> List[Tuple[str, Union["re.Pattern[str]", Match]]]:
+    """
+    The targets of ``caller`` (:func:`erase` or :func:`replace`) in the order given: each text or compiled
+    pattern as :func:`_patterns` reads it, and each :class:`Match` of :func:`find` labelled by its text.
+    """
+    items = [targets] if isinstance(targets, (str, re.Pattern, Match)) else list(targets)
+    if not items:
+        raise ValueError("{} needs at least one text, pattern or match".format(caller))
+    for item in items:
+        if not isinstance(item, (str, re.Pattern, Match)):
+            raise ValueError("{} takes texts, compiled patterns and matches of find(), not {!r}".format(caller, item))
+    matches = [item for item in items if isinstance(item, Match)]
+    repeated = [match for index, match in enumerate(matches) if match in matches[:index]]
+    if repeated:
+        raise ValueError(
+            "each target once: the match of {!r} on page {} is given more than once".format(repeated[0].text, repeated[0].page)
+        )
+    texts = [item for item in items if not isinstance(item, Match)]
+    patterns = iter(_patterns(texts, caller=caller) if texts else [])
+    chosen: List[Tuple[str, Union["re.Pattern[str]", Match]]] = []
+    for item in items:
+        chosen.append((item.text, item) if isinstance(item, Match) else next(patterns))
+    return chosen
 
 
 def _around(boxes: Sequence[Box]) -> Box:
@@ -2705,13 +2735,18 @@ def find(
         ssn = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
         macos.pdf.find("list.pdf", ssn, pages=[1])             # only on the first page
 
+        hits = macos.pdf.find("list.pdf", "Ana Souza")
+        macos.pdf.replace("list.pdf", "renamed.pdf", hits[:2], "Maria Lima")   # the first two only
+
     ``text`` is found as :func:`redact` finds its targets: as whole words,
     ignoring case and any spacing or line break between them ("Ana" isn't in
     "Banana"), or as a compiled :mod:`re` pattern. ``pages`` (numbered from 1)
     narrows the search; an empty ``pages`` (``[]``) looks nowhere. It returns
     ``[]`` when the text isn't there. Each box is in points from the bottom-left
     corner of its page, as the page is seen: what :func:`sign` and
-    :func:`add_text` take as a ``position``.
+    :func:`add_text` take as a ``position``. The matches are what :func:`erase`
+    and :func:`replace` take to edit some of the places a text shows, and not
+    the others.
 
     Only the text a PDF holds as text is found: not the words in a picture (a
     scan, a screenshot), unless :func:`ocr` added them. ``password`` opens an
@@ -2818,45 +2853,66 @@ def _repaint(
 def _edited(
     path: PathLike,
     output: PathLike,
-    patterns: Sequence[Tuple[str, "re.Pattern[str]"]],
+    targets: Sequence[Tuple[str, Union["re.Pattern[str]", Match]]],
     pages: Optional[Iterable[int]],
     password: Optional[str],
     *,
     paint: Tuple[float, float, float],
-    written: Optional[Callable[[int, "re.Match[str]"], str]] = None,
+    written: Optional[Callable[[int, Optional["re.Match[str]"]], str]] = None,
     ink: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     font: str = "Helvetica",
 ) -> Edit:
     """
-    Save to ``output`` the PDF at ``path`` with every page that holds a match of ``patterns`` (among
-    ``pages``, or all of them) redrawn, the matches painted over in ``paint`` and, with ``written``, what it
-    gives for each match written over the match's first line, in ``ink`` and ``font``.
+    Save to ``output`` the PDF at ``path`` with every page that holds one of ``targets`` (each a label and
+    a pattern, searched among ``pages`` or all of them, or a :class:`Match` of :func:`find`, on its own page)
+    redrawn, the matches painted over in ``paint`` and, with ``written``, what it gives for each match (its
+    target's index, and the :class:`re.Match` of a pattern) written over the match's first line, in ``ink``
+    and ``font``.
 
-    What :func:`erase` and :func:`replace` share. A target without a match raises, writing nothing.
+    What :func:`erase` and :func:`replace` share. A pattern without a match, or a :class:`Match` the PDF
+    doesn't hold where it says, raises, writing nothing.
     """
+    searched = [(index, label, target) for index, (label, target) in enumerate(targets) if isinstance(target, re.Pattern)]
+    given = [(index, target) for index, (_, target) in enumerate(targets) if isinstance(target, Match)]
     with _open(path, password) as document:
         numbers = list(dict.fromkeys(pages)) if pages is not None else range(1, _count(document) + 1)
-        counts = [0] * len(patterns)
+        for _, hit in given:
+            _page(document, hit.page)  # a page the PDF has
+            if hit.page not in numbers:
+                raise ValueError("the match of {!r} on page {} isn't among the pages given".format(hit.text, hit.page))
+        counts = [0] * len(targets)
         per_page: Dict[int, int] = {}
         planned: Dict[int, Tuple[List[Box], List[Tuple[str, Box]]]] = {}
         for number in numbers:
+            found: List[Tuple[int, Optional["re.Match[str]"], List[Box]]] = []
             # A pool per page: searching one makes strings and selections, all done with once it's searched.
             with _objc.autorelease_pool():
-                located = _located(_page(document, number), number, patterns)
-            if not located:
+                page = _page(document, number)
+                if searched:
+                    located = _located(page, number, [(label, pattern) for _, label, pattern in searched])
+                    found += [(searched[which][0], match, lines) for which, match, lines in located]
+                for index, hit in given:
+                    if hit.page != number:
+                        continue
+                    if hit.text not in (_objc.pystring(_objc.send(page, "string")) or ""):
+                        raise ValueError(
+                            "page {} doesn't hold {!r} where the match says: find() it on this PDF".format(number, hit.text)
+                        )
+                    found.append((index, None, list(hit.lines)))
+            if not found:
                 continue
             boxes: List[Box] = []
             labels: List[Tuple[str, Box]] = []
-            for index, match, lines in located:
+            for index, match, lines in found:
                 counts[index] += 1
                 # A box with no size (text drawn hidden) has nothing to paint over: redrawing the page is
                 # what takes the text away.
                 boxes += [box for box in lines if box[2] > 0 and box[3] > 0]
                 if written is not None and lines[0][3] > 0:
                     labels.append((written(index, match), lines[0]))
-            per_page[number] = len(located)
+            per_page[number] = len(found)
             planned[number] = (boxes, labels)
-        missing = [repr(label) for (label, _), count in zip(patterns, counts) if not count]
+        missing = [repr(label) for (label, target), count in zip(targets, counts) if not count and not isinstance(target, Match)]
         if missing:
             where = "the pages given" if pages is not None else "the PDF"
             raise ValueError(
@@ -2866,13 +2922,16 @@ def _edited(
         for number, (boxes, labels) in planned.items():
             _repaint(document, number, boxes, paint, labels, ink, font)
         saved = _save(document, output)
-    return Edit(path=saved, matches={label: count for (label, _), count in zip(patterns, counts)}, pages=per_page)
+    matches: Dict[str, int] = {}
+    for (label, _), count in zip(targets, counts):
+        matches[label] = matches.get(label, 0) + count  # two matches of one text count under it together
+    return Edit(path=saved, matches=matches, pages=per_page)
 
 
 def erase(
     path: PathLike,
     output: PathLike,
-    targets: Union[Target, Sequence[Target]],
+    targets: Union[Target, Match, Sequence[Union[Target, Match]]],
     *,
     background: str = "#ffffff",
     pages: Optional[Iterable[int]] = None,
@@ -2887,10 +2946,16 @@ def erase(
         done.matches   # {'DRAFT': 3, 'Internal use only': 1}
         done.pages     # {1: 2, 2: 2}: the pages redrawn
 
+        hits = macos.pdf.find("draft.pdf", "DRAFT")             # 3 of them
+        macos.pdf.erase("draft.pdf", "clean.pdf", hits[1:])     # all but the first
+
     ``targets`` are texts or compiled :mod:`re` patterns, found as :func:`find`
-    finds them: as whole words, ignoring case and any spacing or line break
-    between them. ``background`` is the hex color painted where the text was,
-    white by default; ``pages`` (from 1) limits the search to some pages.
+    finds them (as whole words, ignoring case and any spacing or line break
+    between them) and taken out wherever they show; or, to take out some of
+    the places a text shows and not the others, matches :func:`find` gave for
+    this PDF, which may go along with texts and patterns. ``background`` is
+    the hex color painted where the text was, white by default; ``pages``
+    (from 1) limits the search to some pages.
 
     Each page with a match is redrawn as a picture of what it shows, as
     :func:`redact` does, with the matches painted over: there's no text left
@@ -2905,14 +2970,13 @@ def erase(
     bookmarks included), use :func:`redact`. ``password`` opens an encrypted
     PDF; the result isn't encrypted.
     """
-    patterns = _patterns(targets, caller="erase()")
-    return _edited(path, output, patterns, pages, password, paint=_color(background))
+    return _edited(path, output, _chosen(targets, "erase()"), pages, password, paint=_color(background))
 
 
 def replace(
     path: PathLike,
     output: PathLike,
-    old: Union[Target, Mapping[Target, str]],
+    old: Union[Target, Match, Sequence[Union[Target, Match]], Mapping[Union[Target, Match], str]],
     new: Optional[str] = None,
     *,
     color: str = "#000000",
@@ -2931,19 +2995,26 @@ def replace(
         macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\\w+)"), r"Maria \\1")
         macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})   # both at once
 
+        hits = macos.pdf.find("list.pdf", "Ana Souza")                              # 5 of them
+        macos.pdf.replace("list.pdf", "renamed.pdf", hits[:2], "Maria Lima")       # the first two only
+
     ``old`` is found as :func:`find` finds a text: as whole words, ignoring case
     and any spacing or line break between them, or as a compiled :mod:`re`
-    pattern, whose groups ``new`` may refer to (``\\1``). ``new`` is written
-    where each match was, from its left edge and at its size, in ``font``
+    pattern, whose groups ``new`` may refer to (``\\1``); it's replaced
+    wherever it shows. To replace some of those places and not the others,
+    ``old`` is a match :func:`find` gave for this PDF, or a list of them (a
+    list of texts and patterns is taken too), all replaced by ``new``. ``new``
+    is written where each match was, from its left edge and at its size, in ``font``
     (Helvetica by default: a PDF's own fonts can't be written with) and
     ``color``, a hex color; ``background`` is the hex color painted over the
     match first, white by default. A longer ``new`` runs past where the old
     text ended, so look over the result. A match split over two lines is
     painted over on both, and ``new`` written on the first.
 
-    Several replacements go in one call, as a dict of ``old`` to ``new``
-    (with no ``new`` argument): a replaced page holds no text to find any
-    more, so a second call wouldn't find what a first one left on the page.
+    Several replacements go in one call, as a dict of ``old`` (texts,
+    patterns or matches) to ``new``, with no ``new`` argument: a replaced page
+    holds no text to find any more, so a second call wouldn't find what a
+    first one left on the page.
 
     Each page with a match is redrawn as a picture of what it shows, as
     :func:`erase` and :func:`redact` do: the old text is gone, not covered,
@@ -2957,28 +3028,28 @@ def replace(
     if isinstance(old, Mapping):
         if new is not None:
             raise TypeError("with a dict of replacements, new goes in it: replace(path, output, {old: new})")
-        pairs = list(old.items())
+        pairs: List[Tuple[Union[Target, Match], str]] = list(old.items())
         if not pairs:
             raise ValueError("replace() needs at least one replacement")
     else:
         if new is None:
             raise TypeError("replace() needs the new text: replace(path, output, old, new)")
-        pairs = [(old, new)]
+        pairs = [(target, new) for target in ([old] if isinstance(old, (str, re.Pattern, Match)) else list(old))]
     for _, text in pairs:
         if not isinstance(text, str):
             raise TypeError("new must be text, not {!r}".format(text))
         if not text.strip():
             raise ValueError("new must not be empty: erase() takes text out")
-    patterns = _patterns([target for target, _ in pairs], caller="replace()")
+    targets = _chosen([target for target, _ in pairs], "replace()")
     ink, paint, face = _color(color), _color(background), _font_named(font)
 
-    def written(index: int, match: "re.Match[str]") -> str:
+    def written(index: int, match: Optional["re.Match[str]"]) -> str:
         target, text = pairs[index]
-        if not isinstance(target, re.Pattern):
+        if match is None or not isinstance(target, re.Pattern):
             return text
         try:
             return match.expand(text)
         except re.error as error:
-            raise ValueError("new can't stand in for {!r}: {}".format(patterns[index][0], error)) from None
+            raise ValueError("new can't stand in for {!r}: {}".format(targets[index][0], error)) from None
 
-    return _edited(path, output, patterns, pages, password, paint=paint, written=written, ink=ink, font=face)
+    return _edited(path, output, targets, pages, password, paint=paint, written=written, ink=ink, font=face)
