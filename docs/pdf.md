@@ -307,7 +307,7 @@ macos.pdf.replace("offer.pdf", "offer-2027.pdf", "2026", "2027")
 macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\w+)"), r"Maria \1", font="Helvetica-Bold")
 macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})    # both at once
 
-hits = macos.pdf.find("contract.pdf", "Ana Souza")                           # five of them
+hits = macos.pdf.find("contract.pdf", "Ana Souza")                          # five of them
 macos.pdf.replace("contract.pdf", "renamed.pdf", hits[:2], "Maria Lima")    # the first two only
 macos.pdf.erase("contract.pdf", "trimmed.pdf", [hits[3]])                   # the fourth only
 ```

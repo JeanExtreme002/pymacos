@@ -2995,7 +2995,7 @@ def replace(
         macos.pdf.replace("list.pdf", "renamed.pdf", re.compile(r"Ana (\\w+)"), r"Maria \\1")
         macos.pdf.replace("draft.pdf", "final.pdf", {"DRAFT": "FINAL", "2026": "2027"})   # both at once
 
-        hits = macos.pdf.find("list.pdf", "Ana Souza")                              # 5 of them
+        hits = macos.pdf.find("list.pdf", "Ana Souza")                             # 5 of them
         macos.pdf.replace("list.pdf", "renamed.pdf", hits[:2], "Maria Lima")       # the first two only
 
     ``old`` is found as :func:`find` finds a text: as whole words, ignoring case
