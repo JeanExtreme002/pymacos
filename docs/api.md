@@ -581,14 +581,18 @@ explain how to use each part.
 .. autofunction:: macos.pdf.bookmarks
 .. autofunction:: macos.pdf.set_bookmarks
 .. autofunction:: macos.pdf.compress
+.. autoclass:: macos.pdf.Edit
 .. autofunction:: macos.pdf.encrypt
+.. autofunction:: macos.pdf.erase
 .. autofunction:: macos.pdf.extract
 .. autofunction:: macos.pdf.fill_form
+.. autofunction:: macos.pdf.find
 .. autoclass:: macos.pdf.FormField
 .. autofunction:: macos.pdf.form_fields
 .. autofunction:: macos.pdf.from_images
 .. autofunction:: macos.pdf.grayscale
 .. autofunction:: macos.pdf.images
+.. autoclass:: macos.pdf.Match
 .. autofunction:: macos.pdf.merge
 .. autoclass:: macos.pdf.Metadata
 .. autofunction:: macos.pdf.metadata
@@ -597,6 +601,7 @@ explain how to use each part.
 .. autofunction:: macos.pdf.redact
 .. autoclass:: macos.pdf.Redaction
 .. autofunction:: macos.pdf.render
+.. autofunction:: macos.pdf.replace
 .. autofunction:: macos.pdf.rotate
 .. autofunction:: macos.pdf.sign
 .. autofunction:: macos.pdf.text

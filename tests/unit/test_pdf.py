@@ -942,3 +942,293 @@ def test_sign_names_image_bytes_it_cannot_decode_without_repeating_them(tmp_path
     with pytest.raises(ValueError, match="^image bytes is not an image macOS can read$"):
         macos.pdf.sign(__file__, tmp_path / "out.pdf", b"\x89PNG" + b"x" * 100000)
     assert not (tmp_path / "out.pdf").exists()
+
+
+def test_same_allows_rounding():
+    from macos.pdf import _same
+
+    assert _same([(72.0, 700.0, 40.0, 20.0)], [(72.3, 699.6, 40.0, 20.0)])
+    assert not _same([(72.0, 700.0, 40.0, 20.0)], [(72.0, 650.0, 40.0, 20.0)])
+    assert not _same([(72.0, 700.0, 40.0, 20.0)], [(72.0, 700.0, 40.0, 20.0), (72.0, 680.0, 40.0, 20.0)])
+
+
+def test_around_holds_every_box():
+    from macos.pdf import _around
+
+    assert _around([(10, 10, 5, 5), (0, 20, 30, 2)]) == (0, 10, 30, 12)
+    assert _around([(72.0, 700.0, 40.0, 20.0)]) == (72.0, 700.0, 40.0, 20.0)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="finds text with PDFKit")
+def test_find_tells_where_a_text_is(tmp_path):
+    import re
+
+    from tests.helpers import pdf_with_text
+
+    first, second = tmp_path / "1.pdf", tmp_path / "2.pdf"
+    first.write_bytes(pdf_with_text([("Contrato de Ana", 72, 700), ("Souza, CPF 123.456.789-00", 72, 680)]))
+    second.write_bytes(pdf_with_text([("Anexo de Ana Souza", 72, 700)]))
+    document = macos.pdf.merge([first, second], tmp_path / "both.pdf")
+
+    name = macos.pdf.find(document, "ana souza")  # any case, and across a line break
+    assert [(match.page, match.text.split()) for match in name] == [(1, ["Ana", "Souza"]), (2, ["Ana", "Souza"])]
+    split, whole = name
+    assert len(split.lines) == 2 and whole.lines == (whole.box,)
+    assert (whole.font, whole.size) == ("Helvetica", 18.0)
+    # "Ana" ends the first line (from x ≈ 170) and "Souza" starts the second (x = 72), in 18-point type: the box
+    # around both starts at the margin, under the second line, and is two lines tall.
+    assert 70 < split.box[0] < 75 and 672 < split.box[1] < 682 and 30 < split.box[3] < 45
+    assert split.lines[0][0] > 150 and split.lines[1][0] < 75
+    assert whole.box[0] > 150 and 690 < whole.box[1] < 700 and 15 < whole.box[3] < 24  # after "Anexo de ", on its line
+    (cpf,) = macos.pdf.find(document, re.compile(r"\d{3}\.\d{3}\.\d{3}-\d{2}"))
+    assert cpf.page == 1 and cpf.text == "123.456.789-00" and cpf.box[0] > 120 and 15 < cpf.box[3] < 24
+
+    assert macos.pdf.find(document, "Maria") == []
+    assert macos.pdf.find(document, "Sou") == []  # whole words: not inside "Souza"
+    assert [match.page for match in macos.pdf.find(document, "Ana Souza", pages=[2])] == [2]
+    assert macos.pdf.find(document, "Ana Souza", pages=[]) == []
+    with pytest.raises(ValueError, match="page 3 is out of range"):
+        macos.pdf.find(document, "Ana", pages=[3])
+    with pytest.raises(TypeError, match="one text or compiled pattern"):
+        macos.pdf.find(document, ["Ana", "Souza"])
+    with pytest.raises(ValueError, match=r"find\(\) takes texts"):
+        macos.pdf.find(document, "  ")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="finds text with PDFKit")
+def test_find_reports_hidden_text_where_it_is(tmp_path):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "hidden.pdf"
+    source.write_bytes(pdf_with_text([("Shown line", 72, 700), ("Hidden line", 72, 600)], invisible=[1]))
+    (hidden,) = macos.pdf.find(source, "Hidden line")
+    assert hidden.page == 1 and hidden.text == "Hidden line" and 70 < hidden.box[0] < 75 and 590 < hidden.box[1] < 605
+
+
+def _pixels(box, points_per_pixel=792 / 700):
+    """A box in points, as :class:`Match` gives it, as pixels of page 1 rendered 700 pixels tall (Letter)."""
+    x, y, width, height = box
+    scale = 1 / points_per_pixel
+    return round(x * scale), round((792 - y - height) * scale), round(width * scale), round(height * scale)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit")
+def test_erase_takes_the_text_out_and_keeps_the_rest(tmp_path):
+    from tests.helpers import pdf_with_text
+
+    first, second = tmp_path / "1.pdf", tmp_path / "2.pdf"
+    first.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700), ("Anexo sem dados", 72, 650)]))
+    second.write_bytes(pdf_with_text([("Nada aqui", 72, 700)]))
+    merged = macos.pdf.merge([first, second], tmp_path / "merged.pdf")
+    source = macos.pdf.set_bookmarks(merged, tmp_path / "in.pdf", [("Contrato", 1), ("Nada", 2)])
+    before = macos.pdf.render(source, 2)
+    (where,) = macos.pdf.find(source, "Ana Souza")
+
+    done = macos.pdf.erase(source, tmp_path / "out.pdf", ["ana souza"])
+    assert done.matches == {"ana souza": 1} and done.pages == {1: 1}
+    assert macos.pdf.text(done.path, [1]) == ""  # a picture now
+    assert macos.pdf.text(done.path, [2]) == "Nada aqui" and macos.pdf.render(done.path, 2) == before
+    assert [(mark.title, mark.page) for mark in macos.pdf.bookmarks(done.path)] == [("Contrato", 1), ("Nada", 2)]
+    seen = macos.vision.text(macos.pdf.render(done.path, 1, size=1600))
+    assert "Contrato de" in seen and "Anexo sem dados" in seen and "Souza" not in seen
+    assert _dominant(done.path, tmp_path, _pixels(where.box)) == "#ffffff"  # painted over in white, not blacked out
+
+    red = macos.pdf.erase(source, tmp_path / "red.pdf", "Ana Souza", background="#ff0000")
+    color = _dominant(red.path, tmp_path, _pixels(where.box))  # a JPEG's red, a shade off #ff0000
+    assert int(color[1:3], 16) > 240 and int(color[3:5], 16) < 16 and int(color[5:7], 16) < 16
+
+    titled = tmp_path / "titled.pdf"
+    titled.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)], title="Plano"))
+    assert macos.pdf.metadata(macos.pdf.erase(titled, tmp_path / "titled-out.pdf", "Ana Souza").path).title == "Plano"
+
+    with pytest.raises(ValueError, match="'Maria' isn't on the PDF, so nothing was written"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", ["Ana Souza", "Maria"])
+    with pytest.raises(ValueError, match="isn't on the pages given"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", "Ana Souza", pages=[2])
+    with pytest.raises(ValueError, match=r"erase\(\) needs at least one"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", [])
+    with pytest.raises(ValueError, match="hex color"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", "Ana Souza", background="red")
+    assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
+    import re
+
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "in.pdf"
+    source.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700), ("Anexo sem dados", 72, 650)]))
+    (old,) = macos.pdf.find(source, "Ana Souza")
+
+    done = macos.pdf.replace(source, tmp_path / "out.pdf", "Ana Souza", "Maria Lima")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert macos.pdf.text(done.path) == "Maria Lima"  # the new text is text; the rest of the page is a picture
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert abs(new.box[0] - old.box[0]) < 2 and abs(new.box[1] - old.box[1]) < 3 and abs(new.box[3] - old.box[3]) < 3
+    seen = macos.vision.text(macos.pdf.render(done.path, 1, size=1600))
+    assert "Maria Lima" in seen and "Contrato de" in seen and "Anexo sem dados" in seen and "Souza" not in seen
+
+    renamed = macos.pdf.replace(source, tmp_path / "renamed.pdf", re.compile(r"Ana (\w+)"), r"Maria \1", font="Helvetica-Bold")
+    assert macos.pdf.text(renamed.path) == "Maria Souza"
+    (bold,) = macos.pdf.find(renamed.path, "Maria Souza")
+    assert (bold.font, bold.size) == ("Helvetica-Bold", 18.0)
+
+    smaller = macos.pdf.replace(source, tmp_path / "smaller.pdf", "Ana Souza", "Maria Lima", size=9)
+    (small,) = macos.pdf.find(smaller.path, "Maria Lima")
+    assert small.size == 9.0 and abs(small.box[0] - old.box[0]) < 2 and abs(small.box[1] - old.box[1]) < 3
+    assert abs(small.box[3] - old.box[3] / 2) < 2
+
+    # Several at once: a replaced page is a picture, so a second call would find nothing left on it.
+    both = macos.pdf.replace(source, tmp_path / "both.pdf", {"Ana Souza": "Maria Lima", "Anexo": "Apêndice"})
+    assert both.matches == {"Ana Souza": 1, "Anexo": 1} and both.pages == {1: 2}
+    assert macos.pdf.text(both.path).split("\n") == ["Maria Lima", "Apêndice"]
+    with pytest.raises(ValueError, match="'Ana Souza' isn't on the PDF"):
+        macos.pdf.replace(renamed.path, tmp_path / "never.pdf", "Ana Souza", "x")
+
+    for wrong, error, message in (
+        ({"new": " "}, ValueError, "new must not be empty"),
+        ({"new": 3}, TypeError, "new must be text"),
+        ({"font": "NoSuchFont-Bold"}, ValueError, "no font is named"),
+        ({"size": 0}, ValueError, "size must be positive"),
+        ({"size": "big"}, ValueError, "size must be positive"),
+        ({"color": "black"}, ValueError, "hex color"),
+        ({"old": "Maria"}, ValueError, "isn't on the PDF, so nothing was written"),
+        ({"old": re.compile("Ana"), "new": r"\2"}, ValueError, "can't stand in"),
+        ({"old": re.compile("Ana"), "new": r"\g<missing>"}, ValueError, "can't stand in"),
+        ({"old": [["Ana"]]}, ValueError, r"replace\(\) takes texts"),
+        ({"old": [], "new": "x"}, ValueError, "at least one text, pattern or match"),
+        ({"old": {"Ana": "x"}}, TypeError, "new goes in it"),
+        ({"old": {}, "new": None}, ValueError, "at least one replacement"),
+        ({"old": {"Ana": ""}, "new": None}, ValueError, "new must not be empty"),
+        ({"new": None}, TypeError, "needs the new text"),
+    ):
+        arguments = {"old": "Ana Souza", "new": "x", **wrong}
+        with pytest.raises(error, match=message):
+            macos.pdf.replace(source, tmp_path / "never.pdf", arguments.pop("old"), arguments.pop("new"), **arguments)
+    assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_erase_and_replace_take_the_matches_chosen(tmp_path):
+    import dataclasses
+    import re
+
+    from tests.helpers import pdf_with_text
+
+    first, second, other = tmp_path / "1.pdf", tmp_path / "2.pdf", tmp_path / "other.pdf"
+    first.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700), ("Assinado por Ana Souza", 72, 650)]))
+    second.write_bytes(pdf_with_text([("Anexo de Ana Souza", 72, 700)]))
+    other.write_bytes(pdf_with_text([("Maria Lima", 72, 700), ("Ana Souza", 300, 400)]))
+    source = macos.pdf.merge([first, second], tmp_path / "in.pdf")
+    hits = macos.pdf.find(source, "Ana Souza")
+    assert [hit.page for hit in hits] == [1, 1, 2]
+
+    def seen(path, page):
+        return macos.vision.text(macos.pdf.render(path, page, size=1600))
+
+    done = macos.pdf.erase(source, tmp_path / "first.pdf", hits[0])  # one match: the first of the three
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert seen(done.path, 1).count("Souza") == 1 and "Assinado por Ana Souza" in seen(done.path, 1)
+    assert macos.pdf.text(done.path, [2]) == "Anexo de Ana Souza"  # page 2 wasn't touched
+    assert _dominant(done.path, tmp_path, _pixels(hits[0].box)) == "#ffffff"
+
+    done = macos.pdf.erase(source, tmp_path / "last.pdf", hits[1:])  # a list: the second and the third
+    assert done.matches == {"Ana Souza": 2} and done.pages == {1: 1, 2: 1}
+    assert macos.pdf.text(done.path, [1]) == "" and "Contrato de Ana Souza" in seen(done.path, 1)
+    assert "Souza" not in seen(done.path, 2)
+
+    done = macos.pdf.erase(source, tmp_path / "mixed.pdf", ["Anexo", hits[1]])  # along with a text
+    assert done.matches == {"Anexo": 1, "Ana Souza": 1} and done.pages == {1: 1, 2: 1}
+    assert "Assinado por" in seen(done.path, 1) and seen(done.path, 1).count("Souza") == 1
+
+    done = macos.pdf.replace(source, tmp_path / "renamed.pdf", hits[1], "Maria Lima")
+    assert done.matches == {"Ana Souza": 1} and done.pages == {1: 1}
+    assert macos.pdf.text(done.path, [1]) == "Maria Lima" and macos.pdf.text(done.path, [2]) == "Anexo de Ana Souza"
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert abs(new.box[0] - hits[1].box[0]) < 2 and abs(new.box[1] - hits[1].box[1]) < 3
+    assert "Contrato de Ana Souza" in seen(done.path, 1)
+
+    done = macos.pdf.replace(source, tmp_path / "two.pdf", hits[:2], "Maria Lima")  # a list, one new text
+    assert done.matches == {"Ana Souza": 2} and macos.pdf.text(done.path, [1]).split("\n") == ["Maria Lima", "Maria Lima"]
+
+    done = macos.pdf.replace(source, tmp_path / "dict.pdf", {hits[2]: "Maria Lima", "Contrato": "Acordo"})
+    assert done.matches == {"Ana Souza": 1, "Contrato": 1} and done.pages == {1: 1, 2: 1}
+    assert macos.pdf.text(done.path, [2]) == "Maria Lima" and "Assinado por Ana Souza" in seen(done.path, 1)
+
+    # A match of a text that overlaps itself: the last "ana" of "banana" is a match, and no less chosen for it.
+    fruit = tmp_path / "fruit.pdf"
+    fruit.write_bytes(pdf_with_text([("banana", 72, 700)]))
+    (last,) = macos.pdf.find(fruit, re.compile(r"ana$"))
+    assert last.box[0] > 90 and macos.pdf.erase(fruit, tmp_path / "fruit-out.pdf", last).matches == {"ana": 1}
+    assert _dominant(tmp_path / "fruit-out.pdf", tmp_path, _pixels(last.box)) == "#ffffff"
+
+    (stale,) = macos.pdf.find(other, "Maria Lima")
+    (elsewhere,) = macos.pdf.find(other, "Ana Souza")  # a text page 1 holds, but not there
+    for targets, message in (
+        ([hits[0], hits[0]], "the match of 'Ana Souza' on page 1 is given more than once"),
+        (stale, "page 1 doesn't hold 'Maria Lima' where the match says"),
+        (elsewhere, "page 1 doesn't hold 'Ana Souza' where the match says"),
+        (dataclasses.replace(hits[0], page=3), "page 3 is out of range"),
+        ([hits[0], 3], r"erase\(\) takes texts, compiled patterns and matches"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            macos.pdf.erase(source, tmp_path / "never.pdf", targets)
+    with pytest.raises(ValueError, match="the match of 'Ana Souza' on page 1 isn't among the pages given"):
+        macos.pdf.erase(source, tmp_path / "never.pdf", hits[0], pages=[2])
+    assert not (tmp_path / "never.pdf").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_replace_writes_in_the_font_the_old_text_has(tmp_path, monkeypatch):
+    from tests.helpers import pdf_with_text
+
+    # A font the Mac has: the new text is written in it, so it's as wide as the old one was.
+    times = tmp_path / "times.pdf"
+    times.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)], font="Times-Bold"))
+    (old,) = macos.pdf.find(times, "Ana Souza")
+    assert (old.font, old.size) == ("Times-Bold", 18.0)
+    done = macos.pdf.replace(times, tmp_path / "times-out.pdf", "Ana Souza", "Ana Souza")
+    (new,) = macos.pdf.find(done.path, "Ana Souza")
+    assert (new.font, new.size) == ("Times-Bold", 18.0)
+    assert abs(new.box[2] - old.box[2]) < 1 and abs(new.box[0] - old.box[0]) < 1 and abs(new.box[1] - old.box[1]) < 1
+
+    # A font the Mac hasn't: Helvetica, at the old text's size.
+    monkeypatch.setattr(macos.pdf, "_installed", lambda font: font != "Times-Bold")
+    done = macos.pdf.replace(times, tmp_path / "missing-out.pdf", "Ana Souza", "Maria Lima")
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert (new.font, new.size) == ("Helvetica", 18.0) and abs(new.box[0] - old.box[0]) < 1
+
+    # A font PDFKit can't tell: Helvetica, sized to the old text's box.
+    monkeypatch.setattr(macos.pdf, "_face_of", lambda selection: None)
+    assert macos.pdf.find(times, "Ana Souza")[0].font is None
+    done = macos.pdf.replace(times, tmp_path / "untold-out.pdf", "Ana Souza", "Maria Lima")
+    monkeypatch.undo()
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    assert new.font == "Helvetica" and abs(new.box[3] - old.box[3]) < 3 and abs(new.box[1] - old.box[1]) < 3
+
+
+@pytest.mark.parametrize("angle", [90, 180, 270])
+@pytest.mark.skipif(sys.platform != "darwin", reason="redraws pages with PDFKit and Core Text")
+def test_replace_writes_along_a_turned_line(tmp_path, angle):
+    from tests.helpers import pdf_with_text
+
+    source = tmp_path / "turned.pdf"
+    source.write_bytes(pdf_with_text([("Contrato de Ana Souza", 72, 700)], rotate=angle))
+    (old,) = macos.pdf.find(source, "Ana Souza")
+    x, y, width, height = old.box
+    assert (width < height) == (angle % 180 != 0)  # seen on its side when turned 90 or 270
+
+    done = macos.pdf.replace(source, tmp_path / "out.pdf", old, "Maria Lima")
+    assert macos.pdf.text(done.path) == "Maria Lima"
+    (new,) = macos.pdf.find(done.path, "Maria Lima")
+    # The new text starts where the old line started, runs the same way, and is as tall as the old letters.
+    if angle == 90:
+        assert abs(new.box[0] - x) < 2 and abs(new.box[1] + new.box[3] - y - height) < 3 and abs(new.box[2] - width) < 3
+    elif angle == 180:
+        assert abs(new.box[0] + new.box[2] - x - width) < 3 and abs(new.box[1] + new.box[3] - y - height) < 2
+        assert abs(new.box[3] - height) < 3
+    else:
+        assert abs(new.box[0] + new.box[2] - x - width) < 2 and abs(new.box[1] - y) < 3 and abs(new.box[2] - width) < 3
+    assert "Souza" not in macos.vision.text(macos.pdf.render(done.path, 1, size=1600))
