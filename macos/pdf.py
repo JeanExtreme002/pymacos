@@ -3171,7 +3171,7 @@ def replace(
             return text
         try:
             return match.expand(text)
-        except re.error as error:
+        except (re.error, IndexError) as error:  # a group the pattern hasn't: by number, or by name
             raise ValueError("new can't stand in for {!r}: {}".format(targets[index][0], error)) from None
 
     return _edited(path, output, targets, pages, password, paint=paint, written=written, ink=ink, font=font, size=size)

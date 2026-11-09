@@ -1096,6 +1096,7 @@ def test_replace_writes_the_new_text_where_the_old_was(tmp_path):
         ({"color": "black"}, ValueError, "hex color"),
         ({"old": "Maria"}, ValueError, "isn't on the PDF, so nothing was written"),
         ({"old": re.compile("Ana"), "new": r"\2"}, ValueError, "can't stand in"),
+        ({"old": re.compile("Ana"), "new": r"\g<missing>"}, ValueError, "can't stand in"),
         ({"old": [["Ana"]]}, ValueError, r"replace\(\) takes texts"),
         ({"old": [], "new": "x"}, ValueError, "at least one text, pattern or match"),
         ({"old": {"Ana": "x"}}, TypeError, "new goes in it"),
