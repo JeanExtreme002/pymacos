@@ -181,6 +181,18 @@ pages, metadata and bookmarks are copied into a new, unencrypted PDF. Only
 fields in the new PDF, and they fill in Preview, but, as with
 {func}`~macos.pdf.merge`, Acrobat sees no form there.
 
+To remove the password, {func}`~macos.pdf.decrypt` saves such a copy, changing
+nothing else:
+
+```python
+macos.pdf.decrypt("locked.pdf", "open.pdf", "1234")
+macos.pdf.decrypt("no-printing.pdf", "printable.pdf")  # opens without a password: none to pass
+```
+
+It takes the password that opens the PDF, or the owner's. A PDF that opens
+without one and only restricts printing, copying or editing needs no
+password: the copy has no restrictions.
+
 To encrypt a PDF, {func}`~macos.pdf.encrypt` saves a copy that asks for a
 password to open, in Preview, Acrobat and browsers alike:
 
@@ -476,6 +488,7 @@ which may be a little off the picture: check those pages closely.
 - {func}`macos.pdf.extract`
 - {func}`macos.pdf.rotate`
 - {func}`macos.pdf.encrypt`
+- {func}`macos.pdf.decrypt`
 - {func}`macos.pdf.watermark`
 - {func}`macos.pdf.compress`
 - {func}`macos.pdf.grayscale`

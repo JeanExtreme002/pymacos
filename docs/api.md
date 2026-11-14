@@ -581,6 +581,7 @@ explain how to use each part.
 .. autofunction:: macos.pdf.bookmarks
 .. autofunction:: macos.pdf.set_bookmarks
 .. autofunction:: macos.pdf.compress
+.. autofunction:: macos.pdf.decrypt
 .. autoclass:: macos.pdf.Edit
 .. autofunction:: macos.pdf.encrypt
 .. autofunction:: macos.pdf.erase

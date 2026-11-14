@@ -11,6 +11,7 @@ Read, merge, split, rotate, encrypt, edit and redact PDFs, or make them from ima
     macos.pdf.merge(["a.pdf", "b.pdf"], "both.pdf")
     macos.pdf.extract("report.pdf", "summary.pdf", [1, 3])
     macos.pdf.encrypt("report.pdf", "locked.pdf", password="1234")
+    macos.pdf.decrypt("locked.pdf", "open.pdf", password="1234")
     macos.pdf.redact("contract.pdf", "public.pdf", ["Jane Doe"])
     macos.pdf.find("contract.pdf", "Jane Doe")      # [Match(page=1, text='Jane Doe', box=(...), ...)]
     macos.pdf.replace("draft.pdf", "final.pdf", "DRAFT", "FINAL")
@@ -52,6 +53,7 @@ __all__ = [
     "extract",
     "rotate",
     "encrypt",
+    "decrypt",
     "watermark",
     "ocr",
     "compress",
@@ -466,6 +468,26 @@ def encrypt(
                 restype=None,
             )
         return _save(document, output, options)
+
+
+def decrypt(path: PathLike, output: PathLike, password: Optional[str] = None) -> Path:
+    """
+    Save a copy of an encrypted PDF that asks for no password, and return its path.
+
+    ``password`` is the one that opens the PDF, or its owner's. Without it, or
+    with the wrong one, a PDF that asks for a password to open raises
+    :class:`~macos.PermissionDeniedError`. One that opens without a password
+    and only restricts printing, copying or editing needs none: the copy
+    has no such restrictions either.
+
+    The copy holds the PDF's pages (with their annotations and form
+    fields), its metadata and its bookmarks. As with an encrypted form
+    filled by :func:`fill_form`, the fields still fill in Preview, but
+    Acrobat sees no form there. A PDF that isn't encrypted is simply
+    saved again.
+    """
+    with _open(path, password) as document:
+        return _save(document, output)
 
 
 @lru_cache(maxsize=None)

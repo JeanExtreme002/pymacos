@@ -468,6 +468,43 @@ def test_edits_of_an_encrypted_pdf_are_not_encrypted(locked_book, tmp_path):
     assert "Jane Doe" not in macos.pdf.text(redacted) and macos.pdf.metadata(redacted).title == "The contract"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes PDFs with PDFKit")
+def test_decrypt_saves_a_copy_that_asks_for_no_password(locked_book, tmp_path):
+    with pytest.raises(macos.PermissionDeniedError, match="pass its password"):
+        macos.pdf.decrypt(locked_book, tmp_path / "never.pdf")
+    with pytest.raises(macos.PermissionDeniedError, match="wrong password"):
+        macos.pdf.decrypt(locked_book, tmp_path / "never.pdf", "guess")
+    assert not (tmp_path / "never.pdf").exists()
+
+    result = macos.pdf.decrypt(locked_book, tmp_path / "open.pdf", "s3cret")
+    assert result == tmp_path / "open.pdf" and not _is_encrypted(result)
+    assert macos.pdf.text(result) == "Contract of Jane Doe\nContract of Jane Doe"
+    assert macos.pdf.metadata(result).title == "The contract"
+    assert [(mark.title, mark.page, mark.level) for mark in macos.pdf.bookmarks(result)] == [
+        ("Start", 1, 0), ("Annex", 2, 0), ("Detail", 2, 1)
+    ]  # fmt: skip
+
+    # The owner's password opens it too, and the PDF can be decrypted in place.
+    locked = macos.pdf.encrypt(result, tmp_path / "two-keys.pdf", "user-pw", owner_password="owner-pw")
+    assert macos.pdf.decrypt(locked, locked, "owner-pw") == locked
+    assert not _is_encrypted(locked) and macos.pdf.page_count(locked) == 2
+
+    # One that only restricts what's done with it (an owner password, none to open) needs no password.
+    from macos import _objc
+
+    with macos.pdf._open(result) as document:
+        options = _objc.send(_objc.cls("NSMutableDictionary"), "dictionary")
+        key = macos.pdf._pdfkit_string("PDFDocumentOwnerPasswordOption")
+        _objc.send(options, "setObject:forKey:", _objc.nsstring("owner-pw"), key, argtypes=(_objc.id, _objc.id), restype=None)
+        restricted = macos.pdf._save(document, tmp_path / "restricted.pdf", options)
+    assert _is_encrypted(restricted)
+    assert not _is_encrypted(macos.pdf.decrypt(restricted, tmp_path / "free.pdf"))
+
+    # A PDF that isn't encrypted needs no password, and takes one without complaining.
+    again = macos.pdf.decrypt(result, tmp_path / "again.pdf")
+    assert macos.pdf.page_count(macos.pdf.decrypt(again, again, "unused")) == 2
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads and writes PDF forms with PDFKit")
 def test_filling_an_encrypted_form_gives_an_unencrypted_one(tmp_path):
     from tests.helpers import pdf_form
