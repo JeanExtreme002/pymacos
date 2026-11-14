@@ -178,6 +178,7 @@ def _call_id(call):
         lambda: macos.pdf.metadata(__file__),
         lambda: macos.pdf.rotate(__file__, "out.pdf", 90),
         lambda: macos.pdf.encrypt(__file__, "out.pdf", "secret"),
+        lambda: macos.pdf.decrypt(__file__, "out.pdf", "secret"),
         lambda: macos.keyboard.type("x"),
         lambda: macos.keyboard.press("enter"),
         lambda: macos.keyboard.has_permission(),

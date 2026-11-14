@@ -155,6 +155,8 @@ def test_pdf_metadata_rotate_and_encrypt(tmp_path):
     assert macos.pdf.text(locked, password="s3cret", pages=[1]) == "Page one says hello"
     changed = macos.pdf.encrypt(locked, tmp_path / "changed.pdf", "other", current_password="s3cret")
     assert macos.pdf.page_count(changed, password="other") == 2
+    opened = macos.pdf.decrypt(changed, tmp_path / "opened.pdf", "other")
+    assert macos.pdf.text(opened, pages=[2]) == "Page two says ola"  # no password asked
 
 
 def test_pdf_redrawing_keeps_the_annotations(tmp_path):
