@@ -13,8 +13,6 @@ The distribution is named `pymacos` on PyPI, but the package you import is
 import macos
 ```
 
-`import pymacos` raises an `ImportError` that says so.
-
 The library has no dependencies and needs no compiler: it's pure Python.
 
 ## Requirements
