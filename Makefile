@@ -132,7 +132,7 @@ test-coverage:
 .PHONY: lint
 lint:
 	@echo "$(GREEN)Running linter (flake8)...$(NC)"
-	$(PYTHON) -m flake8 $(PACKAGE_NAME) $(TEST_DIR)
+	$(PYTHON) -m flake8 $(PACKAGE_NAME) pymacos $(TEST_DIR)
 
 # Run type checker (config in pyproject.toml)
 .PHONY: type-check
