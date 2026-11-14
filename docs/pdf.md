@@ -181,8 +181,9 @@ pages, metadata and bookmarks are copied into a new, unencrypted PDF. Only
 fields in the new PDF, and they fill in Preview, but, as with
 {func}`~macos.pdf.merge`, Acrobat sees no form there.
 
-To remove the password, {func}`~macos.pdf.decrypt` saves such a copy, changing
-nothing else:
+To remove the password, {func}`~macos.pdf.decrypt` saves such a copy,
+keeping pages, document attributes and bookmarks, but not the XMP metadata
+packet or the catalog's `/AcroForm`:
 
 ```python
 macos.pdf.decrypt("locked.pdf", "open.pdf", "1234")
