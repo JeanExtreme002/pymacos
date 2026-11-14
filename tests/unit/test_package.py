@@ -17,6 +17,14 @@ def test_importing_the_package_loads_no_submodule():
     assert loaded.strip() == "['macos.errors']"
 
 
+def test_importing_the_name_on_pypi_says_to_import_macos():
+    # pip install pymacos, then import pymacos: an error that names the module, not a "No module named".
+    with pytest.raises(ImportError, match="write 'import macos' instead of 'import pymacos'") as caught:
+        import pymacos  # noqa: F401
+    assert not isinstance(caught.value, ModuleNotFoundError)
+    assert "pymacos" not in sys.modules
+
+
 def test_every_public_name_resolves():
     for name in macos.__all__:
         assert getattr(macos, name) is not None

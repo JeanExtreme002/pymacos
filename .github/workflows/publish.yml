@@ -59,7 +59,8 @@ jobs:
         modules = {str(path) for path in pathlib.Path("macos").rglob("*.py")}
         assert modules <= names, "left out of the wheel: {}".format(sorted(modules - names))
         assert "macos/py.typed" in names, "py.typed is missing"
-        extra = sorted(name for name in names if not name.startswith(("macos/", "pymacos-")))
+        assert "pymacos/__init__.py" in names, "the pymacos module, which says to import macos, is missing"
+        extra = sorted(name for name in names if not name.startswith(("macos/", "pymacos-")) and name != "pymacos/__init__.py")
         assert not extra, "unexpected files in the wheel: {}".format(extra)
         print("{}: {} files, {} modules".format(wheel[0], len(names), len(modules)))
         EOF
@@ -89,7 +90,7 @@ jobs:
         python -m venv /tmp/env
         /tmp/env/bin/python -m pip install --upgrade pip pytest pytest-rerunfailures hypothesis
         /tmp/env/bin/python -m pip install dist/*.whl
-        rm -rf macos
+        rm -rf macos pymacos
     - name: Check it's the installed package that's imported
       run: |
         /tmp/env/bin/python -c "import macos, sys; print(macos.__version__, macos.__file__); sys.exit('site-packages' not in macos.__file__)"

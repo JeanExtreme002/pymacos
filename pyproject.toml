@@ -129,8 +129,9 @@ skip_empty = true
 [tool.hatch.version]
 path = "macos/__init__.py"
 
+# pymacos is no second name for the library: importing it raises an error that says to import macos.
 [tool.hatch.build.targets.wheel]
-packages = ["macos"]
+packages = ["macos", "pymacos"]
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/.github", "/codecov.yml"]
