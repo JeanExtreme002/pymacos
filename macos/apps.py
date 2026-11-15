@@ -136,14 +136,13 @@ def _handles_with_bundle_id(bundle_id: str) -> List[int]:
     # pid (see _SEEN_AS_APPS). Asked again until it's there; then taken for quit, and forgotten, so the
     # next lookup costs nothing. The ones whose process is gone aren't waited for.
     for pause in _SECOND_LOOKS:
-        missing = {pid for pid in seen if _alive(pid)} - {_pid(handle) for handle in found}
+        # A copy: another thread may add to the set meanwhile (_app does), which iterating it would refuse.
+        missing = {pid for pid in tuple(seen) if _alive(pid)} - {_pid(handle) for handle in found}
         if not missing:
             break
         time.sleep(pause)
         found = _ask_bundle_id(bundle_id)
-    pids = {_pid(handle) for handle in found}
-    seen.intersection_update(pids)
-    seen.update(pids)
+    _SEEN_BY_BUNDLE_ID[bundle_id] = {_pid(handle) for handle in found}  # replaced whole, at once
     return found
 
 

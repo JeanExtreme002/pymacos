@@ -1288,3 +1288,20 @@ def test_a_bundle_identifier_never_seen_costs_no_pause(by_bundle_id):
 
     assert apps._handles_with_bundle_id("never.seen") == []
     assert by_bundle_id["pauses"] == []
+
+
+def test_the_instances_seen_can_grow_from_another_thread_meanwhile(by_bundle_id, monkeypatch):
+    from macos import apps
+
+    # _app adds the pid of an App it makes, on whatever thread: here while the lookup checks the ones seen.
+    by_bundle_id["alive"].update({20, 21})
+    by_bundle_id["answers"] += [[20], [20, 21]]
+    apps._SEEN_BY_BUNDLE_ID["com.example.App"] = {20}
+
+    def alive(pid):
+        apps._SEEN_BY_BUNDLE_ID["com.example.App"].add(21)  # another thread, meanwhile
+        return True
+
+    monkeypatch.setattr(apps, "_alive", alive)
+
+    assert apps._handles_with_bundle_id("com.example.App") == [20]
