@@ -88,12 +88,35 @@ def test_browser_run_js(browsers):
     assert macos.browser.run_js(script) == "pymacos"
     call = browsers.calls[-1]
     assert call["args"][:2] == ["osascript", "-e"] and len(call["args"]) == 3  # nothing after the source
-    assert call["input"] == script.encode()  # on stdin: not in the process list, nor pasted into the AppleScript
+    # On stdin: not in the process list, nor pasted into the AppleScript. In a try block, to tell an error.
+    assert call["input"] == ("try {\n" + script + "\n} catch").encode() + call["input"].split(b"} catch", 1)[1]
     assert script not in call["args"][2] and 'tell application "Google Chrome"' in call["args"][2]
     macos.browser.run_js("-1")
-    assert browsers.calls[-1]["input"] == b"-1" and len(browsers.args) == 3
+    assert browsers.calls[-1]["input"].startswith(b"try {\n-1\n}") and len(browsers.args) == 3
     browsers.stdout = "n\n"
     assert macos.browser.run_js("undefined") is None
+
+
+def test_browser_run_js_raises_what_the_script_raised(browsers):
+    # The browsers give a missing value for an error, as for undefined: the try block tells them apart.
+    browsers.stdout = "s\0pymacos: the script raised\0TypeError: Cannot read properties of null\n"
+
+    with pytest.raises(macos.MacOSError, match=r"^the script raised in Google Chrome: TypeError: Cannot read"):
+        macos.browser.run_js("null.x")
+
+    # The JavaScript sent writes the mark with escapes: no NUL travels on stdin.
+    assert b"\0" not in browsers.calls[-1]["input"]
+    assert b"catch (pymacosError) { '\\u0000pymacos: the script raised\\u0000' + String(pymacosError) }" in (
+        browsers.calls[-1]["input"]
+    )
+
+
+def test_browser_run_js_keeps_a_last_line_comment_out_of_the_catch(browsers):
+    browsers.stdout = "sDocs\n"
+
+    assert macos.browser.run_js("document.title // the title") == "Docs"
+    # The comment ends at the newline the block adds, before its closing brace.
+    assert browsers.calls[-1]["input"].startswith(b"try {\ndocument.title // the title\n} catch")
 
 
 def test_browser_run_js_keeps_the_string_as_the_page_made_it(browsers):

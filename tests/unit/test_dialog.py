@@ -1,10 +1,12 @@
 """Unit tests for :mod:`macos.dialog`. They run on any platform."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import macos
+from macos import _system
 
 
 def _script(args):
@@ -54,6 +56,47 @@ def test_dialog_choose(fake_run):
 
     fake_run.stdout = "cancel\n"
     assert macos.dialog.choose(["Apple"]) is None
+
+
+@pytest.mark.parametrize(
+    "show, cancelled",
+    [
+        (lambda: macos.dialog.choose(["Apple", "Pear"], timeout=2.5), None),
+        (lambda: macos.dialog.choose_file(timeout=2.5), None),
+        (lambda: macos.dialog.choose_files(timeout=2.5), []),
+        (lambda: macos.dialog.choose_folder(timeout=2.5), None),
+    ],
+)
+def test_the_list_and_pickers_close_as_cancelled_after_their_timeout(monkeypatch, show, cancelled):
+    # AppleScript can't give up on them: osascript is stopped at the deadline, which takes the dialog away.
+    calls = []
+
+    def run(args, **options):
+        calls.append(options)
+        raise subprocess.TimeoutExpired(args, options["timeout"])
+
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    monkeypatch.setattr(_system.subprocess, "run", run)
+
+    assert show() == cancelled
+    assert calls[0]["timeout"] == 3  # whole seconds, rounded up, as for the other dialogs
+
+
+def test_the_list_and_pickers_wait_with_no_timeout_given(fake_run):
+    fake_run.stdout = "ok\nPear\n"
+
+    macos.dialog.choose(["Apple", "Pear"])
+
+    assert fake_run.calls[-1]["timeout"] is None
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), 2 ** 29])
+def test_the_list_and_pickers_refuse_a_timeout_that_isnt_one(fake_run, timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        macos.dialog.choose(["Apple"], timeout=timeout)
+    with pytest.raises(ValueError, match="timeout"):
+        macos.dialog.choose_folder(timeout=timeout)
+    assert fake_run.calls == []
 
 
 @pytest.mark.parametrize(

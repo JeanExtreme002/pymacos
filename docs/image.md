@@ -116,8 +116,9 @@ macos.image.blur_background("me.jpg", "me-portrait.jpg")  # like Portrait mode
 macos.image.replace_background("me.jpg", "beach.jpg", "me-at-the-beach.jpg")
 ```
 
-Vision finds the people in the photo and keeps them sharp, in front of a
-blurred background or of another picture (scaled to fill it). `strength`
+Vision finds the people in the photo, a whole body or part of one (a webcam's
+head and shoulders), and keeps them sharp, in front of a blurred background or
+of another picture (scaled to fill it). `strength`
 sets the blur. Both raise `ValueError` when the photo shows no person, and
 need macOS 12 or later. With
 {func}`macos.camera.photo`, they make a quick portrait from the webcam.

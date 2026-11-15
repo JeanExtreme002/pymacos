@@ -13,7 +13,7 @@ Native dialogs: alerts, confirmations, text input and file pickers.
 
 Dialogs are shown through AppleScript (Standard Additions), so they need no
 permission and look like any other macOS dialog. They block until the user
-answers; most take a ``timeout`` in seconds, after which they close as if
+answers; each takes a ``timeout`` in seconds, after which it closes as if
 cancelled. Timeouts are whole seconds: a fraction is rounded up.
 """
 
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
 from ._system import osascript_error, run as _run
-from .errors import CommandError
+from .errors import CommandError, CommandTimeoutError
 
 __all__ = ["alert", "confirm", "prompt", "choose", "choose_file", "choose_files", "choose_folder"]
 
@@ -35,13 +35,18 @@ _END = "\0"  # ends each chosen path: a file name can hold a newline, never a NU
 _MAX_SECONDS = 2 ** 29 - 1  # AppleScript's largest integer; above it the number becomes a real
 
 
-def _show(body: List[str], args: Sequence[str]) -> List[str]:
+def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None) -> List[str]:
     """
     Run a dialog script and return its result lines.
 
     User text only ever travels as script arguments (``argv``), never spliced
     into the source. ``activate`` brings the dialog to the front; the Cancel
     button (error -128) becomes a result instead of an exception.
+
+    ``timeout`` is for the dialogs AppleScript can't give up on by itself (the
+    list and the pickers, which ``giving up after`` doesn't apply to):
+    ``osascript`` is stopped then, which takes its dialog away, and the result
+    is a cancel.
     """
     script = [
         "on run argv",
@@ -57,8 +62,11 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     for line in script:
         command += ["-e", line]
     # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
+    seconds = _seconds(timeout)
     try:
-        output = _run([*command, "--", *args], exact_newlines=True)
+        output = _run([*command, "--", *args], exact_newlines=True, timeout=seconds)
+    except CommandTimeoutError:
+        return [_CANCEL]
     except CommandError as error:
         raise osascript_error(error, None) from None
     # Drop only the newline osascript adds: an answer may end in its own, and
@@ -68,9 +76,10 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     return output.split("\n")
 
 
-def _giving_up(timeout: Optional[float]) -> str:
+def _seconds(timeout: Optional[float]) -> Optional[int]:
+    """``timeout`` checked, as the whole seconds a dialog waits: ``None`` for no limit."""
     if timeout is None:
-        return ""
+        return None
     if not math.isfinite(timeout):
         raise ValueError("timeout must be a finite number of seconds, not {} (leave it out for no limit)".format(timeout))
     if timeout <= 0:
@@ -81,7 +90,12 @@ def _giving_up(timeout: Optional[float]) -> str:
     seconds = math.ceil(timeout)
     if seconds > _MAX_SECONDS:
         raise ValueError("timeout can be at most {} seconds, not {}".format(_MAX_SECONDS, timeout))
-    return " giving up after {}".format(seconds)
+    return seconds
+
+
+def _giving_up(timeout: Optional[float]) -> str:
+    seconds = _seconds(timeout)
+    return "" if seconds is None else " giving up after {}".format(seconds)
 
 
 def _gave_up_check(timeout: Optional[float]) -> List[str]:
@@ -163,12 +177,14 @@ def choose(
     prompt: Optional[str] = None,
     default: Optional[str] = None,
     title: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Optional[str]:
     """
     Let the user pick one of ``options`` from a list, and return it (``None`` if cancelled).
 
     Options that aren't strings are shown as ``str(option)``, and that string
-    is what comes back; ``default`` is matched the same way.
+    is what comes back; ``default`` is matched the same way. After ``timeout``
+    seconds, the list closes as if cancelled.
     """
     if isinstance(options, (str, bytes)):
         raise TypeError("options must be a list of choices, not a single string: use [{!r}]".format(options))
@@ -188,7 +204,7 @@ def choose(
     if title is not None:
         statement += " with title (item 3 of argv)"
     body = [statement, 'if r is false then return "{}"'.format(_CANCEL), 'return "ok" & linefeed & (item 1 of r)']
-    result = _show(body, [prompt or "Choose an option:", default or "", title or "", *options])
+    result = _show(body, [prompt or "Choose an option:", default or "", title or "", *options], timeout)
     return "\n".join(result[1:]) if result[0] == "ok" else None
 
 
@@ -252,15 +268,17 @@ def choose_file(
     *,
     types: Optional[Sequence[str]] = None,
     folder: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
 ) -> Optional[Path]:
     """
     Show a file picker and return the chosen file, or ``None`` if cancelled.
 
     ``types`` limits the choice, by extension (``["pdf", "png"]``) or by type
     identifier (``["public.image"]``). ``folder`` is where the picker opens.
+    After ``timeout`` seconds, the picker closes as if cancelled.
     """
     body, args = _choose_file_body(prompt, types, folder, multiple=False)
-    found = _paths(_show(body + _paths_body(), args))
+    found = _paths(_show(body + _paths_body(), args, timeout))
     return found[0] if found else None
 
 
@@ -269,17 +287,24 @@ def choose_files(
     *,
     types: Optional[Sequence[str]] = None,
     folder: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
 ) -> List[Path]:
     """Like :func:`choose_file`, but lets the user pick several files. Returns ``[]`` if cancelled."""
     body, args = _choose_file_body(prompt, types, folder, multiple=True)
-    return _paths(_show(body + _paths_body(), args))
+    return _paths(_show(body + _paths_body(), args, timeout))
 
 
-def choose_folder(prompt: Optional[str] = None, *, folder: Optional[PathLike] = None) -> Optional[Path]:
-    """Show a folder picker and return the chosen folder, or ``None`` if cancelled."""
+def choose_folder(
+    prompt: Optional[str] = None, *, folder: Optional[PathLike] = None, timeout: Optional[float] = None
+) -> Optional[Path]:
+    """
+    Show a folder picker and return the chosen folder, or ``None`` if cancelled.
+
+    After ``timeout`` seconds, the picker closes as if cancelled.
+    """
     statement = "set r to choose folder with prompt (item 1 of argv)"
     if folder is not None:
         statement += " default location (POSIX file (item 2 of argv))"
     args = [prompt or "Choose a folder:", _folder(folder)]
-    found = _paths(_show([statement, *_paths_body()], args))
+    found = _paths(_show([statement, *_paths_body()], args, timeout))
     return found[0] if found else None

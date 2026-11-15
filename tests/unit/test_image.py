@@ -427,3 +427,31 @@ def test_a_converted_gif_still_loops(tmp_path):
     assert loops(tmp_path / "anim.gif") == 0
     assert loops(macos.image.convert(tmp_path / "anim.gif", tmp_path / "copy.gif")) == 0
     assert loops(macos.image.convert(tmp_path / "anim.gif", tmp_path / "anim.gif")) == 0  # in place too
+
+
+@pytest.mark.parametrize(
+    "found, person",
+    [
+        ({"VNDetectHumanRectanglesRequest": 1, "VNDetectFaceRectanglesRequest": 0}, True),
+        # A webcam photo: Vision finds no body in its head and shoulders, but a face.
+        ({"VNDetectHumanRectanglesRequest": 0, "VNDetectFaceRectanglesRequest": 1}, True),
+        ({"VNDetectHumanRectanglesRequest": 0, "VNDetectFaceRectanglesRequest": 0}, False),
+    ],
+)
+def test_a_person_is_a_body_in_part_or_else_a_face(monkeypatch, found, person):
+    from macos import vision
+
+    sent = []
+
+    class Request(str):
+        pass
+
+    monkeypatch.setattr(macos.image._objc, "new", lambda name: Request(name))
+    monkeypatch.setattr(
+        macos.image._objc, "send", lambda target, selector, *args, **kwargs: sent.append((target, selector, args))
+    )
+    monkeypatch.setattr(vision, "_perform_on", lambda picture, request: ["observation"] * found[request])
+
+    assert macos.image._shows_a_person("picture") is person
+    # Any part of a body: Vision's default, a whole upper body, misses a webcam's head and shoulders.
+    assert ("VNDetectHumanRectanglesRequest", "setUpperBodyOnly:", (False,)) in sent
