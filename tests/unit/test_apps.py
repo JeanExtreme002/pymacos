@@ -1207,32 +1207,84 @@ def test_every_app_handed_out_counts_as_seen(monkeypatch):
 
     # apps.open() finds the app it launched by bundle identifier, not by pid: it's seen all the same.
     monkeypatch.setattr(apps, "_SEEN_AS_APPS", set())
-    monkeypatch.setattr(apps, "_SEEN_BUNDLE_IDS", set())
+    monkeypatch.setattr(apps, "_SEEN_BY_BUNDLE_ID", {})
     answers = {"bundleURL": None, "processIdentifier": 12, "bundleIdentifier": "id", "localizedName": "name"}
     monkeypatch.setattr(apps._objc, "send", lambda handle, selector, **kwargs: answers.get(selector))
     monkeypatch.setattr(apps._objc, "pystring", lambda value: {"id": "com.apple.Notes", "name": "Notes"}[value])
     monkeypatch.setattr(apps, "_launch_date", lambda handle: None)
 
     assert apps._app("handle").pid == 12
-    assert 12 in apps._SEEN_AS_APPS and "com.apple.Notes" in apps._SEEN_BUNDLE_IDS
+    assert 12 in apps._SEEN_AS_APPS and apps._SEEN_BY_BUNDLE_ID == {"com.apple.Notes": {12}}
 
 
-def test_an_app_missed_by_bundle_identifier_is_asked_about_again(monkeypatch):
+@pytest.fixture
+def by_bundle_id(monkeypatch):
+    """LaunchServices' answers by bundle identifier, in order, as the pids of the instances it lists."""
     from macos import apps
 
-    pauses = []
-    # Found; missed twice then found; missed for good; asked once more; never seen.
-    answers = [["handle"], [], [], ["handle"], [], [], [], [], [], []]
-    monkeypatch.setattr(apps, "_SEEN_BUNDLE_IDS", set())
-    monkeypatch.setattr(apps, "_ask_bundle_id", lambda bundle_id: answers.pop(0))
-    monkeypatch.setattr(apps.time, "sleep", pauses.append)
+    state = {"answers": [], "pauses": [], "alive": set()}
+    monkeypatch.setattr(apps, "_SEEN_BY_BUNDLE_ID", {})
+    monkeypatch.setattr(apps, "_ask_bundle_id", lambda bundle_id: state["answers"].pop(0))
+    monkeypatch.setattr(apps, "_pid", lambda handle: handle)  # the fake handles are the pids
+    monkeypatch.setattr(apps, "_alive", lambda pid: pid in state["alive"])
+    monkeypatch.setattr(apps.time, "sleep", state["pauses"].append)
+    return state
 
-    assert apps._handles_with_bundle_id("com.apple.Safari") == ["handle"]
-    assert apps._handles_with_bundle_id("com.apple.Safari") == ["handle"]  # missed twice, then found
-    assert pauses == list(apps._SECOND_LOOKS[:2])
-    pauses.clear()
-    assert apps._handles_with_bundle_id("com.apple.Safari") == []  # quit: given up once
-    assert apps._handles_with_bundle_id("com.apple.Safari") == []  # forgotten: no pause
-    assert pauses == list(apps._SECOND_LOOKS)
+
+def test_an_app_missed_by_bundle_identifier_is_asked_about_again(by_bundle_id):
+    from macos import apps
+
+    by_bundle_id["alive"].add(20)
+    by_bundle_id["answers"] += [[20], [], [], [20]]
+
+    assert apps._handles_with_bundle_id("com.apple.Safari") == [20]
+    assert apps._handles_with_bundle_id("com.apple.Safari") == [20]  # missed twice, then found
+    assert by_bundle_id["pauses"] == list(apps._SECOND_LOOKS[:2])
+
+
+def test_one_of_two_instances_missed_is_asked_about_again(by_bundle_id):
+    from macos import apps
+
+    # Two copies of an app share a bundle identifier: the one just scripted is missed while the other
+    # answers, which an empty answer alone wouldn't tell.
+    by_bundle_id["alive"].update({20, 21})
+    by_bundle_id["answers"] += [[20, 21], [20], [20, 21]]
+
+    assert apps._handles_with_bundle_id("com.example.App") == [20, 21]
+    assert apps._handles_with_bundle_id("com.example.App") == [20, 21]
+    assert by_bundle_id["pauses"] == list(apps._SECOND_LOOKS[:1])
+
+
+def test_an_instance_that_quit_is_not_waited_for(by_bundle_id):
+    from macos import apps
+
+    by_bundle_id["alive"].update({20, 21})
+    by_bundle_id["answers"] += [[20, 21], [20], [20]]
+
+    assert apps._handles_with_bundle_id("com.example.App") == [20, 21]
+    by_bundle_id["alive"].discard(21)  # it quit: its process is gone
+    assert apps._handles_with_bundle_id("com.example.App") == [20]
+    assert apps._handles_with_bundle_id("com.example.App") == [20]
+    assert by_bundle_id["pauses"] == []
+
+
+def test_an_instance_missing_for_good_is_waited_for_once(by_bundle_id):
+    from macos import apps
+
+    # Its pid alive, but no longer this app's (another process's now): waited for once, then forgotten.
+    by_bundle_id["alive"].update({20, 21})
+    by_bundle_id["answers"] += [[20, 21], [20], [20], [20], [20], [20]]
+
+    assert apps._handles_with_bundle_id("com.example.App") == [20, 21]
+    assert apps._handles_with_bundle_id("com.example.App") == [20]
+    assert apps._handles_with_bundle_id("com.example.App") == [20]
+    assert by_bundle_id["pauses"] == list(apps._SECOND_LOOKS)
+
+
+def test_a_bundle_identifier_never_seen_costs_no_pause(by_bundle_id):
+    from macos import apps
+
+    by_bundle_id["answers"] += [[]]
+
     assert apps._handles_with_bundle_id("never.seen") == []
-    assert pauses == list(apps._SECOND_LOOKS)  # nor for an app never seen
+    assert by_bundle_id["pauses"] == []
