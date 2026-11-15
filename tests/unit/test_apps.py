@@ -1121,3 +1121,38 @@ def test_get_returns_the_first_of_the_running_apps_its_name_matches(monkeypatch)
     # Paths: both sides go through _real_bundle_path, so the copy's path finds both copies.
     assert list(apps._matches("/Users/me/Tool.app")) == [first, copy]
     assert list(apps._matches("Missing")) == [] and apps.get("Missing") is None
+
+
+def test_running_settled_looks_again_for_an_app_missing_for_a_moment(monkeypatch):
+    from macos import apps
+
+    # Right after an app answers an Apple Event, macOS may leave it out of the list for some milliseconds.
+    safari = apps.App("Safari", "com.apple.Safari", 7, None)
+    reads = iter([[], [], [safari]])
+    pauses = []
+    monkeypatch.setattr(apps, "running", lambda: next(reads))
+    monkeypatch.setattr(apps.time, "sleep", pauses.append)
+
+    assert apps._running_settled(lambda listed: safari in listed) == [safari]
+    assert pauses == list(apps._SECOND_LOOKS[:2])
+
+
+def test_running_settled_costs_nothing_for_an_app_that_is_there(monkeypatch):
+    from macos import apps
+
+    safari = apps.App("Safari", "com.apple.Safari", 7, None)
+    monkeypatch.setattr(apps, "running", lambda: [safari])
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: pytest.fail("paused for an app that was there"))
+
+    assert apps._running_settled(lambda listed: safari in listed) == [safari]
+
+
+def test_running_settled_gives_up_on_an_app_that_quit(monkeypatch):
+    from macos import apps
+
+    reads = []
+    monkeypatch.setattr(apps, "running", lambda: reads.append(1) or [])
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+
+    assert apps._running_settled(lambda listed: bool(listed)) == []
+    assert len(reads) == 1 + len(apps._SECOND_LOOKS)  # within 70 ms, then it's taken for quit

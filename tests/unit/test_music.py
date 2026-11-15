@@ -259,3 +259,15 @@ def test_player_commands_read_the_running_players_once(players, monkeypatch):
     macos.music.pause()
     macos.music.volume()
     assert len(reads) == 3  # one read per call, not one per helper on the way
+
+
+def test_a_player_missing_for_a_moment_is_still_found(players, monkeypatch):
+    from macos import apps
+
+    # Right after it was told something, macOS may leave the player out of the running apps for a moment.
+    music = apps.App("Music", "com.apple.Music", 1, None)
+    reads = iter([[], [music]])
+    monkeypatch.setattr(apps, "running", lambda: next(reads))
+    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+
+    assert macos.music._running() == ["Music"]

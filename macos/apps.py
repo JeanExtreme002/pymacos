@@ -30,7 +30,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
@@ -236,12 +236,39 @@ def _app(handle: int) -> App:
     )
 
 
+# The pauses before the list of running apps is read again, when an app looked for isn't in it: right
+# after an app answers an Apple Event, LaunchServices may not tell its process is an app for a few
+# milliseconds (measured: 5 at most), and the app is missing from the list meanwhile.
+_SECOND_LOOKS = (0.01, 0.02, 0.04)
+
+
+def _running_settled(found: Callable[[List[App]], bool]) -> List[App]:
+    """
+    :func:`running`, read again after short pauses while ``found`` says what's looked for isn't in it.
+
+    For what checks an app runs right after scripting it (a browser, a player): a missing app is
+    looked for again, a few times within 70 ms, before it's taken for quit. An app that is there costs
+    nothing more.
+    """
+    listed = running()
+    for pause in _SECOND_LOOKS:
+        if found(listed):
+            break
+        time.sleep(pause)
+        listed = running()
+    return listed
+
+
 def running(*, include_background: bool = False) -> List[App]:
     """
     Return the running applications.
 
     By default only regular apps (the ones with a Dock icon) are listed.
     ``include_background=True`` adds menu-bar extras, agents and helpers.
+
+    Right after an app answers an Apple Event (a script that told it
+    something), macOS may leave it out for a few milliseconds: to tell
+    whether it still runs then, look again a moment later.
 
     Raises :class:`~macos.errors.MacOSError` when macOS won't list the
     running processes, as in some sandboxes, rather than say none is running.
