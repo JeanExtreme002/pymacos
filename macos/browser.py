@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 
 from . import apps
 from ._system import APPLESCRIPT_TIMEOUT, applescript, osascript_error, run as _run
-from .errors import AppNotFoundError, CommandError, MacOSError, NotSupportedError, PermissionDeniedError
+from .errors import AppNotFoundError, CommandError, JavaScriptError, MacOSError, NotSupportedError, PermissionDeniedError
 
 __all__ = ["Tab", "BROWSERS", "current_tab", "tabs", "open", "run_js"]
 
@@ -217,6 +217,27 @@ _RUN_JS = {
     + _RUN_JS_RESULT,
 }
 
+# What a script that raised comes back as, its error after it: the browsers give no other sign (an
+# error is a missing value, as undefined is). Printable, as the text crosses Apple Events, AppleScript
+# and osascript, which a NUL might not cross whole; a page's own text won't start with it.
+_JS_ERROR = "[pymacos: the script raised] "
+
+
+def _caught(script: str) -> str:
+    """
+    ``script`` in a ``try`` block, which gives its value, or :data:`_JS_ERROR` and the error it raised.
+
+    The block keeps the script's last value, as a script's own would be (``try { document.title }`` is
+    the title). The newline before the ``}`` ends a last line that's a comment.
+    """
+    # String() itself may raise (an Object.create(null), a toString that throws): what then comes back
+    # is the error's kind, rather than nothing, which would pass for undefined.
+    describe = (
+        "(function (e) { try { return String(e) } catch (_) { return Object.prototype.toString.call(e) } })"
+    )
+    return "try {\n" + script + "\n} catch (pymacosError) { " + repr(_JS_ERROR) + " + " + describe + "(pymacosError) }"
+
+
 # Chromium's error for JavaScript from Apple Events turned off, by its number: its text is in the
 # browser's language. Safari's number isn't known, so its English text is matched only.
 _CHROMIUM_JS_OFF = re.compile(r"\(12\)$")
@@ -394,8 +415,15 @@ def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     (``Date.now()`` gives ``'1.760612345123E+12'``), an array as ``'1, 2'``.
     Return ``String(...)`` to get JavaScript's own text, and
     ``JSON.stringify(...)`` for structured data. With no browser running, it raises
-    :class:`~macos.errors.MacOSError`. The script reaches ``osascript`` on its
-    standard input, so it doesn't show in the process list.
+    :class:`~macos.errors.MacOSError`. When the script raises, it raises
+    :class:`~macos.errors.JavaScriptError` (``"the script raised in Safari:
+    TypeError: ..."``), rather than return ``None`` as the browsers do. It runs
+    in a ``try`` block for that: its ``let``, ``const`` and ``class``
+    declarations stay in it, a leading ``'use strict'`` is no longer a
+    directive, and a syntax error, which keeps the page from running it at all,
+    still gives ``None``.
+    The script reaches ``osascript`` on its standard input, so it doesn't show
+    in the process list.
     """
     browser = _browser(app)
     if browser is None or not _is_running(browser):
@@ -403,7 +431,7 @@ def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     source = _RUN_JS[_KINDS[browser]].replace("{app}", browser)
     try:
         # Not applescript(): its text mode would turn the page's \r\n and \r into \n.
-        output = _run(["osascript", "-e", source], input=script, timeout=APPLESCRIPT_TIMEOUT, exact_newlines=True)
+        output = _run(["osascript", "-e", source], input=_caught(script), timeout=APPLESCRIPT_TIMEOUT, exact_newlines=True)
     except CommandError as error:
         english = "Allow JavaScript from Apple Events" in error.stderr or "JavaScript through AppleScript" in error.stderr
         if english or (_KINDS[browser] == _CHROMIUM and _CHROMIUM_JS_OFF.search(error.stderr)):
@@ -417,6 +445,8 @@ def run_js(script: str, app: Optional[str] = None) -> Optional[str]:
     if output.endswith("\n"):
         output = output[:-1]  # osascript's own newline: the page's are kept
     mark, result = output[:1], output[1:]
+    if mark == "s" and result.startswith(_JS_ERROR):
+        raise JavaScriptError("the script raised in {}: {}".format(browser, result[len(_JS_ERROR):]))
     if mark == "s":
         return result
     if mark == "v":

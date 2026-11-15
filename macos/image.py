@@ -1028,18 +1028,37 @@ def effect(source: PathLike, output: PathLike, name: str, *, quality: Optional[f
     return _edit(source, output, lambda picture: _filter(_EFFECTS[name], picture), quality)
 
 
+def _shows_a_person(picture: int) -> bool:
+    """
+    Whether ``picture`` shows someone: a body, whole or in part, or else a face.
+
+    The segmentation always gives a mask, people or not, hence this check first. Vision's human
+    detector looks for a whole upper body by default, and misses the head and shoulders of a webcam
+    photo: it's asked for any part of a body, and a face counts when it still finds none.
+    """
+    from . import vision
+
+    humans = _objc.new("VNDetectHumanRectanglesRequest")
+    # upperBodyOnly is revision 2's (macOS 12, as the segmentation): asked for, rather than left to the
+    # revision a Python built with an older SDK would default to, which would ignore it.
+    _objc.send(humans, "setRevision:", 2, argtypes=(_objc.NSUInteger,), restype=None)
+    _objc.send(humans, "setUpperBodyOnly:", False, argtypes=(ctypes.c_bool,), restype=None)
+    if vision._perform_on(picture, humans):
+        return True
+    return bool(vision._perform_on(picture, _objc.new("VNDetectFaceRectanglesRequest")))
+
+
 def _people_mask(picture: int) -> int:
     """A ``CIImage`` as large as ``picture``: white where people are, black elsewhere."""
     from . import vision
 
     vision._load()
-    humans = vision._perform_on(picture, _objc.new("VNDetectHumanRectanglesRequest"))
-    if not humans:
-        raise ValueError("no person found in the image")
     try:
         request = _objc.new("VNGeneratePersonSegmentationRequest")
     except LookupError:
         raise NotSupportedError("separating people from the background needs macOS 12 or later") from None
+    if not _shows_a_person(picture):
+        raise ValueError("no person found in the image")
     _objc.send(request, "setQualityLevel:", 0, argtypes=(_objc.NSUInteger,), restype=None)  # accurate
     observations = vision._perform_on(picture, request)
     if not observations:

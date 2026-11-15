@@ -68,7 +68,9 @@ for a local page, pass `pathlib.Path(path).absolute().as_uri()` (a `file://` URL
 
 {func}`~macos.browser.run_js` runs JavaScript in the current tab and returns
 its result as text (`None` for `undefined` and `null`). With no browser running,
-it raises {class}`~macos.MacOSError`:
+it raises {class}`~macos.MacOSError`. When the script raises, it raises
+{class}`~macos.JavaScriptError`, with the error the page gave
+(`the script raised in Google Chrome: TypeError: ...`):
 
 ```python
 macos.browser.run_js("document.title")
@@ -83,6 +85,12 @@ them: a number with 15 digits at most, in E-notation from 2**29
 (`run_js("Date.now()")` gives `'1.760612345123E+12'`), an array as `'1, 2'`.
 Return `String(...)` to get JavaScript's own text, and `JSON.stringify(...)`
 for structured data.
+
+The script runs in a `try` block, to tell its errors from an `undefined`
+(the browsers return nothing for both): its `let`, `const` and `class`
+declarations stay in it, rather than in the page, and a leading
+`'use strict'` is no longer a directive. A syntax error keeps the page from
+running it at all, and still gives `None`.
 
 The browser must allow it, once:
 

@@ -79,9 +79,14 @@ cancelled.
 
 ## Timeouts
 
-{func}`~macos.dialog.alert`, {func}`~macos.dialog.confirm` and
-{func}`~macos.dialog.prompt` accept a `timeout` in seconds. When it runs out,
-the dialog closes as if the user had cancelled. macOS counts whole seconds, so
+Every dialog accepts a `timeout` in seconds. When it runs out, the dialog
+closes as if the user had cancelled: {func}`~macos.dialog.choose` and the
+pickers return `None` (or `[]` for {func}`~macos.dialog.choose_files`), as
+when the user cancels them. The time starts when the dialog shows, so the
+user has all of it: the call itself takes a moment more, the time the dialog
+takes to come up (about two seconds). {func}`~macos.dialog.choose` and the
+pickers raise {class}`~macos.CommandTimeoutError` when their dialog doesn't
+show within a minute. macOS counts whole seconds, so
 a fraction is rounded up (`timeout=1.5` waits 2 seconds). Leave `timeout` out
 for no limit: an infinite or NaN timeout raises `ValueError`, as does one
 longer than AppleScript's largest integer (2**29 - 1 seconds):

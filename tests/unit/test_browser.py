@@ -88,12 +88,42 @@ def test_browser_run_js(browsers):
     assert macos.browser.run_js(script) == "pymacos"
     call = browsers.calls[-1]
     assert call["args"][:2] == ["osascript", "-e"] and len(call["args"]) == 3  # nothing after the source
-    assert call["input"] == script.encode()  # on stdin: not in the process list, nor pasted into the AppleScript
+    # On stdin: not in the process list, nor pasted into the AppleScript. In a try block, to tell an error.
+    assert call["input"] == ("try {\n" + script + "\n} catch").encode() + call["input"].split(b"} catch", 1)[1]
     assert script not in call["args"][2] and 'tell application "Google Chrome"' in call["args"][2]
     macos.browser.run_js("-1")
-    assert browsers.calls[-1]["input"] == b"-1" and len(browsers.args) == 3
+    assert browsers.calls[-1]["input"].startswith(b"try {\n-1\n}") and len(browsers.args) == 3
     browsers.stdout = "n\n"
     assert macos.browser.run_js("undefined") is None
+
+
+def test_browser_run_js_raises_what_the_script_raised(browsers):
+    # The browsers give a missing value for an error, as for undefined: the try block tells them apart.
+    browsers.stdout = "s[pymacos: the script raised] TypeError: Cannot read properties of null\n"
+
+    with pytest.raises(macos.JavaScriptError, match=r"^the script raised in Google Chrome: TypeError: Cannot read"):
+        macos.browser.run_js("null.x")
+
+    # A MacOSError too, as before: told apart from "no browser is running" by its class.
+    assert issubclass(macos.JavaScriptError, macos.MacOSError)
+    sent = browsers.calls[-1]["input"]
+    assert b"catch (pymacosError) { '[pymacos: the script raised] ' + " in sent
+    # String() of the error may itself raise: guarded, so an error never passes for undefined.
+    assert b"try { return String(e) } catch (_) { return Object.prototype.toString.call(e) }" in sent
+
+
+def test_browser_run_js_returns_a_page_text_like_the_mark_only_at_its_start(browsers):
+    browsers.stdout = "sthe page says [pymacos: the script raised] \n"
+
+    assert macos.browser.run_js("text") == "the page says [pymacos: the script raised] "
+
+
+def test_browser_run_js_keeps_a_last_line_comment_out_of_the_catch(browsers):
+    browsers.stdout = "sDocs\n"
+
+    assert macos.browser.run_js("document.title // the title") == "Docs"
+    # The comment ends at the newline the block adds, before its closing brace.
+    assert browsers.calls[-1]["input"].startswith(b"try {\ndocument.title // the title\n} catch")
 
 
 def test_browser_run_js_keeps_the_string_as_the_page_made_it(browsers):

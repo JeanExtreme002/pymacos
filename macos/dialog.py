@@ -13,17 +13,20 @@ Native dialogs: alerts, confirmations, text input and file pickers.
 
 Dialogs are shown through AppleScript (Standard Additions), so they need no
 permission and look like any other macOS dialog. They block until the user
-answers; most take a ``timeout`` in seconds, after which they close as if
+answers; each takes a ``timeout`` in seconds, after which it closes as if
 cancelled. Timeouts are whole seconds: a fraction is rounded up.
 """
 
 import math
 import os
+import select
+import subprocess
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
-from ._system import osascript_error, run as _run
-from .errors import CommandError
+from ._system import osascript_error, popen as _popen, run as _run
+from .errors import CommandError, CommandTimeoutError
 
 __all__ = ["alert", "confirm", "prompt", "choose", "choose_file", "choose_files", "choose_folder"]
 
@@ -33,19 +36,32 @@ _CANCEL = "cancel"
 _TIMEOUT = "timeout"
 _END = "\0"  # ends each chosen path: a file name can hold a newline, never a NUL
 _MAX_SECONDS = 2 ** 29 - 1  # AppleScript's largest integer; above it the number becomes a real
+# What a script with a timeout writes (on stderr, with log) as its dialog shows: the time starts then.
+_SHOWN = "pymacos: the dialog shows"
+# The longest osascript may take to start and bring a dialog up (activate takes two seconds): a cap,
+# past which something is wrong, never a wait.
+_STARTING = 60.0
 
 
-def _show(body: List[str], args: Sequence[str]) -> List[str]:
+def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None) -> List[str]:
     """
     Run a dialog script and return its result lines.
 
     User text only ever travels as script arguments (``argv``), never spliced
     into the source. ``activate`` brings the dialog to the front; the Cancel
     button (error -128) becomes a result instead of an exception.
+
+    ``timeout`` is for the dialogs AppleScript can't give up on by itself (the
+    list and the pickers, which ``giving up after`` doesn't apply to):
+    ``osascript`` is stopped then, which takes its dialog away, and the result
+    is a cancel. The time starts as the dialog shows, as for ``giving up
+    after``: see :func:`_for_at_most`.
     """
+    seconds = _seconds(timeout)
     script = [
         "on run argv",
         "activate",
+        *(['log "{}"'.format(_SHOWN)] if seconds is not None else []),
         "try",
         *body,
         "on error number -128",
@@ -56,9 +72,16 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     command = ["osascript"]
     for line in script:
         command += ["-e", line]
+    command += ["--", *args]
     # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
     try:
-        output = _run([*command, "--", *args], exact_newlines=True)
+        if seconds is None:
+            output = _run(command, exact_newlines=True)
+        else:
+            answered = _for_at_most(command, seconds)
+            if answered is None:
+                return [_CANCEL]
+            output = answered
     except CommandError as error:
         raise osascript_error(error, None) from None
     # Drop only the newline osascript adds: an answer may end in its own, and
@@ -68,9 +91,54 @@ def _show(body: List[str], args: Sequence[str]) -> List[str]:
     return output.split("\n")
 
 
-def _giving_up(timeout: Optional[float]) -> str:
+def _for_at_most(command: List[str], seconds: int) -> Optional[str]:
+    """
+    Run a dialog script that logs :data:`_SHOWN` as its dialog shows, and return its output, or ``None``
+    when it was up ``seconds`` without an answer: ``osascript`` is stopped then, which takes it away.
+
+    The time starts as the dialog shows, not as ``osascript`` starts: coming to the front (``activate``)
+    takes it two seconds, which a timeout counted from the start would take from the dialog. A command
+    that fails raises :class:`CommandError`, as from :func:`_run`.
+    """
+    # Unbuffered (bufsize=0): select watches the pipe, not Python's buffer, so a line read along with an
+    # earlier one (a warning and the shown line in one write) mustn't wait in a buffer select can't see.
+    process = _popen(command, bufsize=0, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stderr = process.stderr
+    assert stderr is not None  # a pipe, asked for above
+    try:
+        # Its stderr, line by line, up to the one saying the dialog shows: osascript or a framework may
+        # write a warning first, as it comes to the front. Those are kept, for an error that follows.
+        said, shown = b"", False
+        deadline = time.monotonic() + _STARTING
+        while not shown:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([stderr], [], [], left)[0]:
+                raise CommandTimeoutError(command, _STARTING)  # osascript didn't get its dialog up at all
+            line = stderr.readline()
+            if not line:
+                break  # it ended without showing it: failed, which its stderr says
+            if line.strip() == _SHOWN.encode():
+                shown = True
+            else:
+                said += line
+        try:
+            # Shown: its time starts now. (Ended already otherwise: nothing to wait for.)
+            output, errors = process.communicate(timeout=seconds if shown else None)
+        except subprocess.TimeoutExpired:
+            return None
+    finally:
+        if process.poll() is None:
+            process.kill()  # out of time, or Python interrupted: the dialog goes with it
+            process.communicate()
+    if process.returncode != 0:
+        raise CommandError(command, process.returncode, (said + errors).decode("utf-8", "replace"))
+    return output.decode("utf-8", "surrogateescape")
+
+
+def _seconds(timeout: Optional[float]) -> Optional[int]:
+    """``timeout`` checked, as the whole seconds a dialog waits: ``None`` for no limit."""
     if timeout is None:
-        return ""
+        return None
     if not math.isfinite(timeout):
         raise ValueError("timeout must be a finite number of seconds, not {} (leave it out for no limit)".format(timeout))
     if timeout <= 0:
@@ -81,7 +149,12 @@ def _giving_up(timeout: Optional[float]) -> str:
     seconds = math.ceil(timeout)
     if seconds > _MAX_SECONDS:
         raise ValueError("timeout can be at most {} seconds, not {}".format(_MAX_SECONDS, timeout))
-    return " giving up after {}".format(seconds)
+    return seconds
+
+
+def _giving_up(timeout: Optional[float]) -> str:
+    seconds = _seconds(timeout)
+    return "" if seconds is None else " giving up after {}".format(seconds)
 
 
 def _gave_up_check(timeout: Optional[float]) -> List[str]:
@@ -163,12 +236,14 @@ def choose(
     prompt: Optional[str] = None,
     default: Optional[str] = None,
     title: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Optional[str]:
     """
     Let the user pick one of ``options`` from a list, and return it (``None`` if cancelled).
 
     Options that aren't strings are shown as ``str(option)``, and that string
-    is what comes back; ``default`` is matched the same way.
+    is what comes back; ``default`` is matched the same way. After ``timeout``
+    seconds, the list closes as if cancelled.
     """
     if isinstance(options, (str, bytes)):
         raise TypeError("options must be a list of choices, not a single string: use [{!r}]".format(options))
@@ -188,7 +263,7 @@ def choose(
     if title is not None:
         statement += " with title (item 3 of argv)"
     body = [statement, 'if r is false then return "{}"'.format(_CANCEL), 'return "ok" & linefeed & (item 1 of r)']
-    result = _show(body, [prompt or "Choose an option:", default or "", title or "", *options])
+    result = _show(body, [prompt or "Choose an option:", default or "", title or "", *options], timeout)
     return "\n".join(result[1:]) if result[0] == "ok" else None
 
 
@@ -252,15 +327,17 @@ def choose_file(
     *,
     types: Optional[Sequence[str]] = None,
     folder: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
 ) -> Optional[Path]:
     """
     Show a file picker and return the chosen file, or ``None`` if cancelled.
 
     ``types`` limits the choice, by extension (``["pdf", "png"]``) or by type
     identifier (``["public.image"]``). ``folder`` is where the picker opens.
+    After ``timeout`` seconds, the picker closes as if cancelled.
     """
     body, args = _choose_file_body(prompt, types, folder, multiple=False)
-    found = _paths(_show(body + _paths_body(), args))
+    found = _paths(_show(body + _paths_body(), args, timeout))
     return found[0] if found else None
 
 
@@ -269,17 +346,24 @@ def choose_files(
     *,
     types: Optional[Sequence[str]] = None,
     folder: Optional[PathLike] = None,
+    timeout: Optional[float] = None,
 ) -> List[Path]:
     """Like :func:`choose_file`, but lets the user pick several files. Returns ``[]`` if cancelled."""
     body, args = _choose_file_body(prompt, types, folder, multiple=True)
-    return _paths(_show(body + _paths_body(), args))
+    return _paths(_show(body + _paths_body(), args, timeout))
 
 
-def choose_folder(prompt: Optional[str] = None, *, folder: Optional[PathLike] = None) -> Optional[Path]:
-    """Show a folder picker and return the chosen folder, or ``None`` if cancelled."""
+def choose_folder(
+    prompt: Optional[str] = None, *, folder: Optional[PathLike] = None, timeout: Optional[float] = None
+) -> Optional[Path]:
+    """
+    Show a folder picker and return the chosen folder, or ``None`` if cancelled.
+
+    After ``timeout`` seconds, the picker closes as if cancelled.
+    """
     statement = "set r to choose folder with prompt (item 1 of argv)"
     if folder is not None:
         statement += " default location (POSIX file (item 2 of argv))"
     args = [prompt or "Choose a folder:", _folder(folder)]
-    found = _paths(_show([statement, *_paths_body()], args))
+    found = _paths(_show([statement, *_paths_body()], args, timeout))
     return found[0] if found else None
