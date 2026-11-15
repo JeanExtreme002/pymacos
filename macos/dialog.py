@@ -100,7 +100,9 @@ def _for_at_most(command: List[str], seconds: int) -> Optional[str]:
     takes it two seconds, which a timeout counted from the start would take from the dialog. A command
     that fails raises :class:`CommandError`, as from :func:`_run`.
     """
-    process = _popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Unbuffered (bufsize=0): select watches the pipe, not Python's buffer, so a line read along with an
+    # earlier one (a warning and the shown line in one write) mustn't wait in a buffer select can't see.
+    process = _popen(command, bufsize=0, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stderr = process.stderr
     assert stderr is not None  # a pipe, asked for above
     try:

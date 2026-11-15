@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -313,3 +314,26 @@ def test_dialog_says_why_osascript_refused(fake_run):
     fake_run.stderr = "execution error: something else (-2741)"
     with pytest.raises(macos.CommandError):
         macos.dialog.alert("hi")
+
+
+def test_a_warning_and_the_shown_line_in_one_write_keep_the_timeout(monkeypatch):
+    # A real process, as select watches the pipe itself: both lines come in a single write, which a buffered
+    # pipe would read at once, leaving the second where select can't see it.
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    monkeypatch.setattr(macos.dialog, "_STARTING", 5.0)  # fails in seconds, not a minute, if the line isn't seen
+    # exec: sleep is the process stopped at the deadline, as osascript is, with no child keeping the pipe open.
+    both = "printf 'some warning\\npymacos: the dialog shows\\n' >&2; exec sleep 8"
+
+    started = time.monotonic()
+    assert macos.dialog._for_at_most(["sh", "-c", both], 1) is None
+    assert time.monotonic() - started < 4
+
+
+def test_an_answer_and_a_failure_come_back_whole_from_a_real_process(monkeypatch):
+    monkeypatch.setattr(_system.sys, "platform", "darwin")
+    shown = "printf 'pymacos: the dialog shows\\n' >&2; "
+
+    assert macos.dialog._for_at_most(["sh", "-c", shown + "printf 'ok\\nPear\\n'"], 5) == "ok\nPear\n"
+    with pytest.raises(macos.CommandError) as failed:
+        macos.dialog._for_at_most(["sh", "-c", "printf 'w\\n' >&2; printf 'boom' >&2; exit 1"], 5)
+    assert failed.value.stderr == "w\nboom"
