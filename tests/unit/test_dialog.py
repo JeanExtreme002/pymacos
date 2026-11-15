@@ -118,6 +118,22 @@ def test_the_list_and_pickers_close_as_cancelled_after_their_timeout(dialog, sho
     assert 'log "pymacos: the dialog shows"' in _script(fake.args)
 
 
+def test_a_warning_before_the_dialog_shows_keeps_the_timeout(dialog):
+    # osascript, or a framework, may write a warning as it comes to the front: the time still starts at the
+    # line saying the dialog shows, and the dialog doesn't wait forever.
+    fake = dialog(_Dialog(first_line=b"some warning\nanother one\npymacos: the dialog shows\n", answers=False))
+
+    assert macos.dialog.choose(["Apple"], timeout=2) is None
+    assert fake.waited == [2] and fake.killed
+
+
+def test_the_warnings_before_a_failure_are_in_its_error(dialog):
+    dialog(_Dialog(first_line=b"some warning\n", errors=b"execution error: broken (-2700)\n", returncode=1))
+
+    with pytest.raises(macos.MacOSError, match="-2700"):
+        macos.dialog.choose(["Apple"], timeout=2)
+
+
 def test_an_answer_before_the_timeout_comes_back(dialog):
     fake = dialog(_Dialog(output=b"ok\nPear\n"))
 

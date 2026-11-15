@@ -21,6 +21,7 @@ import math
 import os
 import select
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -34,12 +35,12 @@ PathLike = Union[str, "os.PathLike[str]"]
 _CANCEL = "cancel"
 _TIMEOUT = "timeout"
 _END = "\0"  # ends each chosen path: a file name can hold a newline, never a NUL
-_MAX_SECONDS = 2 ** 29 - 1
+_MAX_SECONDS = 2 ** 29 - 1  # AppleScript's largest integer; above it the number becomes a real
 # What a script with a timeout writes (on stderr, with log) as its dialog shows: the time starts then.
 _SHOWN = "pymacos: the dialog shows"
 # The longest osascript may take to start and bring a dialog up (activate takes two seconds): a cap,
 # past which something is wrong, never a wait.
-_STARTING = 60.0  # AppleScript's largest integer; above it the number becomes a real
+_STARTING = 60.0
 
 
 def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None) -> List[str]:
@@ -103,14 +104,24 @@ def _for_at_most(command: List[str], seconds: int) -> Optional[str]:
     stderr = process.stderr
     assert stderr is not None  # a pipe, asked for above
     try:
-        before = b""
-        if select.select([stderr], [], [], _STARTING)[0]:
-            before = stderr.readline()
-        elif process.poll() is None:
-            raise CommandTimeoutError(command, _STARTING)  # osascript didn't get its dialog up at all
+        # Its stderr, line by line, up to the one saying the dialog shows: osascript or a framework may
+        # write a warning first, as it comes to the front. Those are kept, for an error that follows.
+        said, shown = b"", False
+        deadline = time.monotonic() + _STARTING
+        while not shown:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([stderr], [], [], left)[0]:
+                raise CommandTimeoutError(command, _STARTING)  # osascript didn't get its dialog up at all
+            line = stderr.readline()
+            if not line:
+                break  # it ended without showing it: failed, which its stderr says
+            if line.strip() == _SHOWN.encode():
+                shown = True
+            else:
+                said += line
         try:
-            # Shown (or the script failed first, which its stderr then says): its time starts now.
-            output, errors = process.communicate(timeout=seconds if before.strip() == _SHOWN.encode() else None)
+            # Shown: its time starts now. (Ended already otherwise: nothing to wait for.)
+            output, errors = process.communicate(timeout=seconds if shown else None)
         except subprocess.TimeoutExpired:
             return None
     finally:
@@ -118,7 +129,6 @@ def _for_at_most(command: List[str], seconds: int) -> Optional[str]:
             process.kill()  # out of time, or Python interrupted: the dialog goes with it
             process.communicate()
     if process.returncode != 0:
-        said = before if before.strip() != _SHOWN.encode() else b""
         raise CommandError(command, process.returncode, (said + errors).decode("utf-8", "replace"))
     return output.decode("utf-8", "surrogateescape")
 
