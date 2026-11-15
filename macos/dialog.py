@@ -19,10 +19,12 @@ cancelled. Timeouts are whole seconds: a fraction is rounded up.
 
 import math
 import os
+import select
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
-from ._system import osascript_error, run as _run
+from ._system import osascript_error, popen as _popen, run as _run
 from .errors import CommandError, CommandTimeoutError
 
 __all__ = ["alert", "confirm", "prompt", "choose", "choose_file", "choose_files", "choose_folder"]
@@ -32,7 +34,12 @@ PathLike = Union[str, "os.PathLike[str]"]
 _CANCEL = "cancel"
 _TIMEOUT = "timeout"
 _END = "\0"  # ends each chosen path: a file name can hold a newline, never a NUL
-_MAX_SECONDS = 2 ** 29 - 1  # AppleScript's largest integer; above it the number becomes a real
+_MAX_SECONDS = 2 ** 29 - 1
+# What a script with a timeout writes (on stderr, with log) as its dialog shows: the time starts then.
+_SHOWN = "pymacos: the dialog shows"
+# The longest osascript may take to start and bring a dialog up (activate takes two seconds): a cap,
+# past which something is wrong, never a wait.
+_STARTING = 60.0  # AppleScript's largest integer; above it the number becomes a real
 
 
 def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None) -> List[str]:
@@ -46,11 +53,14 @@ def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None)
     ``timeout`` is for the dialogs AppleScript can't give up on by itself (the
     list and the pickers, which ``giving up after`` doesn't apply to):
     ``osascript`` is stopped then, which takes its dialog away, and the result
-    is a cancel.
+    is a cancel. The time starts as the dialog shows, as for ``giving up
+    after``: see :func:`_for_at_most`.
     """
+    seconds = _seconds(timeout)
     script = [
         "on run argv",
         "activate",
+        *(['log "{}"'.format(_SHOWN)] if seconds is not None else []),
         "try",
         *body,
         "on error number -128",
@@ -61,12 +71,16 @@ def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None)
     command = ["osascript"]
     for line in script:
         command += ["-e", line]
+    command += ["--", *args]
     # Exact newlines: a file name the pickers return may hold a \r, which text mode would turn into \n.
-    seconds = _seconds(timeout)
     try:
-        output = _run([*command, "--", *args], exact_newlines=True, timeout=seconds)
-    except CommandTimeoutError:
-        return [_CANCEL]
+        if seconds is None:
+            output = _run(command, exact_newlines=True)
+        else:
+            answered = _for_at_most(command, seconds)
+            if answered is None:
+                return [_CANCEL]
+            output = answered
     except CommandError as error:
         raise osascript_error(error, None) from None
     # Drop only the newline osascript adds: an answer may end in its own, and
@@ -74,6 +88,39 @@ def _show(body: List[str], args: Sequence[str], timeout: Optional[float] = None)
     if output.endswith("\n"):
         output = output[:-1]
     return output.split("\n")
+
+
+def _for_at_most(command: List[str], seconds: int) -> Optional[str]:
+    """
+    Run a dialog script that logs :data:`_SHOWN` as its dialog shows, and return its output, or ``None``
+    when it was up ``seconds`` without an answer: ``osascript`` is stopped then, which takes it away.
+
+    The time starts as the dialog shows, not as ``osascript`` starts: coming to the front (``activate``)
+    takes it two seconds, which a timeout counted from the start would take from the dialog. A command
+    that fails raises :class:`CommandError`, as from :func:`_run`.
+    """
+    process = _popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stderr = process.stderr
+    assert stderr is not None  # a pipe, asked for above
+    try:
+        before = b""
+        if select.select([stderr], [], [], _STARTING)[0]:
+            before = stderr.readline()
+        elif process.poll() is None:
+            raise CommandTimeoutError(command, _STARTING)  # osascript didn't get its dialog up at all
+        try:
+            # Shown (or the script failed first, which its stderr then says): its time starts now.
+            output, errors = process.communicate(timeout=seconds if before.strip() == _SHOWN.encode() else None)
+        except subprocess.TimeoutExpired:
+            return None
+    finally:
+        if process.poll() is None:
+            process.kill()  # out of time, or Python interrupted: the dialog goes with it
+            process.communicate()
+    if process.returncode != 0:
+        said = before if before.strip() != _SHOWN.encode() else b""
+        raise CommandError(command, process.returncode, (said + errors).decode("utf-8", "replace"))
+    return output.decode("utf-8", "surrogateescape")
 
 
 def _seconds(timeout: Optional[float]) -> Optional[int]:

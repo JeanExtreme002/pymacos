@@ -1039,6 +1039,9 @@ def _shows_a_person(picture: int) -> bool:
     from . import vision
 
     humans = _objc.new("VNDetectHumanRectanglesRequest")
+    # upperBodyOnly is revision 2's (macOS 12, as the segmentation): asked for, rather than left to the
+    # revision a Python built with an older SDK would default to, which would ignore it.
+    _objc.send(humans, "setRevision:", 2, argtypes=(_objc.NSUInteger,), restype=None)
     _objc.send(humans, "setUpperBodyOnly:", False, argtypes=(ctypes.c_bool,), restype=None)
     if vision._perform_on(picture, humans):
         return True

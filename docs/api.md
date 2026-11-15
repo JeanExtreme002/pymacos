@@ -995,6 +995,7 @@ explain how to use each part.
 .. autoexception:: macos.AppNotFoundError
 .. autoexception:: macos.AppLaunchTimeoutError
 .. autoexception:: macos.ShortcutNotFoundError
+.. autoexception:: macos.JavaScriptError
 .. autoexception:: macos.KeychainError
 .. autoexception:: macos.CommandError
 .. autoexception:: macos.CommandTimeoutError

@@ -455,3 +455,7 @@ def test_a_person_is_a_body_in_part_or_else_a_face(monkeypatch, found, person):
     assert macos.image._shows_a_person("picture") is person
     # Any part of a body: Vision's default, a whole upper body, misses a webcam's head and shoulders.
     assert ("VNDetectHumanRectanglesRequest", "setUpperBodyOnly:", (False,)) in sent
+    # Revision 2's flag: asked for, as an older SDK's default revision would ignore it.
+    assert sent.index(("VNDetectHumanRectanglesRequest", "setRevision:", (2,))) < sent.index(
+        ("VNDetectHumanRectanglesRequest", "setUpperBodyOnly:", (False,))
+    )

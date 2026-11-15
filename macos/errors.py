@@ -131,6 +131,10 @@ class ShortcutNotFoundError(CommandError, LookupError):
     """No shortcut in the Shortcuts app has the given name or identifier."""
 
 
+class JavaScriptError(MacOSError):
+    """The JavaScript :func:`macos.browser.run_js` ran raised, in the page: its message is the page's error."""
+
+
 class KeychainError(MacOSError):
     """The Security framework returned an error status (``OSStatus``)."""
 

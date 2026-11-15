@@ -99,16 +99,23 @@ def test_browser_run_js(browsers):
 
 def test_browser_run_js_raises_what_the_script_raised(browsers):
     # The browsers give a missing value for an error, as for undefined: the try block tells them apart.
-    browsers.stdout = "s\0pymacos: the script raised\0TypeError: Cannot read properties of null\n"
+    browsers.stdout = "s[pymacos: the script raised] TypeError: Cannot read properties of null\n"
 
-    with pytest.raises(macos.MacOSError, match=r"^the script raised in Google Chrome: TypeError: Cannot read"):
+    with pytest.raises(macos.JavaScriptError, match=r"^the script raised in Google Chrome: TypeError: Cannot read"):
         macos.browser.run_js("null.x")
 
-    # The JavaScript sent writes the mark with escapes: no NUL travels on stdin.
-    assert b"\0" not in browsers.calls[-1]["input"]
-    assert b"catch (pymacosError) { '\\u0000pymacos: the script raised\\u0000' + String(pymacosError) }" in (
-        browsers.calls[-1]["input"]
-    )
+    # A MacOSError too, as before: told apart from "no browser is running" by its class.
+    assert issubclass(macos.JavaScriptError, macos.MacOSError)
+    sent = browsers.calls[-1]["input"]
+    assert b"catch (pymacosError) { '[pymacos: the script raised] ' + " in sent
+    # String() of the error may itself raise: guarded, so an error never passes for undefined.
+    assert b"try { return String(e) } catch (_) { return Object.prototype.toString.call(e) }" in sent
+
+
+def test_browser_run_js_returns_a_page_text_like_the_mark_only_at_its_start(browsers):
+    browsers.stdout = "sthe page says [pymacos: the script raised] \n"
+
+    assert macos.browser.run_js("text") == "the page says [pymacos: the script raised] "
 
 
 def test_browser_run_js_keeps_a_last_line_comment_out_of_the_catch(browsers):

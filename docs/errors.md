@@ -25,6 +25,7 @@ catches {class}`~macos.PermissionDeniedError`, and `except LookupError` catches
 | {class}`~macos.AppNotFoundError` | No app matches the name |
 | {class}`~macos.AppLaunchTimeoutError` | An app was launched but didn't show up in time (also an {class}`~macos.AppNotFoundError` and a `TimeoutError`) |
 | {class}`~macos.ShortcutNotFoundError` | No shortcut has the name (also a `LookupError` and a `CommandError`) |
+| {class}`~macos.JavaScriptError` | The JavaScript {func}`~macos.browser.run_js` ran raised, in the page: its message is the page's error |
 | {class}`~macos.KeychainError` | The Keychain returned an error (see its `status`) |
 | {class}`~macos.CommandError` | A system command failed, or was killed by a signal (see its `cmd`, `returncode`, negative for a signal, and `stderr`; `str()` and `repr()` name the command only, since its arguments may hold a URL with a token or a dialog's text, but show `stderr` as the command wrote it, which may quote them) |
 | {class}`~macos.CommandTimeoutError` | A system command didn't finish in time and was stopped (also a `TimeoutError`; see its `cmd` and `timeout`: `str()` and `repr()` name the command only) |
