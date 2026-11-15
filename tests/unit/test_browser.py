@@ -293,15 +293,3 @@ def test_browser_tab_actions_refuse_an_app_that_isnt_a_browser(browsers):
         with pytest.raises(ValueError, match="isn't a browser"):
             action()
     assert browsers.calls == []  # nothing ran
-
-
-def test_run_js_finds_a_browser_missing_for_a_moment(browsers, monkeypatch):
-    # Right after it answered the last script, macOS may leave the browser out of the running apps for a
-    # few milliseconds: it isn't taken for quit ("no browser is running") then.
-    chrome = apps.App(name="Google Chrome", bundle_id=None, pid=1, path=None)
-    reads = iter([[], [chrome]])
-    monkeypatch.setattr(apps, "running", lambda **kwargs: next(reads))
-    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
-    browsers.stdout = "s2\n"
-
-    assert macos.browser.run_js("1 + 1", "Google Chrome") == "2"

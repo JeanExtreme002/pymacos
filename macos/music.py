@@ -60,10 +60,7 @@ def _osascript(app: str, script: str) -> str:
 
 
 def _running() -> List[str]:
-    # Settled: a player this module just told something may be missing from the list for a moment.
-    players = set(_BUNDLE_IDS.values())
-    listed = apps._running_settled(lambda found: any(app.bundle_id in players for app in found))
-    identifiers = {app.bundle_id for app in listed}
+    identifiers = {app.bundle_id for app in apps.running()}
     return [player for player in PLAYERS if _BUNDLE_IDS[player] in identifiers]
 
 

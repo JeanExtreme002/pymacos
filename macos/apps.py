@@ -30,7 +30,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
-from typing import Callable, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
@@ -81,11 +81,48 @@ def _workspace() -> int:
     return _objc.send(_objc.cls("NSWorkspace"), "sharedWorkspace")
 
 
+# The pids LaunchServices told were apps'. Right after an app answers an Apple Event (a script that told
+# it something), LaunchServices may not tell so for a few milliseconds (measured: 5 at most), and the
+# app would be taken for quit: a pid seen as an app's, whose process still runs, is asked about again.
+# Only those: the processes that are never apps' (daemons, some of them inside .app bundles) cost nothing.
+_SEEN_AS_APPS: Set[int] = set()
+# The pauses before each question asked again.
+_SECOND_LOOKS = (0.005, 0.01, 0.02)
+
+
 def _handle(pid: int) -> Optional[int]:
     """The ``NSRunningApplication`` for ``pid``, or ``None`` if it isn't an app."""
+    handle = _ask(pid)
+    if handle:
+        _SEEN_AS_APPS.add(pid)
+        return handle
+    if pid in _SEEN_AS_APPS:
+        for pause in _SECOND_LOOKS:
+            if not _alive(pid):
+                break  # it quit: nothing to ask again
+            time.sleep(pause)
+            handle = _ask(pid)
+            if handle:
+                return handle
+        _SEEN_AS_APPS.discard(pid)  # quit, or its pid is another process's now
+    return None
+
+
+def _ask(pid: int) -> Optional[int]:
     return _objc.send(
         _running_application_class(), "runningApplicationWithProcessIdentifier:", pid, argtypes=(ctypes.c_int,)
     )
+
+
+def _alive(pid: int) -> bool:
+    """Whether process ``pid`` exists, whoever it belongs to."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # another user's, running
+    return True
 
 
 def _handles_with_bundle_id(bundle_id: str) -> List[int]:
@@ -236,39 +273,12 @@ def _app(handle: int) -> App:
     )
 
 
-# The pauses before the list of running apps is read again, when an app looked for isn't in it: right
-# after an app answers an Apple Event, LaunchServices may not tell its process is an app for a few
-# milliseconds (measured: 5 at most), and the app is missing from the list meanwhile.
-_SECOND_LOOKS = (0.01, 0.02, 0.04)
-
-
-def _running_settled(found: Callable[[List[App]], bool]) -> List[App]:
-    """
-    :func:`running`, read again after short pauses while ``found`` says what's looked for isn't in it.
-
-    For what checks an app runs right after scripting it (a browser, a player): a missing app is
-    looked for again, a few times within 70 ms, before it's taken for quit. An app that is there costs
-    nothing more.
-    """
-    listed = running()
-    for pause in _SECOND_LOOKS:
-        if found(listed):
-            break
-        time.sleep(pause)
-        listed = running()
-    return listed
-
-
 def running(*, include_background: bool = False) -> List[App]:
     """
     Return the running applications.
 
     By default only regular apps (the ones with a Dock icon) are listed.
     ``include_background=True`` adds menu-bar extras, agents and helpers.
-
-    Right after an app answers an Apple Event (a script that told it
-    something), macOS may leave it out for a few milliseconds: to tell
-    whether it still runs then, look again a moment later.
 
     Raises :class:`~macos.errors.MacOSError` when macOS won't list the
     running processes, as in some sandboxes, rather than say none is running.

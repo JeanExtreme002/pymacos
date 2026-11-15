@@ -305,17 +305,14 @@ def _browser(app: Optional[str]) -> Optional[str]:
     front = apps.frontmost()
     if front is not None and front.name in _KINDS:
         return front.name
-    # Settled: a browser this module just scripted may be missing from the list for a moment.
-    for running in apps._running_settled(lambda listed: any(running.name in _KINDS for running in listed)):
+    for running in apps.running():
         if running.name in _KINDS:
             return running.name
     return None
 
 
 def _is_running(app: str) -> bool:
-    # Settled, as in _browser. Not asked of AppleScript instead: for a browser that isn't installed,
-    # "application X is running" has macOS ask the user where it is.
-    return any(running.name == app for running in apps._running_settled(lambda listed: any(r.name == app for r in listed)))
+    return any(running.name == app for running in apps.running())
 
 
 def tabs(app: Optional[str] = None) -> List[Tab]:

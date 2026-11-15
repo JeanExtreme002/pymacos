@@ -1123,36 +1123,79 @@ def test_get_returns_the_first_of_the_running_apps_its_name_matches(monkeypatch)
     assert list(apps._matches("Missing")) == [] and apps.get("Missing") is None
 
 
-def test_running_settled_looks_again_for_an_app_missing_for_a_moment(monkeypatch):
+@pytest.fixture
+def lookups(monkeypatch):
+    """LaunchServices' answers by pid, in order (None: not an app's), with the pauses taken in between."""
     from macos import apps
 
-    # Right after an app answers an Apple Event, macOS may leave it out of the list for some milliseconds.
-    safari = apps.App("Safari", "com.apple.Safari", 7, None)
-    reads = iter([[], [], [safari]])
-    pauses = []
-    monkeypatch.setattr(apps, "running", lambda: next(reads))
-    monkeypatch.setattr(apps.time, "sleep", pauses.append)
-
-    assert apps._running_settled(lambda listed: safari in listed) == [safari]
-    assert pauses == list(apps._SECOND_LOOKS[:2])
+    state = {"answers": {}, "pauses": [], "alive": set()}
+    monkeypatch.setattr(apps, "_SEEN_AS_APPS", set())
+    monkeypatch.setattr(apps, "_ask", lambda pid: state["answers"][pid].pop(0) if state["answers"][pid] else None)
+    monkeypatch.setattr(apps, "_alive", lambda pid: pid in state["alive"])
+    monkeypatch.setattr(apps.time, "sleep", state["pauses"].append)
+    return state
 
 
-def test_running_settled_costs_nothing_for_an_app_that_is_there(monkeypatch):
+def test_an_app_missed_right_after_an_apple_event_is_asked_about_again(lookups):
     from macos import apps
 
-    safari = apps.App("Safari", "com.apple.Safari", 7, None)
-    monkeypatch.setattr(apps, "running", lambda: [safari])
-    monkeypatch.setattr(apps.time, "sleep", lambda seconds: pytest.fail("paused for an app that was there"))
+    # Seen as an app, then missed for a moment (as right after it answered a script), then answered again.
+    lookups["answers"][7] = ["handle", None, None, "handle"]
+    lookups["alive"].add(7)
 
-    assert apps._running_settled(lambda listed: safari in listed) == [safari]
+    assert apps._handle(7) == "handle"
+    assert apps._handle(7) == "handle"
+    assert lookups["pauses"] == list(apps._SECOND_LOOKS[:2])
 
 
-def test_running_settled_gives_up_on_an_app_that_quit(monkeypatch):
+def test_a_process_never_seen_as_an_app_costs_no_pause(lookups):
     from macos import apps
 
-    reads = []
-    monkeypatch.setattr(apps, "running", lambda: reads.append(1) or [])
-    monkeypatch.setattr(apps.time, "sleep", lambda seconds: None)
+    # A daemon (some live inside .app bundles): never an app's, never asked about again.
+    lookups["answers"][8] = [None, None]
+    lookups["alive"].add(8)
 
-    assert apps._running_settled(lambda listed: bool(listed)) == []
-    assert len(reads) == 1 + len(apps._SECOND_LOOKS)  # within 70 ms, then it's taken for quit
+    assert apps._handle(8) is None
+    assert apps._handle(8) is None
+    assert lookups["pauses"] == []
+
+
+def test_an_app_that_quit_is_not_waited_for(lookups):
+    from macos import apps
+
+    lookups["answers"][9] = ["handle", None]
+
+    assert apps._handle(9) == "handle"
+    assert apps._handle(9) is None  # its process is gone: no pause
+    assert lookups["pauses"] == []
+    assert 9 not in apps._SEEN_AS_APPS
+
+
+def test_a_pid_that_stays_unanswered_is_given_up_once(lookups):
+    from macos import apps
+
+    # Alive, but no longer an app's (its pid went to another process): waited for once, then forgotten.
+    lookups["answers"][10] = ["handle"]
+    lookups["alive"].add(10)
+
+    assert apps._handle(10) == "handle"
+    assert apps._handle(10) is None
+    assert apps._handle(10) is None
+    assert lookups["pauses"] == list(apps._SECOND_LOOKS)
+
+
+def test_an_app_missed_for_a_moment_stays_running_and_in_front(lookups, monkeypatch):
+    from macos import apps
+
+    # running(), frontmost() and the App's own checks all ask by pid: none takes it for quit.
+    monkeypatch.setattr(apps, "_pids", lambda: [11])
+    monkeypatch.setattr(apps, "_app", lambda handle: apps.App("Safari", "com.apple.Safari", 11, None))
+    answers = {"activationPolicy": 0, "isActive": True}
+    monkeypatch.setattr(apps._objc, "send", lambda handle, selector, **kwargs: answers[selector])
+    lookups["answers"][11] = ["handle", None, "handle", None, "handle"]
+    lookups["alive"].add(11)
+
+    assert [app.name for app in apps.running()] == ["Safari"]
+    assert [app.name for app in apps.running()] == ["Safari"]
+    front = apps.frontmost()
+    assert front is not None and front.name == "Safari"
