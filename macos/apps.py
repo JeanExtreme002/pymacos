@@ -30,7 +30,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from functools import lru_cache
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from . import _cf, _libc, _objc, finder, spotlight, system
 from ._libc import ENOATTR as _ENOATTR, XATTR_NOFOLLOW as _XATTR_NOFOLLOW, pids as _pids
@@ -81,15 +81,76 @@ def _workspace() -> int:
     return _objc.send(_objc.cls("NSWorkspace"), "sharedWorkspace")
 
 
+# The pids LaunchServices told were apps'. Right after an app answers an Apple Event (a script that told
+# it something), LaunchServices may not tell so for a few milliseconds (measured: 5 at most), and the
+# app would be taken for quit: a pid seen as an app's, whose process still runs, is asked about again.
+# Only those: the processes that are never apps' (daemons, some of them inside .app bundles) cost nothing.
+_SEEN_AS_APPS: Set[int] = set()
+# The same, for the lookup by bundle identifier, which misses an app as the one by pid does: the pids
+# of the instances seen, by bundle identifier (two copies of an app share one).
+_SEEN_BY_BUNDLE_ID: Dict[str, Set[int]] = {}
+# The pauses before each question asked again.
+_SECOND_LOOKS = (0.005, 0.01, 0.02)
+
+
 def _handle(pid: int) -> Optional[int]:
     """The ``NSRunningApplication`` for ``pid``, or ``None`` if it isn't an app."""
+    handle = _ask(pid)
+    if handle:
+        _SEEN_AS_APPS.add(pid)
+        return handle
+    if pid in _SEEN_AS_APPS:
+        for pause in _SECOND_LOOKS:
+            if not _alive(pid):
+                break  # it quit: nothing to ask again
+            time.sleep(pause)
+            handle = _ask(pid)
+            if handle:
+                return handle
+        _SEEN_AS_APPS.discard(pid)  # quit, or its pid is another process's now
+    return None
+
+
+def _ask(pid: int) -> Optional[int]:
     return _objc.send(
         _running_application_class(), "runningApplicationWithProcessIdentifier:", pid, argtypes=(ctypes.c_int,)
     )
 
 
+def _alive(pid: int) -> bool:
+    """Whether process ``pid`` exists, whoever it belongs to."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # another user's, running
+    return True
+
+
 def _handles_with_bundle_id(bundle_id: str) -> List[int]:
     """The ``NSRunningApplication`` of each live app with ``bundle_id``: one question to LaunchServices, not a scan."""
+    found = _ask_bundle_id(bundle_id)
+    seen = _SEEN_BY_BUNDLE_ID.setdefault(bundle_id, set())
+    # An instance seen before, still running, but not in the answer: perhaps missed for a moment, as by
+    # pid (see _SEEN_AS_APPS). Asked again until it's there; then taken for quit, and forgotten, so the
+    # next lookup costs nothing. The ones whose process is gone aren't waited for.
+    for pause in _SECOND_LOOKS:
+        # A copy: another thread may add to the set meanwhile (_app does), which iterating it would refuse.
+        missing = {pid for pid in tuple(seen) if _alive(pid)} - {_pid(handle) for handle in found}
+        if not missing:
+            break
+        time.sleep(pause)
+        found = _ask_bundle_id(bundle_id)
+    _SEEN_BY_BUNDLE_ID[bundle_id] = {_pid(handle) for handle in found}  # replaced whole, at once
+    return found
+
+
+def _pid(handle: int) -> int:
+    return _objc.send(handle, "processIdentifier", restype=ctypes.c_int)
+
+
+def _ask_bundle_id(bundle_id: str) -> List[int]:
     handles = _objc.nsarray(
         _objc.send(
             _running_application_class(),
@@ -227,10 +288,17 @@ def _launch_date(handle: int) -> Optional[float]:
 
 def _app(handle: int) -> App:
     url = _objc.send(handle, "bundleURL")
+    pid = _pid(handle)
+    bundle_id = _objc.pystring(_objc.send(handle, "bundleIdentifier"))
+    # Every App handed out counts as seen, however it was found (by bundle identifier, say, as open() finds
+    # the one it launched): asked about again if missed for a moment, as one found by pid.
+    _SEEN_AS_APPS.add(pid)
+    if bundle_id:
+        _SEEN_BY_BUNDLE_ID.setdefault(bundle_id, set()).add(pid)
     return App(
         name=_objc.pystring(_objc.send(handle, "localizedName")),
-        bundle_id=_objc.pystring(_objc.send(handle, "bundleIdentifier")),
-        pid=_objc.send(handle, "processIdentifier", restype=ctypes.c_int),
+        bundle_id=bundle_id,
+        pid=pid,
         path=_objc.pystring(_objc.send(url, "path")) if url else None,
         _launched=_launch_date(handle),
     )
