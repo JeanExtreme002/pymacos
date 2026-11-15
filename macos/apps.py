@@ -86,6 +86,8 @@ def _workspace() -> int:
 # app would be taken for quit: a pid seen as an app's, whose process still runs, is asked about again.
 # Only those: the processes that are never apps' (daemons, some of them inside .app bundles) cost nothing.
 _SEEN_AS_APPS: Set[int] = set()
+# The same, for the lookup by bundle identifier, which misses an app as the one by pid does.
+_SEEN_BUNDLE_IDS: Set[str] = set()
 # The pauses before each question asked again.
 _SECOND_LOOKS = (0.005, 0.01, 0.02)
 
@@ -127,6 +129,23 @@ def _alive(pid: int) -> bool:
 
 def _handles_with_bundle_id(bundle_id: str) -> List[int]:
     """The ``NSRunningApplication`` of each live app with ``bundle_id``: one question to LaunchServices, not a scan."""
+    found = _ask_bundle_id(bundle_id)
+    if found:
+        _SEEN_BUNDLE_IDS.add(bundle_id)
+        return found
+    if bundle_id in _SEEN_BUNDLE_IDS:
+        # Seen running: perhaps missed for a moment, as by pid (see _SEEN_AS_APPS). Asked again, then
+        # taken for quit, and forgotten: the next lookup of an app that quit costs nothing.
+        for pause in _SECOND_LOOKS:
+            time.sleep(pause)
+            found = _ask_bundle_id(bundle_id)
+            if found:
+                return found
+        _SEEN_BUNDLE_IDS.discard(bundle_id)
+    return []
+
+
+def _ask_bundle_id(bundle_id: str) -> List[int]:
     handles = _objc.nsarray(
         _objc.send(
             _running_application_class(),
@@ -264,10 +283,17 @@ def _launch_date(handle: int) -> Optional[float]:
 
 def _app(handle: int) -> App:
     url = _objc.send(handle, "bundleURL")
+    pid = _objc.send(handle, "processIdentifier", restype=ctypes.c_int)
+    bundle_id = _objc.pystring(_objc.send(handle, "bundleIdentifier"))
+    # Every App handed out counts as seen, however it was found (by bundle identifier, say, as open() finds
+    # the one it launched): asked about again if missed for a moment, as one found by pid.
+    _SEEN_AS_APPS.add(pid)
+    if bundle_id:
+        _SEEN_BUNDLE_IDS.add(bundle_id)
     return App(
         name=_objc.pystring(_objc.send(handle, "localizedName")),
-        bundle_id=_objc.pystring(_objc.send(handle, "bundleIdentifier")),
-        pid=_objc.send(handle, "processIdentifier", restype=ctypes.c_int),
+        bundle_id=bundle_id,
+        pid=pid,
         path=_objc.pystring(_objc.send(url, "path")) if url else None,
         _launched=_launch_date(handle),
     )

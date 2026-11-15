@@ -1,5 +1,6 @@
 """Unit tests for :mod:`macos.apps`. They run on any platform."""
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -1184,18 +1185,54 @@ def test_a_pid_that_stays_unanswered_is_given_up_once(lookups):
     assert lookups["pauses"] == list(apps._SECOND_LOOKS)
 
 
-def test_an_app_missed_for_a_moment_stays_running_and_in_front(lookups, monkeypatch):
+def test_an_app_missed_for_a_moment_stays_listed_and_running(lookups, monkeypatch):
     from macos import apps
 
-    # running(), frontmost() and the App's own checks all ask by pid: none takes it for quit.
+    # running() and frontmost() list the apps through _handles, and the App's own checks ask by pid too:
+    # none takes it for quit.
     monkeypatch.setattr(apps, "_pids", lambda: [11])
-    monkeypatch.setattr(apps, "_app", lambda handle: apps.App("Safari", "com.apple.Safari", 11, None))
-    answers = {"activationPolicy": 0, "isActive": True}
+    answers = {"activationPolicy": 0, "isTerminated": False}
     monkeypatch.setattr(apps._objc, "send", lambda handle, selector, **kwargs: answers[selector])
+    monkeypatch.setattr(apps._objc, "autorelease_pool", contextlib.nullcontext)
     lookups["answers"][11] = ["handle", None, "handle", None, "handle"]
     lookups["alive"].add(11)
 
-    assert [app.name for app in apps.running()] == ["Safari"]
-    assert [app.name for app in apps.running()] == ["Safari"]
-    front = apps.frontmost()
-    assert front is not None and front.name == "Safari"
+    assert list(apps._handles(include_background=False)) == ["handle"]
+    assert list(apps._handles(include_background=False)) == ["handle"]
+    assert apps.App("Safari", "com.apple.Safari", 11, None).is_running
+
+
+def test_every_app_handed_out_counts_as_seen(monkeypatch):
+    from macos import apps
+
+    # apps.open() finds the app it launched by bundle identifier, not by pid: it's seen all the same.
+    monkeypatch.setattr(apps, "_SEEN_AS_APPS", set())
+    monkeypatch.setattr(apps, "_SEEN_BUNDLE_IDS", set())
+    answers = {"bundleURL": None, "processIdentifier": 12, "bundleIdentifier": "id", "localizedName": "name"}
+    monkeypatch.setattr(apps._objc, "send", lambda handle, selector, **kwargs: answers.get(selector))
+    monkeypatch.setattr(apps._objc, "pystring", lambda value: {"id": "com.apple.Notes", "name": "Notes"}[value])
+    monkeypatch.setattr(apps, "_launch_date", lambda handle: None)
+
+    assert apps._app("handle").pid == 12
+    assert 12 in apps._SEEN_AS_APPS and "com.apple.Notes" in apps._SEEN_BUNDLE_IDS
+
+
+def test_an_app_missed_by_bundle_identifier_is_asked_about_again(monkeypatch):
+    from macos import apps
+
+    pauses = []
+    # Found; missed twice then found; missed for good; asked once more; never seen.
+    answers = [["handle"], [], [], ["handle"], [], [], [], [], [], []]
+    monkeypatch.setattr(apps, "_SEEN_BUNDLE_IDS", set())
+    monkeypatch.setattr(apps, "_ask_bundle_id", lambda bundle_id: answers.pop(0))
+    monkeypatch.setattr(apps.time, "sleep", pauses.append)
+
+    assert apps._handles_with_bundle_id("com.apple.Safari") == ["handle"]
+    assert apps._handles_with_bundle_id("com.apple.Safari") == ["handle"]  # missed twice, then found
+    assert pauses == list(apps._SECOND_LOOKS[:2])
+    pauses.clear()
+    assert apps._handles_with_bundle_id("com.apple.Safari") == []  # quit: given up once
+    assert apps._handles_with_bundle_id("com.apple.Safari") == []  # forgotten: no pause
+    assert pauses == list(apps._SECOND_LOOKS)
+    assert apps._handles_with_bundle_id("never.seen") == []
+    assert pauses == list(apps._SECOND_LOOKS)  # nor for an app never seen
