@@ -23,6 +23,10 @@ def test_name_is_what_a_person_would_call_it():
     close = _element(AXRole="AXButton", AXSubrole="AXCloseButton", AXRoleDescription="close button")
     assert close.name == "close button"
     assert _element(AXRole="AXGroup", AXSubrole="AXApplicationGroup", AXRoleDescription="group").name is None
+    # Rather than by their tooltip.
+    full_screen = _element(AXRole="AXButton", AXSubrole="AXFullScreenButton", AXRoleDescription="full screen button",
+                           AXHelp="this button also has an action to zoom the window")
+    assert full_screen.name == "full screen button"
 
 
 def test_text_loses_its_direction_marks():
@@ -108,6 +112,18 @@ def test_an_open_submenu_is_kept_once():
     assert ui._within([(1, 9)], 3) == [1, 2]
 
 
+def test_a_box_left_out_moves_the_menus_after_it():
+    assert ui._moved_back([(0, 1), (3, 5)], 2) == [(0, 1), (2, 4)]
+
+
+def test_find_puts_the_exact_name_first(monkeypatch):
+    dont, save, save_as = (_element(AXRole="AXButton", AXTitle=title) for title in ("Don't Save", "Save", "Save As…"))
+    monkeypatch.setattr(ui, "_collect", lambda app, what: (None, [dont, save, save_as], False))
+
+    assert [element.name for element in ui.find(name="save")] == ["Save", "Don't Save", "Save As…"]
+    assert [element.name for element in ui.find(role="button")] == ["Don't Save", "Save", "Save As…"]
+
+
 def test_menu_entries_release_every_item(monkeypatch):
     released = []
     monkeypatch.setattr(ui, "_owned_list", lambda menu, attribute: [1, 2, 3])
@@ -130,6 +146,8 @@ def test_menu_paths():
             ui._parse_path(bad)
     assert ui._same("Save As…", "save as...") and ui._same("Export…", "Export")
     assert not ui._same("Save", "Save As…")
+    # Exactly: "..." still stands for "…", but an item isn't the one without it.
+    assert ui._same("Print…", "print...", exactly=True) and not ui._same("Print…", "Print", exactly=True)
 
 
 def test_geometry():

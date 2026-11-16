@@ -137,6 +137,7 @@ _CONTROL_SUBROLES = frozenset(
     {"AXSearchField", "AXSecureTextField", "AXTabButton", "AXToggle", "AXSwitch", "AXCloseButton",
      "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton", "AXSortButton", "AXTextLink"}
 )
+_WINDOW_BUTTONS = frozenset({"AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"})
 #: Roles that hold others, and are never a control themselves, whatever action they advertise.
 _CONTAINERS = frozenset(
     {
@@ -433,9 +434,11 @@ class Element:
                 return text
         if self.role in _TEXTS or self.role in ("AXMenuItem", "AXMenuBarItem"):
             return _text(self.value) if isinstance(self.value, str) else None
+        # A window's close button has no label: what it is says it ("close button"), better than its tooltip.
+        if self.subrole in _WINDOW_BUTTONS:
+            return self.role_description
         if self.help or self.placeholder:
             return self.help or self.placeholder
-        # A window's close button has no label: what it is says it ("close button").
         return self.role_description if self.role in _CONTROLS and self.subrole and self.subrole != "AXUnknown" else None
 
     @property
@@ -546,7 +549,8 @@ class Element:
         if status not in (_SUCCESS, _NO_VALUE, _ATTRIBUTE_UNSUPPORTED):
             _check(status, "read the element's children")
         with _cf.owned(value):
-            return [_make(child, self.app, self.pid) for child in _cf.items(value) if _is_element(child)]
+            web = self._web or self.role == "AXWebArea"
+            return [_make(child, self.app, self.pid, web=web) for child in _cf.items(value) if _is_element(child)]
 
     def text(self) -> str:
         """
@@ -559,8 +563,12 @@ class Element:
         return "\n".join(lines)
 
 
-def _make(element: int, app: str, pid: int) -> Element:
-    """An :class:`Element` for a borrowed ``element``, read now (in one message to its app)."""
+def _make(element: int, app: str, pid: int, *, web: Optional[bool] = None) -> Element:
+    """
+    An :class:`Element` for a borrowed ``element``, read now (in one message to its app).
+
+    ``web`` is whether it's in a web page, looked for above it when not given and when it matters.
+    """
     _ax().AXUIElementSetMessagingTimeout(element, _TIMEOUT)
     status, raw = _read_many(element, _ATTRIBUTES)
     if status == _API_DISABLED:
@@ -570,7 +578,27 @@ def _make(element: int, app: str, pid: int) -> Element:
     finally:
         _cf.release(raw.get("_array"))
     fields["_actions"] = _actions(element)
+    if web is None:  # only a plain box that can be pressed is told apart by it
+        web = "AXPress" in fields["_actions"] and fields.get("AXRole") not in _CONTROLS and _in_web(element)
+    fields["_web"] = web
     return Element(_cf.retain(element), fields, app=app, pid=pid)
+
+
+def _in_web(element: int) -> bool:
+    """Whether ``element`` is in a web page: one of those that hold it is a web area."""
+    held: Optional[int] = None  # the one above, owned, as the climb goes
+    try:
+        for _ in range(_DEEPEST):
+            status, parent = _copy(element if held is None else held, "AXParent")
+            _cf.release(held)
+            held = parent
+            if status != _SUCCESS or not parent:
+                return False
+            if _role(parent) == "AXWebArea":
+                return True
+        return False
+    finally:
+        _cf.release(held)
 
 
 def _fields(raw: Dict[str, Optional[int]]) -> Dict[str, Any]:
@@ -852,8 +880,14 @@ def _walk(
         _cf.release(raw.get("_array"))
         if index is not None and _wraps_controls(found, index):
             _cf.release(found.pop(index)[0])
+            budget.menus = _moved_back(budget.menus, index)
         if menu_start is not None:
             budget.menus.append((menu_start, len(found)))
+
+
+def _moved_back(ranges: Sequence[Tuple[int, int]], index: int) -> List[Tuple[int, int]]:
+    """``ranges`` once the entry at ``index`` is taken out: those after it are one place back."""
+    return [(start - 1, end - 1) if start > index else (start, end) for start, end in ranges]
 
 
 def _entry_is_control(fields: Dict[str, Any]) -> bool:
@@ -932,6 +966,11 @@ def _matches(element: Element, name: Optional[str], role: Optional[str]) -> bool
     return True
 
 
+def _named(element: Element, name: str) -> bool:
+    """Whether ``name`` is the element's whole name, not only a part of it."""
+    return (element.name or "").casefold() == name.casefold().strip()
+
+
 def _collect(app: Union[str, apps.App, None], what: str) -> Tuple[apps.App, List[Element], bool]:
     _require_permission(what)
     target = _app_of(app)
@@ -980,6 +1019,9 @@ def find(
     """
     Return the elements on screen whose name contains ``name`` (ignoring case), of ``role``, top to bottom.
 
+    Those named exactly ``name`` come first: ``name="Save"`` gives the Save
+    button before a "Don't Save" above it.
+
     ::
 
         macos.ui.find("Safari", name="Reload")
@@ -996,7 +1038,10 @@ def find(
     if name is None and role is None:
         raise ValueError("give a name, a role, or both: elements() lists everything")
     _, found, _ = _collect(app, "read the app")
-    return [element for element in found if (element.is_control or _has_text(element)) and _matches(element, name, role)]
+    matching = [element for element in found if (element.is_control or _has_text(element)) and _matches(element, name, role)]
+    if name is not None:  # "Save" before "Don't Save", wherever each is (the sort keeps the order otherwise)
+        matching.sort(key=lambda element: not _named(element, name))
+    return matching
 
 
 def wait_for(
@@ -1280,9 +1325,11 @@ def menu_items(app: Union[str, apps.App, None] = None) -> "builtins.list[MenuIte
     return found
 
 
-def _same(title: str, wanted: str) -> bool:
+def _same(title: str, wanted: str, *, exactly: bool = False) -> bool:
+    """Whether a menu item's title is the one wanted: its ending "…" may be left out, unless ``exactly``."""
     def plain(text: str) -> str:
-        return text.replace("…", "...").casefold().strip().rstrip(".").strip()
+        text = text.replace("…", "...").casefold().strip()
+        return text if exactly else text.rstrip(".").strip()
 
     return plain(title) == plain(wanted)
 
@@ -1323,8 +1370,13 @@ def click_menu_item(path: Union[str, Sequence[str]], *, app: Union[str, apps.App
             for item, fields in _menu_entries(menu, budget):
                 title = _text(fields.get("AXTitle")) or ""
                 titles.append(title)
-                if _same(title, wanted):
+                # "Print" is the item of that title, if there's one, rather than a "Print…" before it.
+                exact = _same(title, wanted, exactly=True)
+                if exact or (match is None and _same(title, wanted)):
+                    if match is not None:
+                        _cf.release(match[0])
                     match = (_cf.retain(item), fields)
+                if exact:
                     break
             if owned_menu:
                 _cf.release(menu)
