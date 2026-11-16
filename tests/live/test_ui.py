@@ -40,6 +40,25 @@ def test_elements_lists_the_window_controls(controls_window):
         assert x <= center_x <= x + width and y <= center_y <= y + height
 
 
+def test_a_table_lists_its_column_headers(controls_window):
+    app = _app_of(controls_window)
+    controls_window.focus()
+
+    # The header isn't one of the table's rows, the only part of a table that's walked otherwise.
+    header = macos.ui.find(app, name="Fruit")
+
+    assert header and header[0].role == "AXButton" and header[0].is_control
+
+
+def test_a_minimized_window_shows_nothing(controls_window):
+    app = _app_of(controls_window)
+    controls_window.minimize()
+
+    found = _until(lambda: macos.ui.elements(app), lambda found: not found)
+
+    assert found == []
+
+
 def test_press_set_value_and_focus(controls_window):
     app = _app_of(controls_window)
     controls_window.focus()

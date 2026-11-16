@@ -162,7 +162,7 @@ _CONTAINERS = frozenset(
 #: Rows and cells are chosen by a click: a control when they're selectable, which they say with AXSelected.
 _SELECTABLE = frozenset({"AXRow", "AXOutlineRow", "AXTableRow"})
 #: What carries text to read, without being a control.
-_TEXTS = frozenset({"AXStaticText", "AXHeading", "AXImage", "AXValueIndicator", "AXProgressIndicator",
+_TEXTS = frozenset({"AXStaticText", "AXHeading", "AXImage", "AXProgressIndicator",
                     "AXLevelIndicator", "AXBusyIndicator"})
 #: What cuts its content to its own frame: what's outside isn't seen.
 _CLIPPING = frozenset({"AXScrollArea", "AXWebArea", "AXTable", "AXOutline", "AXList", "AXBrowser", "AXGrid",
@@ -559,24 +559,24 @@ class Element:
         return "\n".join(lines)
 
 
-def _make(element: int, app: str, pid: int, *, labels: bool = True) -> Element:
+def _make(element: int, app: str, pid: int) -> Element:
     """An :class:`Element` for a borrowed ``element``, read now (in one message to its app)."""
     _ax().AXUIElementSetMessagingTimeout(element, _TIMEOUT)
     status, raw = _read_many(element, _ATTRIBUTES)
     if status == _API_DISABLED:
         _check(status, "read the element")
     try:
-        fields = _fields(raw, labels=labels)
+        fields = _fields(raw)
     finally:
         _cf.release(raw.get("_array"))
     fields["_actions"] = _actions(element)
     return Element(_cf.retain(element), fields, app=app, pid=pid)
 
 
-def _fields(raw: Dict[str, Optional[int]], *, labels: bool) -> Dict[str, Any]:
+def _fields(raw: Dict[str, Optional[int]]) -> Dict[str, Any]:
     fields = {name: _python(value) for name, value in raw.items() if name not in ("_array", "AXChildren", "AXTitleUIElement")}
     label = raw.get("AXTitleUIElement")
-    if labels and label and _is_element(label):
+    if label and _is_element(label):
         status, text = _copy(label, "AXValue")
         with _cf.owned(text):
             fields["_label"] = _cf.to_str(text) if status == _SUCCESS else None
@@ -747,12 +747,17 @@ def _roots(application: int) -> List[Tuple[int, Optional[_Rect]]]:
         frame = _frame_of(window)
         sheets = _children(window, lambda role: role == "AXSheet")
         if sheets:  # a save panel over a document: the document can't be used meanwhile
-            roots.extend((sheet, frame) for sheet in sheets)
+            # By its own frame: a sheet may be wider than the window it's over.
+            roots.extend((sheet, _frame_of(sheet) or frame) for sheet in sheets)
             _cf.release(window)
         else:
             roots.append((window, frame))
     if not roots:  # no window: an app such as the Dock shows itself through its other children
-        roots = [(child, None) for child in _children(application, lambda role: role != "AXMenuBar")]
+        for child in _children(application, lambda role: role != "AXMenuBar"):
+            if _flag(child, "AXMinimized"):  # its windows are among its children too
+                _cf.release(child)
+            else:
+                roots.append((child, None))
     return roots
 
 
@@ -793,7 +798,7 @@ def _walk(
         return
     index = menu_start = None
     try:
-        fields = _fields(raw, labels=True)
+        fields = _fields(raw)
         role = fields.get("AXRole") or ""
         position, size = fields.get("AXPosition"), fields.get("AXSize")
         frame = (position[0], position[1], size[0], size[1]) if position and size else None
@@ -815,6 +820,7 @@ def _walk(
             fields["_web"] = web
             index = len(found)
             found.append((_cf.retain(element), fields))
+        around = clip
         if role in _CLIPPING and frame and frame[2] > 0 and frame[3] > 0:
             clip = _intersection(frame, clip) if clip is not None else frame
             if clip is None:
@@ -825,6 +831,11 @@ def _walk(
         if role in _LONG:
             visible = _copy(element, "AXVisibleRows" if role in ("AXTable", "AXOutline") else "AXVisibleChildren")[1]
             if visible:
+                if role in ("AXTable", "AXOutline"):
+                    # Its column headers aren't rows, and sit above its frame: clipped by what's around it.
+                    with _cf.owned(_copy(element, "AXHeader")[1]) as header:
+                        if header:
+                            _visit(header, around, covers, depth, budget, found, web)
                 with _cf.owned(visible):
                     # Retained for the walk: the array goes when this block ends.
                     held = [_cf.retain(item) for item in _cf.items(visible)]
@@ -1108,12 +1119,12 @@ def _gather_text(element: int, lines: List[str], depth: int, budget: _Budget) ->
         return
     try:
         role = _python(raw.get("AXRole")) or ""
-        texts = [_python(raw.get(name)) for name in ("AXTitle", "AXValue", "AXDescription")]
+        texts = [_text(_python(raw.get(name))) for name in ("AXTitle", "AXValue", "AXDescription")]
         for text in texts:
-            if isinstance(text, str) and text.strip() and (not lines or lines[-1] != text.strip()):
+            if text and (not lines or lines[-1] != text):
                 if role in ("AXStaticText", "AXTextArea", "AXTextField", "AXHeading", "AXLink", "AXButton",
                             "AXCell", "AXMenuItem", "AXCheckBox", "AXRadioButton", "AXImage", "AXWindow", "AXSheet"):
-                    lines.append(text.strip())
+                    lines.append(text)
                     break
         for child in _cf.items(raw.get("AXChildren")):
             if _is_element(child):

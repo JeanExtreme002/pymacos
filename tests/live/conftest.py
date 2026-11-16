@@ -112,7 +112,7 @@ def test_window():
 
 @pytest.fixture
 def controls_window():
-    """Like ``test_window``, with a checkbox ("Remember me"), a text field ("Your name") and a button ("Push")."""
+    """Like ``test_window``, with a checkbox ("Remember me"), a text field ("Your name"), a button ("Push") and a table."""
     yield from _test_window(controls=True)
 
 

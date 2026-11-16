@@ -1,7 +1,7 @@
 """
 A tiny app with one window, for the window tests: python _window_app.py TITLE SECONDS [controls].
 
-With ``controls``, the window holds a checkbox, a text field and a button, for the tests of :mod:`macos.ui`.
+With ``controls``, the window holds a checkbox, a text field, a button and a table, for the tests of :mod:`macos.ui`.
 """
 
 import ctypes
@@ -33,6 +33,16 @@ def _add_controls(window: int) -> None:
     _objc.send(button, "setBezelStyle:", 1, argtypes=(_objc.NSUInteger,), restype=None)  # rounded: a push button
     _objc.send(button, "setTitle:", _objc.nsstring("Push"), argtypes=(_objc.id,), restype=None)
     place(button, 20, 50, 100, 32)
+
+    # A table with a column header and no row, in the scroll view that shows its header.
+    column = _objc.send(_objc.send(_objc.cls("NSTableColumn"), "alloc"), "initWithIdentifier:", _objc.nsstring("fruit"),
+                        argtypes=(_objc.id,))
+    _objc.send(column, "setTitle:", _objc.nsstring("Fruit"), argtypes=(_objc.id,), restype=None)
+    table = _objc.send(_objc.send(_objc.cls("NSTableView"), "alloc"), "init")
+    _objc.send(table, "addTableColumn:", column, argtypes=(_objc.id,), restype=None)
+    scroll = _objc.send(_objc.send(_objc.cls("NSScrollView"), "alloc"), "init")
+    _objc.send(scroll, "setDocumentView:", table, argtypes=(_objc.id,), restype=None)
+    place(scroll, 230, 50, 80, 110)
 
 
 def main(title: str, seconds: float, controls: bool = False) -> None:

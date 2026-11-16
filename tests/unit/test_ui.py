@@ -172,3 +172,13 @@ def test_values_to_set():
 def test_at_checks_the_point():
     with pytest.raises(ValueError, match="finite"):
         macos.ui.at(float("inf"), 0)
+
+
+def test_text_is_gathered_without_direction_marks(monkeypatch):
+    read = {"AXRole": "AXStaticText", "AXValue": "\u200e7\u200e×\u200e6 "}
+    monkeypatch.setattr(ui, "_read_many", lambda element, attributes: (ui._SUCCESS, dict(read)))
+    monkeypatch.setattr(ui, "_python", lambda value: value)
+    monkeypatch.setattr(ui._cf, "items", lambda ref: [])
+    monkeypatch.setattr(ui._cf, "release", lambda ref: None)
+
+    assert _element(AXRole="AXWindow").text() == "7×6"
