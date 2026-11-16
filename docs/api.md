@@ -892,6 +892,31 @@ explain how to use each part.
 .. autofunction:: macos.trackpad.set_tracking_speed
 ```
 
+## macos.ui
+
+```{eval-rst}
+.. module:: macos.ui
+
+.. autofunction:: macos.ui.at
+.. autofunction:: macos.ui.click_menu_item
+.. autoclass:: macos.ui.Element
+   :members: name, center, checked, is_control, press, click, perform, set_value, focus, children, text
+.. autofunction:: macos.ui.elements
+.. autofunction:: macos.ui.find
+.. autofunction:: macos.ui.focused
+.. function:: macos.ui.has_permission()
+
+   The same as :func:`macos.windows.has_permission`: both need the Accessibility permission.
+
+.. function:: macos.ui.request_permission()
+
+   The same as :func:`macos.windows.request_permission`.
+
+.. autoclass:: macos.ui.MenuItem
+.. autofunction:: macos.ui.menu_items
+.. autofunction:: macos.ui.wait_for
+```
+
 ## macos.video
 
 ```{eval-rst}

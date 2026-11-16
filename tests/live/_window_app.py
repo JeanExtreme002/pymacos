@@ -1,4 +1,8 @@
-"""A tiny app with one window, for the window tests: python _window_app.py TITLE SECONDS."""
+"""
+A tiny app with one window, for the window tests: python _window_app.py TITLE SECONDS [controls].
+
+With ``controls``, the window holds a checkbox, a text field, a button and a table, for the tests of :mod:`macos.ui`.
+"""
 
 import ctypes
 import sys
@@ -8,7 +12,40 @@ from macos import _objc
 from macos._system import framework
 
 
-def main(title: str, seconds: float) -> None:
+def _add_controls(window: int) -> None:
+    content = _objc.send(window, "contentView")
+
+    def place(view: int, x: float, y: float, width: float, height: float) -> None:
+        frame = _objc.CGRect(_objc.CGPoint(x, y), _objc.CGSize(width, height))
+        _objc.send(view, "setFrame:", frame, argtypes=(_objc.CGRect,), restype=None)
+        _objc.send(content, "addSubview:", view, argtypes=(_objc.id,), restype=None)
+
+    checkbox = _objc.send(_objc.send(_objc.cls("NSButton"), "alloc"), "init")
+    _objc.send(checkbox, "setButtonType:", 3, argtypes=(_objc.NSUInteger,), restype=None)  # NSButtonTypeSwitch
+    _objc.send(checkbox, "setTitle:", _objc.nsstring("Remember me"), argtypes=(_objc.id,), restype=None)
+    place(checkbox, 20, 140, 200, 24)
+
+    field = _objc.send(_objc.send(_objc.cls("NSTextField"), "alloc"), "init")
+    _objc.send(field, "setPlaceholderString:", _objc.nsstring("Your name"), argtypes=(_objc.id,), restype=None)
+    place(field, 20, 100, 200, 24)
+
+    button = _objc.send(_objc.send(_objc.cls("NSButton"), "alloc"), "init")
+    _objc.send(button, "setBezelStyle:", 1, argtypes=(_objc.NSUInteger,), restype=None)  # rounded: a push button
+    _objc.send(button, "setTitle:", _objc.nsstring("Push"), argtypes=(_objc.id,), restype=None)
+    place(button, 20, 50, 100, 32)
+
+    # A table with a column header and no row, in the scroll view that shows its header.
+    column = _objc.send(_objc.send(_objc.cls("NSTableColumn"), "alloc"), "initWithIdentifier:", _objc.nsstring("fruit"),
+                        argtypes=(_objc.id,))
+    _objc.send(column, "setTitle:", _objc.nsstring("Fruit"), argtypes=(_objc.id,), restype=None)
+    table = _objc.send(_objc.send(_objc.cls("NSTableView"), "alloc"), "init")
+    _objc.send(table, "addTableColumn:", column, argtypes=(_objc.id,), restype=None)
+    scroll = _objc.send(_objc.send(_objc.cls("NSScrollView"), "alloc"), "init")
+    _objc.send(scroll, "setDocumentView:", table, argtypes=(_objc.id,), restype=None)
+    place(scroll, 230, 50, 80, 110)
+
+
+def main(title: str, seconds: float, controls: bool = False) -> None:
     framework("AppKit")
     with _objc.autorelease_pool():
         app = _objc.send(_objc.cls("NSApplication"), "sharedApplication")
@@ -30,6 +67,8 @@ def main(title: str, seconds: float) -> None:
         # Allow full screen, as regular app windows do (NSWindowCollectionBehaviorFullScreenPrimary).
         _objc.send(window, "setCollectionBehavior:", 1 << 7, argtypes=(_objc.NSUInteger,), restype=None)
         _objc.send(window, "setTitle:", _objc.nsstring(title), argtypes=(_objc.id,), restype=None)
+        if controls:
+            _add_controls(window)
         _objc.send(window, "makeKeyAndOrderFront:", None, argtypes=(_objc.id,), restype=None)
         print("ready", flush=True)
         mode = _objc.nsstring("kCFRunLoopDefaultMode")
@@ -55,4 +94,4 @@ def main(title: str, seconds: float) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], float(sys.argv[2]))
+    main(sys.argv[1], float(sys.argv[2]), controls=sys.argv[3:] == ["controls"])

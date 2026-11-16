@@ -12,6 +12,7 @@ itself, so a script can work in one terminal and not in another.
 | {func}`macos.camera.photo`, {func}`macos.camera.record` | Camera (asked the first time) | System Settings › Privacy & Security › Camera |
 | {func}`macos.audio.record`, {func}`~macos.audio.record_until_silence`, {func}`~macos.audio.input_level`, videos with sound | Microphone (asked the first time) | System Settings › Privacy & Security › Microphone |
 | {mod}`macos.windows` | Accessibility | System Settings › Privacy & Security › Accessibility |
+| {mod}`macos.ui` | Accessibility | System Settings › Privacy & Security › Accessibility |
 | {mod}`macos.hotkeys` | Input Monitoring, and Accessibility to keep shortcuts from the app in front | System Settings › Privacy & Security › Input Monitoring |
 | {func}`macos.screen.record` | Screen Recording (and Microphone with `audio=True`) | System Settings › Privacy & Security › Screen & System Audio Recording |
 | {func}`macos.screen.find_text`, {func}`~macos.screen.wait_for_text`, {func}`~macos.screen.color_at`, {meth}`Window.screenshot() <macos.windows.Window.screenshot>` | Screen Recording | System Settings › Privacy & Security › Screen & System Audio Recording |

@@ -107,6 +107,16 @@ def _mostly_sound(path):
 @pytest.fixture
 def test_window():
     """A window of our own, in a helper process, to move around without touching the user's."""
+    yield from _test_window(controls=False)
+
+
+@pytest.fixture
+def controls_window():
+    """Like ``test_window``, with a checkbox ("Remember me"), a text field ("Your name"), a button ("Push") and a table."""
+    yield from _test_window(controls=True)
+
+
+def _test_window(*, controls: bool):
     import subprocess
     import sys
 
@@ -115,7 +125,9 @@ def test_window():
     front = macos.windows.focused()
     title = "pymacos test {}".format(uuid.uuid4().hex[:8])
     helper = Path(__file__).with_name("_window_app.py")
-    process = subprocess.Popen([sys.executable, str(helper), title, "20"], stdout=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        [sys.executable, str(helper), title, "20"] + (["controls"] if controls else []), stdout=subprocess.PIPE, text=True
+    )
     try:
         process.stdout.readline()
         app = next(app for app in macos.apps.running(include_background=True) if app.pid == process.pid)
