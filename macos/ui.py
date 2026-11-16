@@ -26,6 +26,7 @@ import builtins
 import ctypes
 import math
 import time
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
@@ -890,13 +891,18 @@ def _elements_of(application: int) -> Tuple[List[Tuple[int, Dict[str, Any]]], bo
         for root, _ in roots:
             _cf.release(root)
     if budget.menus:  # a pop-up menu is open: nothing else can be used until it closes
-        kept = [entry for start, end in budget.menus for entry in found[start:end]]
-        mine = {element for element, _ in kept}
-        for element, _ in found:
-            if element not in mine:
+        keep = _within(budget.menus, len(found))
+        inside = set(keep)
+        for index, (element, _) in enumerate(found):
+            if index not in inside:
                 _cf.release(element)
-        found = kept
+        found = [found[index] for index in keep]
     return found, budget.cut
+
+
+def _within(ranges: Sequence[Tuple[int, int]], count: int) -> List[int]:
+    """The indexes below ``count`` that ``ranges`` cover, in order and each once: a submenu's lie inside its menu's."""
+    return sorted({index for start, end in ranges for index in range(start, min(end, count))})
 
 
 def _matches(element: Element, name: Optional[str], role: Optional[str]) -> bool:
@@ -1146,7 +1152,7 @@ _FUNCTION_KEYS = {0xF700: "up", 0xF701: "down", 0xF702: "left", 0xF703: "right",
 _FUNCTION_KEYS.update({0xF704 + number: "f{}".format(number + 1) for number in range(20)})
 _SPECIAL_CHARACTERS = {"\r": "return", "\n": "return", "\t": "tab", " ": "space", "\x08": "delete", "\x7f": "delete",
                        "\x1b": "escape", "\x03": "return"}
-_SHIFT, _OPTION, _CONTROL, _NO_COMMAND = 1, 2, 4, 8  # kAXMenuItemModifier...
+_SHIFT, _OPTION, _CONTROL, _NO_COMMAND, _FUNCTION = 1, 2, 4, 8, 16  # kAXMenuItemModifier...
 
 
 def _shortcut(character: Any, modifiers: Any, virtual_key: Any) -> Optional[str]:
@@ -1156,14 +1162,15 @@ def _shortcut(character: Any, modifiers: Any, virtual_key: Any) -> Optional[str]
             key = _SPECIAL_CHARACTERS[character]
         elif ord(character[0]) in _FUNCTION_KEYS:
             key = _FUNCTION_KEYS[ord(character[0])]
-        elif character.isprintable():
-            key = character.lower()
+        elif len(character) == 1 and character.isprintable() and unicodedata.category(character) != "So":
+            key = character.lower()  # not a picture standing for a key that can't be pressed (🎤, 🌐)
     if key is None and isinstance(virtual_key, int) and virtual_key in _VIRTUAL_KEYS:
         key = _VIRTUAL_KEYS[virtual_key]
     if key is None:
         return None
     flags = modifiers if isinstance(modifiers, int) else 0
-    parts = [name for flag, name in ((_CONTROL, "ctrl"), (_OPTION, "option"), (_SHIFT, "shift")) if flags & flag]
+    held = ((_FUNCTION, "fn"), (_CONTROL, "ctrl"), (_OPTION, "option"), (_SHIFT, "shift"))
+    parts = [name for flag, name in held if flags & flag]
     if not flags & _NO_COMMAND:
         parts.append("cmd")
     return "+".join(parts + [key])
@@ -1185,8 +1192,9 @@ def _menu_bar(app: Union[str, apps.App, None]) -> Tuple[apps.App, int, int]:
 
 def _menu_entries(menu: int, budget: _Budget) -> Iterator[Tuple[int, Dict[str, Any]]]:
     """The items of a menu bar or a menu, each borrowed with its fields: the separators left out."""
-    for item in _owned_list(menu, "AXChildren"):
-        try:
+    items = _owned_list(menu, "AXChildren")
+    try:
+        for item in items:
             if not budget.spend():
                 return
             status, raw = _read_many(item, _MENU_ATTRIBUTES)
@@ -1197,7 +1205,8 @@ def _menu_entries(menu: int, budget: _Budget) -> Iterator[Tuple[int, Dict[str, A
             title = _text(fields.get("AXTitle"))
             if status == _SUCCESS and title:
                 yield item, fields
-        finally:
+    finally:  # all of them, the ones never reached included: the walk may stop at a match
+        for item in items:
             _cf.release(item)
 
 

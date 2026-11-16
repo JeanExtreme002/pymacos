@@ -94,6 +94,32 @@ def test_shortcut():
     assert ui._shortcut("\uf704", 1 | 8, None) == "shift+f1"
     assert ui._shortcut("\x1b", 2, None) == "option+cmd+escape"  # Force Quit
     assert ui._shortcut(None, 0, None) is None and ui._shortcut("", 0, 9999) is None
+    assert ui._shortcut("F", 8 | 16, None) == "fn+f"  # Enter Full Screen: the fn (🌐) key, without ⌘
+    assert ui._shortcut("F", 16 | 4, None) == "fn+ctrl+cmd+f"
+    # A picture of a key that can't be pressed isn't a shortcut to give.
+    assert ui._shortcut("🎤", 8, 128) is None and ui._shortcut("🌐", 8, 128) is None
+    assert ui._shortcut("ç", 0, None) == "cmd+ç"
+
+
+def test_an_open_submenu_is_kept_once():
+    # The submenu's range (found first) lies inside its menu's: each element once, in reading order.
+    assert ui._within([(2, 4), (0, 5)], 5) == [0, 1, 2, 3, 4]
+    assert ui._within([(1, 3), (4, 6)], 7) == [1, 2, 4, 5]
+    assert ui._within([(1, 9)], 3) == [1, 2]
+
+
+def test_menu_entries_release_every_item(monkeypatch):
+    released = []
+    monkeypatch.setattr(ui, "_owned_list", lambda menu, attribute: [1, 2, 3])
+    monkeypatch.setattr(ui, "_read_many", lambda item, attributes: (ui._SUCCESS, {"AXTitle": "Item {}".format(item)}))
+    monkeypatch.setattr(ui, "_python", lambda value: value)
+    monkeypatch.setattr(ui._cf, "release", lambda ref: released.append(ref) if ref else None)
+
+    entries = ui._menu_entries(0, ui._Budget())
+    assert next(entries) == (1, {"AXTitle": "Item 1"})
+    entries.close()  # as a walk that stops at its match
+
+    assert released == [1, 2, 3]
 
 
 def test_menu_paths():
