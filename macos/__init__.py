@@ -3,7 +3,7 @@
 """
 pymacos (imported as ``macos``) — a Pythonic interface to macOS.
 
-Notifications, clipboard, webcam and microphone, keyboard and mouse, windows,
+Notifications, clipboard, webcam and microphone, keyboard and mouse, windows, what apps show,
 hotkeys, menu bar icons, appearance, apps, Keychain, speech, screenshots, power, Shortcuts,
 Finder, volume, Spotlight, dialogs, system info, Bluetooth, music, browser
 tabs, system events, scheduled scripts, OCR, document scanning, images,
@@ -37,6 +37,7 @@ videos, PDFs and language detection in one import, with no dependencies::
     macos.mouse.click(300, 400)
     macos.bluetooth.devices()
     macos.windows.tile_all(gap=8)
+    macos.ui.find("Mail", name="Send", role="button")[0].press()
     macos.hotkeys.wait("ctrl+option+s")
     macos.video.convert("screen.mov", "screen.mp4", quality="medium")
     macos.music.now_playing()
@@ -110,6 +111,7 @@ if TYPE_CHECKING:  # what the lazy loading below provides, spelled out for type 
         system,
         time_machine,
         trackpad,
+        ui,
         video,
         vision,
         volume,
@@ -123,7 +125,7 @@ if TYPE_CHECKING:  # what the lazy loading below provides, spelled out for type 
 # The submodules, and the shortcuts to their most used functions, are imported
 # on first use (PEP 562): ``import macos`` stays fast, and a script that only
 # sends a notification never loads the PDF or video code.
-_SUBMODULES = frozenset({"appearance", "apps", "audio", "auth", "bluetooth", "browser", "camera", "clipboard", "defaults", "dialog", "dock", "document", "events", "finder", "hotkeys", "image", "keyboard", "keychain", "language", "maps", "menubar", "mouse", "music", "network", "notifications", "pdf", "power", "printer", "schedule", "screen", "settings", "shortcuts", "sound", "speech", "spotlight", "system", "time_machine", "trackpad", "video", "vision", "volume", "windows"})
+_SUBMODULES = frozenset({"appearance", "apps", "audio", "auth", "bluetooth", "browser", "camera", "clipboard", "defaults", "dialog", "dock", "document", "events", "finder", "hotkeys", "image", "keyboard", "keychain", "language", "maps", "menubar", "mouse", "music", "network", "notifications", "pdf", "power", "printer", "schedule", "screen", "settings", "shortcuts", "sound", "speech", "spotlight", "system", "time_machine", "trackpad", "ui", "video", "vision", "volume", "windows"})
 _SHORTCUTS = {
     "open": "launch",
     "open_with": "launch",
@@ -196,6 +198,7 @@ __all__ = [
     "system",
     "time_machine",
     "trackpad",
+    "ui",
     "video",
     "vision",
     "volume",
